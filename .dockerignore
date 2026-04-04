@@ -1,0 +1,12 @@
+.git
+**/.venv
+**/venv
+**/node_modules
+**/.next
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+**/.mypy_cache
+**/dist
+**/htmlcov
+**/.coverage
