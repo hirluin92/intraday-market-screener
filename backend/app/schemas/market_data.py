@@ -27,8 +27,15 @@ class MarketDataIngestResponse(BaseModel):
     exchange: str
     symbols: list[str]
     timeframes: list[str]
-    candles_fetched: int
-    candles_inserted: int
+    candles_received: int = Field(
+        description="OHLCV rows kept after validation (excludes open/incomplete last candle per batch).",
+    )
+    incomplete_candles_dropped: int = Field(
+        description="How many trailing candles were excluded as still-open periods (one per non-empty batch).",
+    )
+    rows_inserted: int = Field(
+        description="PostgreSQL driver rowcount for bulk INSERT ... ON CONFLICT DO NOTHING; not a strict audit count.",
+    )
 
 
 class CandleRow(BaseModel):

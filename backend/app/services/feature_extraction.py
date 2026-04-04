@@ -124,9 +124,12 @@ async def extract_features(
     )
 
     rows_to_upsert: list[dict[str, Any]] = []
-    candles_seen = 0
+    candles_read = 0
+    candles_featured = 0
 
     for ex, sym, tf in series:
+        # Load one extra oldest candle so the first candle in the requested window can use
+        # pct_return_1 / volume_ratio_vs_prev vs the true prior bar (not only intra-window prev).
         stmt = (
             select(Candle)
             .where(
@@ -135,24 +138,38 @@ async def extract_features(
                 Candle.timeframe == tf,
             )
             .order_by(Candle.timestamp.asc())
-            .limit(request.limit)
+            .limit(request.limit + 1)
         )
         result = await session.execute(stmt)
         candles = list(result.scalars().all())
+        candles_read += len(candles)
 
-        prev: Candle | None = None
-        for candle in candles:
-            candles_seen += 1
+        if not candles:
+            continue
+
+        if len(candles) == 1:
+            # Only one bar in range: no prior context in DB; still emit one feature row.
+            feat = _compute_features_for_candle(candles[0], None)
+            if feat is not None:
+                rows_to_upsert.append(feat)
+                candles_featured += 1
+            continue
+
+        # candles[0] is look-back only; features are computed for candles[1:] (up to `limit` bars).
+        prev = candles[0]
+        for candle in candles[1:]:
             feat = _compute_features_for_candle(candle, prev)
             prev = candle
             if feat is not None:
                 rows_to_upsert.append(feat)
+                candles_featured += 1
 
     if not rows_to_upsert:
         return FeatureExtractResponse(
             series_processed=len(series),
-            candles_processed=candles_seen,
-            features_upserted=0,
+            candles_read=candles_read,
+            candles_featured=candles_featured,
+            rows_upserted=0,
         )
 
     stmt_ins = insert(CandleFeature).values(rows_to_upsert)
@@ -177,10 +194,12 @@ async def extract_features(
     result = await session.execute(stmt_ins)
     await session.commit()
 
-    upserted = result.rowcount if result.rowcount is not None else len(rows_to_upsert)
+    rc = result.rowcount
+    rows_upserted = int(rc) if rc is not None and rc >= 0 else 0
 
     return FeatureExtractResponse(
         series_processed=len(series),
-        candles_processed=candles_seen,
-        features_upserted=upserted,
+        candles_read=candles_read,
+        candles_featured=candles_featured,
+        rows_upserted=rows_upserted,
     )

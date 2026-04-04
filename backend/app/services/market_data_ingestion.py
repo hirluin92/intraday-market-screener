@@ -95,7 +95,8 @@ class MarketDataIngestionService:
         exchange_class = getattr(ccxt, self.exchange_id)
         exchange = exchange_class({"enableRateLimit": True, "options": {"defaultType": "spot"}})
 
-        candles_fetched = 0
+        candles_received = 0
+        incomplete_candles_dropped = 0
         rows: list[dict] = []
 
         try:
@@ -109,7 +110,15 @@ class MarketDataIngestionService:
                     if not batch:
                         continue
 
-                    candles_fetched += len(batch)
+                    # CCXT returns candles oldest-first. The last row is the current period, which is
+                    # still open (OHLC not final). Saving it would be overwritten on the next fetch;
+                    # exclude it before persistence.
+                    batch = batch[:-1]
+                    incomplete_candles_dropped += 1
+                    if not batch:
+                        continue
+
+                    candles_received += len(batch)
                     last_ts_ms: int | None = None
 
                     for o in batch:
@@ -128,21 +137,23 @@ class MarketDataIngestionService:
         finally:
             await exchange.close()
 
-        candles_inserted = 0
+        rows_inserted = 0
         if rows:
             stmt = insert(Candle).values(rows)
             stmt = stmt.on_conflict_do_nothing(
                 constraint="uq_candles_exchange_symbol_timeframe_timestamp",
             )
             result = await session.execute(stmt)
-            # rowcount is indicative for bulk INSERT ... ON CONFLICT (see driver notes).
-            candles_inserted = result.rowcount or 0
+            rc = result.rowcount
+            # asyncpg/psycopg bulk INSERT rowcount is not always a precise "inserted rows" count.
+            rows_inserted = int(rc) if rc is not None and rc >= 0 else 0
             await session.commit()
 
         return MarketDataIngestResponse(
             exchange=self.exchange_id,
             symbols=list(symbols),
             timeframes=list(timeframes),
-            candles_fetched=candles_fetched,
-            candles_inserted=candles_inserted,
+            candles_received=candles_received,
+            incomplete_candles_dropped=incomplete_candles_dropped,
+            rows_inserted=rows_inserted,
         )
