@@ -28,6 +28,12 @@ export type OpportunityRow = {
   timestamp: string;
   context_timestamp: string;
   pattern_timestamp: string | null;
+  /** Barre tra pattern e ultimo contesto (stesso TF). */
+  pattern_age_bars?: number | null;
+  /** True se l’età supera la soglia per il timeframe (pattern «vecchio»). */
+  pattern_stale?: boolean;
+  /** Soglia in barre per questo TF (coerente con pattern_stale). */
+  pattern_stale_threshold_bars?: number;
   market_regime: string;
   volatility_regime: string;
   candle_expansion: string;

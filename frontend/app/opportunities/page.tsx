@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   fetchOpportunities,
   postPipelineRefresh,
@@ -23,14 +23,34 @@ import {
   FONTE_PIANO_LEGENDA,
   fontePianoListLabel,
   fontePianoListTitle,
+  decisionRationaleTitleAttr,
   displayOperationalDecisionListLabel,
-  operationalDecisionListCellClass,
+  displayPatternAgeListLabel,
+  operationalDecisionBadgePillClass,
+  patternAgeListCellClass,
+  patternAgeListTooltip,
   signalAlignmentBadgeClass,
   timeframeFilterLabel,
   TOOLTIP_ALLINEAMENTO_SEGNALE_IT,
   TOOLTIP_DIR_PATTERN_IT,
   TOOLTIP_DIR_SCORE_IT,
 } from "@/lib/displayLabels";
+import { OpportunitySummaryBar } from "@/components/OpportunitySummaryBar";
+import {
+  computeOpportunityEconomicSnapshot,
+  economicTierSortRank,
+  rowMatchesEconomicFilter,
+} from "@/lib/opportunityEconomicSnapshot";
+import {
+  loadOpportunitiesEconomicPrefs,
+  saveOpportunitiesEconomicPrefs,
+  type OpportunitiesEconomicPrefs,
+} from "@/lib/opportunitiesEconomicPrefs";
+import {
+  DEFAULT_POSITION_SIZING_INPUT,
+  loadPositionSizingInput,
+  type PositionSizingUserInput,
+} from "@/lib/positionSizing";
 
 /** Filtri lista opportunità (multi-mercato: include 1d / 5m Yahoo). */
 const TIMEFRAME_FILTER_OPTIONS = ["", "1m", "5m", "15m", "1h", "1d"] as const;
@@ -58,6 +78,18 @@ function formatStrength(v: string | number | null | undefined): string {
   if (v === null || v === undefined) return "—";
   if (typeof v === "number") return String(v);
   return v;
+}
+
+function formatEur(n: number | null | undefined): string {
+  if (n == null || !Number.isFinite(n)) return "—";
+  return n.toLocaleString("it-IT", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function economicVerdictCellClass(label: string): string {
+  if (label === "Conveniente") return "font-medium text-emerald-800 dark:text-emerald-300";
+  if (label === "Borderline") return "font-medium text-amber-800 dark:text-amber-300";
+  if (label === "Non conveniente") return "font-medium text-red-800 dark:text-red-300";
+  return "text-zinc-500";
 }
 
 /** Righe fallback meno enfatiche delle varianti promosse (UI). */
@@ -126,6 +158,39 @@ export default function OpportunitiesPage() {
   const [pipeMessage, setPipeMessage] = useState<string | null>(null);
   const [pipeError, setPipeError] = useState<string | null>(null);
 
+  const [sizingInput, setSizingInput] = useState<PositionSizingUserInput>(DEFAULT_POSITION_SIZING_INPUT);
+  const [econPrefs, setEconPrefs] = useState<OpportunitiesEconomicPrefs>({
+    filterMode: "all",
+    economicRankingEnabled: false,
+  });
+
+  useEffect(() => {
+    setSizingInput(loadPositionSizingInput());
+    setEconPrefs(loadOpportunitiesEconomicPrefs());
+  }, []);
+
+  useEffect(() => {
+    saveOpportunitiesEconomicPrefs(econPrefs);
+  }, [econPrefs]);
+
+  const displayRows = useMemo(() => {
+    const enriched = rows.map((row) => ({
+      row,
+      snap: computeOpportunityEconomicSnapshot(row.trade_plan, sizingInput),
+    }));
+    const filtered = enriched.filter((e) => rowMatchesEconomicFilter(e.snap, econPrefs.filterMode));
+    const sorted = [...filtered];
+    if (econPrefs.economicRankingEnabled) {
+      sorted.sort((a, b) => {
+        const ra = a.snap ? economicTierSortRank(a.snap.simple.verdictTier) : 99;
+        const rb = b.snap ? economicTierSortRank(b.snap.simple.verdictTier) : 99;
+        if (ra !== rb) return ra - rb;
+        return b.row.final_opportunity_score - a.row.final_opportunity_score;
+      });
+    }
+    return sorted;
+  }, [rows, sizingInput, econPrefs.filterMode, econPrefs.economicRankingEnabled]);
+
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
@@ -138,6 +203,7 @@ export default function OpportunitiesPage() {
         decision: filterDecisionRef.current.trim() || undefined,
       });
       setRows(data.opportunities);
+      setSizingInput(loadPositionSizingInput());
     } catch (e) {
       setRows([]);
       setError(e instanceof Error ? e.message : String(e));
@@ -328,6 +394,59 @@ export default function OpportunitiesPage() {
         )}
       </section>
 
+      <section
+        className="rounded-lg border border-emerald-200/90 bg-emerald-50/40 p-4 dark:border-emerald-900/50 dark:bg-emerald-950/25"
+        aria-label="Convenienza economica (anteprima)"
+      >
+        <h2 className="text-sm font-medium text-emerald-950 dark:text-emerald-100">
+          Convenienza per il tuo conto
+        </h2>
+        <p className="mt-1 text-xs text-emerald-900/90 dark:text-emerald-200/85">
+          Usa gli stessi parametri salvati nel browser del dettaglio serie (capitale, rischio %, fee,
+          slippage, max % conto, leva). Il filtro non chiama il backend: ricalcola in tempo reale sul trade
+          plan già presente in ogni riga.
+        </p>
+        <div className="mt-3 flex flex-wrap items-end gap-4">
+          <label className="flex flex-col gap-1 text-xs">
+            <span className="font-medium text-emerald-950 dark:text-emerald-100">Filtro economico</span>
+            <select
+              className="min-w-[14rem] rounded border border-emerald-300 bg-white px-2 py-1.5 text-sm dark:border-emerald-800 dark:bg-zinc-900"
+              value={econPrefs.filterMode}
+              onChange={(e) =>
+                setEconPrefs((p) => ({
+                  ...p,
+                  filterMode: e.target.value as OpportunitiesEconomicPrefs["filterMode"],
+                }))
+              }
+            >
+              <option value="all">Tutte (nessun filtro economico)</option>
+              <option value="good_only">Solo convenienti</option>
+              <option value="good_or_marginal">Convenienti + borderline (nascondi non convenienti)</option>
+            </select>
+          </label>
+          <label className="flex items-center gap-2 text-xs">
+            <input
+              type="checkbox"
+              className="rounded border-emerald-400"
+              checked={econPrefs.economicRankingEnabled}
+              onChange={(e) =>
+                setEconPrefs((p) => ({ ...p, economicRankingEnabled: e.target.checked }))
+              }
+            />
+            <span className="font-medium text-emerald-950 dark:text-emerald-100">
+              Priorità convenienza economica (poi score tecnico)
+            </span>
+          </label>
+          <button
+            type="button"
+            className="rounded border border-emerald-300 bg-white px-2 py-1.5 text-xs dark:border-emerald-800 dark:bg-zinc-900"
+            onClick={() => setSizingInput(loadPositionSizingInput())}
+          >
+            Ricarica impostazioni conto dal browser
+          </button>
+        </div>
+      </section>
+
       <section className="flex flex-wrap items-end gap-3" aria-label="Filtri">
         <label className="flex flex-col gap-1 text-xs">
           <span className="font-medium text-zinc-700 dark:text-zinc-300">
@@ -424,6 +543,10 @@ export default function OpportunitiesPage() {
         </button>
       </section>
 
+      {!loading && !error && displayRows.length > 0 && (
+        <OpportunitySummaryBar rows={displayRows.map((e) => e.row)} />
+      )}
+
       {loading && (
         <div
           className="rounded-lg border border-dashed border-zinc-300 p-8 text-center text-sm text-zinc-600 dark:border-zinc-600 dark:text-zinc-400"
@@ -449,7 +572,14 @@ export default function OpportunitiesPage() {
         </div>
       )}
 
-      {!loading && !error && rows.length > 0 && (
+      {!loading && !error && rows.length > 0 && displayRows.length === 0 && (
+        <div className="rounded-lg border border-amber-200 bg-amber-50 p-6 text-center text-sm text-amber-950 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-100">
+          Nessuna riga passa il filtro economico con i parametri attuali. Prova «Tutte» o rivedi capitale /
+          costi nel dettaglio serie.
+        </div>
+      )}
+
+      {!loading && !error && displayRows.length > 0 && (
         <div className="overflow-x-auto rounded-lg border border-zinc-200 dark:border-zinc-800">
           <p
             className="border-b border-zinc-200 bg-zinc-50/90 px-3 py-2 text-xs text-zinc-600 dark:border-zinc-800 dark:bg-zinc-900/40 dark:text-zinc-400"
@@ -474,9 +604,13 @@ export default function OpportunitiesPage() {
             <span title={FONTE_PIANO_LEGENDA.watchlist}>Watchlist</span> = variante con
             affidabilità media;{" "}
             <span title={FONTE_PIANO_LEGENDA.fallback}>Fallback standard</span> = motore base
-            senza variante affidabile per le regole live.
+            senza variante affidabile per le regole live.{" "}
+            <span className="font-medium text-zinc-700 dark:text-zinc-300">
+              Decisione:
+            </span>{" "}
+            passa il mouse sul badge per una sintesi della motivazione.
           </p>
-          <table className="w-full min-w-[144rem] border-collapse text-left text-sm">
+          <table className="w-full min-w-[168rem] border-collapse text-left text-sm">
             <thead>
               <tr className="border-b border-zinc-200 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900/60">
                 <th className="sticky left-0 z-20 min-w-[8rem] border-r border-zinc-200 bg-zinc-50 px-3 py-2 font-medium shadow-[4px_0_12px_-6px_rgba(0,0,0,0.12)] dark:border-zinc-700 dark:bg-zinc-950">
@@ -506,6 +640,18 @@ export default function OpportunitiesPage() {
                 <th className="px-3 py-2 font-medium">Bias dir.</th>
                 <th className="px-3 py-2 font-medium">Score screener</th>
                 <th className="px-3 py-2 font-medium">Score finale</th>
+                <th
+                  className="min-w-[7rem] px-3 py-2 font-medium"
+                  title="Da anteprima sizing con il tuo capitale (dettaglio serie)"
+                >
+                  Conv. econ.
+                </th>
+                <th className="min-w-[5rem] px-3 py-2 font-medium tabular-nums" title="Notional stimato">
+                  Puntata €
+                </th>
+                <th className="min-w-[5rem] px-3 py-2 font-medium tabular-nums" title="Utile netto TP1 stimato">
+                  TP1 netto
+                </th>
                 <th className="px-3 py-2 font-medium">Livello finale</th>
                 <th className="px-3 py-2 font-medium">Etichetta</th>
                 <th
@@ -520,6 +666,12 @@ export default function OpportunitiesPage() {
                   title={TOOLTIP_DIR_PATTERN_IT}
                 >
                   Dir. pattern
+                </th>
+                <th
+                  className="min-w-[7rem] px-3 py-2 font-medium"
+                  title="Passa sulla cella: età in barre, soglia TF, esito recente o datato."
+                >
+                  Età pat.
                 </th>
                 <th
                   className="cursor-help px-3 py-2 font-medium"
@@ -544,13 +696,19 @@ export default function OpportunitiesPage() {
                 <th className="px-3 py-2 font-medium">Forza pattern</th>
                 <th className="px-3 py-2 font-medium">Orario ctx</th>
                 <th className="px-3 py-2 font-medium">Orario pattern</th>
+                <th
+                  className="sticky right-0 z-20 min-w-[9rem] border-l border-zinc-200 bg-zinc-50 px-3 py-2 font-medium shadow-[-8px_0_12px_-6px_rgba(0,0,0,0.06)] dark:border-zinc-700 dark:bg-zinc-950"
+                  title="Semaforo operativo. Hover sul badge per la motivazione (prime righe)."
+                >
+                  Decisione
+                </th>
               </tr>
             </thead>
             <tbody>
-              {rows.map((r) => (
+              {displayRows.map(({ row: r, snap }) => (
                 <tr
                   key={`${r.exchange}-${r.symbol}-${r.timeframe}-${r.context_timestamp}`}
-                  className="cursor-pointer border-b border-zinc-100 hover:bg-zinc-50 dark:border-zinc-800/80 dark:hover:bg-zinc-900/50"
+                  className={opportunityRowClass(r)}
                   onClick={() =>
                     router.push(
                       seriesDetailHref(r.symbol, r.timeframe, r.exchange, {
@@ -616,6 +774,17 @@ export default function OpportunitiesPage() {
                   >
                     {r.final_opportunity_score.toFixed(1)}
                   </td>
+                  <td className={`px-3 py-2 text-xs ${snap ? economicVerdictCellClass(snap.simple.verdictLabel) : ""}`}>
+                    {snap?.preview.ok ? snap.simple.verdictLabel : "—"}
+                  </td>
+                  <td className="px-3 py-2 text-xs tabular-nums text-zinc-700 dark:text-zinc-300">
+                    {snap?.preview.ok ? formatEur(snap.preview.notionalPositionValue) : "—"}
+                  </td>
+                  <td className="px-3 py-2 text-xs tabular-nums text-zinc-700 dark:text-zinc-300">
+                    {snap?.preview.ok && snap.preview.estimatedNetProfitAtTp1 != null
+                      ? formatEur(snap.preview.estimatedNetProfitAtTp1)
+                      : "—"}
+                  </td>
                   <td className="px-3 py-2 text-xs">
                     {displayFinalOpportunityLabel(r.final_opportunity_label)}
                   </td>
@@ -633,6 +802,12 @@ export default function OpportunitiesPage() {
                   </td>
                   <td className="px-3 py-2">
                     {displayEnumLabel(r.latest_pattern_direction)}
+                  </td>
+                  <td
+                    className={`whitespace-nowrap px-3 py-2 text-xs tabular-nums ${patternAgeListCellClass(r.pattern_stale)}`}
+                    title={patternAgeListTooltip(r)}
+                  >
+                    {displayPatternAgeListLabel(r)}
                   </td>
                   <td className="px-3 py-2">
                     <AllineamentoSegnaleBadge row={r} />
@@ -670,9 +845,12 @@ export default function OpportunitiesPage() {
                     {formatTs(r.pattern_timestamp ?? undefined)}
                   </td>
                   <td
-                    className={`sticky right-0 z-10 min-w-[9rem] border-l border-zinc-200 bg-[var(--background)] px-3 py-2 text-xs shadow-[-8px_0_12px_-6px_rgba(0,0,0,0.06)] dark:border-zinc-700 dark:bg-zinc-950`}
+                    className="sticky right-0 z-10 min-w-[9rem] border-l border-zinc-200 bg-[var(--background)] px-3 py-2 text-xs shadow-[-8px_0_12px_-6px_rgba(0,0,0,0.06)] dark:border-zinc-700 dark:bg-zinc-950"
+                    title={decisionRationaleTitleAttr(r)}
                   >
-                    <span className={operationalDecisionListCellClass(r.operational_decision)}>
+                    <span
+                      className={`inline-flex items-center rounded-md px-2 py-0.5 text-xs font-medium ${operationalDecisionBadgePillClass(r.operational_decision)}`}
+                    >
                       {displayOperationalDecisionListLabel(r.operational_decision)}
                     </span>
                   </td>

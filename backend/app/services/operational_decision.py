@@ -14,6 +14,17 @@ from app.services.opportunity_final_score import compute_signal_alignment
 OperationalDecision = Literal["operable", "monitor", "discard"]
 
 
+def _fallback_is_missing_data(r: OpportunityRow) -> bool:
+    """
+    True se il fallback è dovuto a dati assenti (nessun bucket), non a variante respinta.
+
+    - no_pattern / no_variant_bucket → storico non disponibile → di solito monitor, non discard
+    - variant_rejected / watchlist_insufficient_sample → dati presenti ma insufficienti → discard
+    """
+    fbr = (r.trade_plan_fallback_reason or "").strip()
+    return fbr in ("no_pattern", "no_variant_bucket", "")
+
+
 def _weak_timeframe_history(r: OpportunityRow) -> bool:
     """Storico TF debole: esclude operatività diretta."""
     if not r.latest_pattern_name:
@@ -52,15 +63,24 @@ def compute_operational_decision_and_rationale(
             "Evitare operatività aggressiva fino a miglioramento qualità storica.",
         ]
 
-    # --- Operabile: promossa + alert + allineato + TF OK ---
-    if (
+    # --- Operabile: promossa + alert + allineato + TF OK (+ pattern non datato) ---
+    operable_core = (
         src == "variant_backtest"
         and st == "promoted"
         and r.alert_candidate
         and align == "aligned"
         and has_pattern
         and r.pattern_timeframe_quality_ok is True
-    ):
+    )
+    if operable_core and r.pattern_stale:
+        age = r.pattern_age_bars
+        age_txt = f"{age} barre sul TF {r.timeframe}" if age is not None else f"sul TF {r.timeframe}"
+        return "monitor", [
+            "Setup promossa + alert + allineamento OK, ma l’ultimo pattern è datato rispetto al contesto.",
+            f"Ritardo stimato: {age_txt} (oltre soglia staleness).",
+            "Degradato a «da monitorare»: attendere pattern più recente o conferme aggiuntive.",
+        ]
+    if operable_core:
         lines = [
             "Pattern allineato con il bias dello score.",
             "Storico sul timeframe considerato OK.",
@@ -98,9 +118,15 @@ def compute_operational_decision_and_rationale(
                 "Piano da motore base: nessuna variante validata per le regole live.",
                 "Alert presente ma senza supporto variant backtest sui livelli.",
             ]
+        if _fallback_is_missing_data(r):
+            return "monitor", [
+                "Nessun dato storico sufficiente per questo bucket (varianti non calcolate o assenti).",
+                "Assenza di dati non equivale a segnale negativo: valutare contesto manualmente.",
+                "Preferire conferme prima di operare senza livelli da variant backtest.",
+            ]
         return "discard", [
-            "Nessuna variante affidabile applicata; solo fallback del motore base.",
-            "Segnale non sufficiente per alert o condizioni prudenziali non rispettate.",
+            "Variante backtest respinta o campione insufficiente per uso live.",
+            "Segnale non supportato da storico affidabile sul bucket: evitare operatività aggressiva.",
         ]
 
     # --- Allineamento misto ---

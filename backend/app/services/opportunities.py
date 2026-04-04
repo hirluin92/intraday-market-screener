@@ -35,6 +35,10 @@ from app.services.operational_decision import (
     compute_operational_decision_and_rationale,
     map_decision_filter_param,
 )
+from app.services.pattern_staleness import (
+    compute_pattern_staleness_fields,
+    stale_threshold_bars,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -223,6 +227,13 @@ async def list_opportunities(
             pattern_quality_label=pq_label,
             pattern_timeframe_quality_ok=tf_ok,
         )
+        pat_ts = p.timestamp if p is not None else None
+        age_bars, pat_stale = compute_pattern_staleness_fields(
+            ctx.timestamp,
+            pat_ts,
+            ctx.timeframe,
+        )
+        pat_stale_thresh = stale_threshold_bars(ctx.timeframe)
         out.append(
             OpportunityRow(
                 asset_type=ctx.asset_type,
@@ -233,7 +244,10 @@ async def list_opportunities(
                 market_metadata=ctx.market_metadata,
                 timestamp=ctx.timestamp,
                 context_timestamp=ctx.timestamp,
-                pattern_timestamp=p.timestamp if p is not None else None,
+                pattern_timestamp=pat_ts,
+                pattern_age_bars=age_bars,
+                pattern_stale=pat_stale,
+                pattern_stale_threshold_bars=pat_stale_thresh,
                 market_regime=ctx.market_regime,
                 volatility_regime=ctx.volatility_regime,
                 candle_expansion=ctx.candle_expansion,

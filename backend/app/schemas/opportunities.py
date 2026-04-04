@@ -35,6 +35,26 @@ class OpportunityRow(BaseModel):
         default=None,
         description="Timestamp of the latest CandlePattern row for this series, if any.",
     )
+    pattern_age_bars: int | None = Field(
+        default=None,
+        description=(
+            "Barre di ritardo tra pattern_timestamp e context_timestamp sullo stesso TF "
+            "(0 = allineato alla barra di contesto). Null se nessun pattern o TF non parsabile."
+        ),
+    )
+    pattern_stale: bool = Field(
+        default=False,
+        description=(
+            "True se pattern_age_bars supera la soglia per il timeframe (pattern vecchio vs contesto)."
+        ),
+    )
+    pattern_stale_threshold_bars: int = Field(
+        default=5,
+        description=(
+            "Soglia in barre per questo timeframe (stessa usata per pattern_stale); "
+            "allineata a STALE_THRESHOLD_BARS_BY_TIMEFRAME nel backend."
+        ),
+    )
     market_regime: str
     volatility_regime: str
     candle_expansion: str

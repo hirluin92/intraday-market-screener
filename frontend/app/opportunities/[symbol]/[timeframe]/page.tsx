@@ -29,9 +29,12 @@ import {
   signalAlignmentBadgeClass,
   tradePlanFallbackReasonIt,
   displayOperationalDecisionBadgeShort,
+  displayPatternAgeVsThresholdLine,
   operationalDecisionBadgeClass,
+  patternAgeListTooltip,
 } from "@/lib/displayLabels";
 import { SeriesCandleChart } from "@/components/SeriesCandleChart";
+import { TradePlanPositionSizingCard } from "@/components/TradePlanPositionSizingCard";
 
 const ROW_LIMIT = 50;
 
@@ -389,6 +392,19 @@ function SeriesDetailInner() {
                       {displayEnumLabel(snapshot.latest_pattern_direction)}
                     </strong>
                   </span>
+                  {snapshot.latest_pattern_name ? (
+                    <span title={patternAgeListTooltip(snapshot)}>
+                      Età vs contesto ({snapshot.timeframe}):{" "}
+                      <strong className="tabular-nums">
+                        {displayPatternAgeVsThresholdLine(snapshot)}
+                      </strong>
+                      {snapshot.pattern_stale ? (
+                        <span className="ml-2 inline-block rounded bg-amber-500/90 px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-amber-950 dark:bg-amber-600 dark:text-amber-50">
+                          Pattern datato
+                        </span>
+                      ) : null}
+                    </span>
+                  ) : null}
                   {align != null && (
                     <span>
                       Allineamento:{" "}
@@ -564,6 +580,7 @@ function SeriesDetailInner() {
                         {snapshot.trade_plan.invalidation_note}
                       </p>
                     ) : null}
+                    <TradePlanPositionSizingCard tradePlan={snapshot.trade_plan} />
                   </div>
                 ) : null}
                 <p className="text-xs text-zinc-500">

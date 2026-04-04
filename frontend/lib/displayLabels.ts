@@ -274,3 +274,93 @@ export function operationalDecisionListCellClass(code: string | null | undefined
       return "text-zinc-600 dark:text-zinc-400";
   }
 }
+
+/** Badge pill per colonna Decisione in tabella lista (più leggibile della sola tinta testo). */
+export function operationalDecisionBadgePillClass(code: string | null | undefined): string {
+  switch (code) {
+    case "operable":
+      return "bg-emerald-100 text-emerald-900 ring-1 ring-emerald-300 dark:bg-emerald-950/60 dark:text-emerald-200 dark:ring-emerald-800";
+    case "monitor":
+      return "bg-amber-100 text-amber-900 ring-1 ring-amber-300 dark:bg-amber-950/50 dark:text-amber-200 dark:ring-amber-800";
+    case "discard":
+      return "bg-zinc-200 text-zinc-700 ring-1 ring-zinc-300 dark:bg-zinc-800 dark:text-zinc-400 dark:ring-zinc-700";
+    default:
+      return "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400";
+  }
+}
+
+/** Prima riga (o prime due) di decision_rationale per attributo title / tooltip in lista. */
+export function decisionRationaleTitleAttr(r: {
+  operational_decision?: string;
+  decision_rationale?: string[];
+}): string {
+  const lines = r.decision_rationale ?? [];
+  if (lines.length > 0) return lines.slice(0, 2).join(" · ");
+  return displayOperationalDecisionListLabel(r.operational_decision);
+}
+
+const PATTERN_STALE_TOOLTIP =
+  "Ritardo in barre rispetto all’ultimo contesto sullo stesso timeframe. " +
+  "Soglie tipiche (backend): 1m→10, 5m→8, 15m→5, 1h→3, 1d→2 barre; modificabili in pattern_staleness.py. " +
+  "Se datato, il semaforo non resta «Operabile» anche con promossa + alert.";
+
+/** Riga dettaglio: «N barre / soglia T» (TF mostrato a parte nella serie). */
+export function displayPatternAgeVsThresholdLine(r: {
+  pattern_age_bars?: number | null;
+  pattern_stale_threshold_bars?: number;
+  latest_pattern_name?: string | null;
+}): string {
+  if (r.latest_pattern_name == null || String(r.latest_pattern_name).trim() === "") {
+    return "";
+  }
+  const th = r.pattern_stale_threshold_bars ?? 5;
+  const n = r.pattern_age_bars;
+  if (n == null) return `— / soglia ${th}`;
+  return `${n} barre / soglia ${th}`;
+}
+
+/** Tooltip colonna lista Età pat.: età, soglia TF, esito recente/datato. */
+export function patternAgeListTooltip(r: {
+  timeframe?: string;
+  pattern_age_bars?: number | null;
+  pattern_stale?: boolean;
+  pattern_stale_threshold_bars?: number;
+  latest_pattern_name?: string | null;
+}): string {
+  const tf = r.timeframe ?? "—";
+  const th = r.pattern_stale_threshold_bars ?? 5;
+  if (r.latest_pattern_name == null || String(r.latest_pattern_name).trim() === "") {
+    return "Nessun pattern rilevato.";
+  }
+  const n = r.pattern_age_bars;
+  if (n == null) {
+    return `Età: non calcolabile · Soglia TF ${tf}: ${th} barre · Esito: —`;
+  }
+  const esito = r.pattern_stale
+    ? "datato (oltre soglia)"
+    : "recente (entro soglia)";
+  return `Età: ${n} barre · Soglia TF ${tf}: ${th} barre · Esito: ${esito}`;
+}
+
+/** Testo compatto colonna lista «età pattern». */
+export function displayPatternAgeListLabel(r: {
+  pattern_age_bars?: number | null;
+  latest_pattern_name?: string | null;
+}): string {
+  if (r.latest_pattern_name == null || String(r.latest_pattern_name).trim() === "") {
+    return "—";
+  }
+  const n = r.pattern_age_bars;
+  if (n == null) return "—";
+  if (n === 0) return "0 barre";
+  return `${n} barre fa`;
+}
+
+export function patternAgeListCellClass(stale: boolean | undefined): string {
+  if (stale) {
+    return "font-medium text-amber-800 dark:text-amber-300";
+  }
+  return "text-zinc-600 dark:text-zinc-400";
+}
+
+export { PATTERN_STALE_TOOLTIP };
