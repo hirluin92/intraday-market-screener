@@ -1,8 +1,11 @@
 """
-MVP additive screener score (v1).
+MVP screener score: structural opportunity + mirrored directional legs.
 
-Replaceable later with ML or rule engine: keep public entrypoint `score_snapshot`
-and dimension weights in one place.
+Structural dimensions (market regime, volatility, candle expansion) are direction-agnostic.
+Direction is scored twice: a long-leaning leg and a short-leaning leg using mirrored
+weights on ``direction_bias``. The reported score is the stronger leg; ``score_label``
+combines strength band with ``score_direction`` so a strong bearish screen reads
+``strong_bearish``, not merely ``strong``.
 """
 
 from __future__ import annotations
@@ -25,31 +28,23 @@ class SnapshotForScoring:
     direction_bias: str
 
 
-def score_snapshot(snapshot: SnapshotForScoring) -> tuple[int, str]:
-    """
-    Simple additive score in [0, 12]: each dimension contributes 1–3 points.
+@dataclass(frozen=True, slots=True)
+class ScoringResult:
+    """Composite screener output for API rows."""
 
-    Rationale (MVP, long-bias intraday screener):
-    - market_regime: trend > range (directional opportunity).
-    - volatility_regime: high > normal > low (room to move; low = chop/sleep).
-    - candle_expansion: expansion > normal > compression (energy vs squeeze).
-    - direction_bias: bullish > neutral > bearish for long-leaning book.
+    screener_score: int
+    score_label: str
+    score_direction: str  # bullish | bearish | neutral
 
-    score_label bands (tunable):
-    - strong: 10–12
-    - moderate: 7–9
-    - mild: 4–6
-    - weak: 0–3
-    """
+
+def _structural_points(snapshot: SnapshotForScoring) -> int:
+    """Shared 0–9: regime + volatility + expansion (no direction)."""
     points = 0
-
-    # market_regime
     if snapshot.market_regime == "trend":
         points += 3
     elif snapshot.market_regime == "range":
         points += 1
 
-    # volatility_regime
     if snapshot.volatility_regime == "high":
         points += 3
     elif snapshot.volatility_regime == "normal":
@@ -57,7 +52,6 @@ def score_snapshot(snapshot: SnapshotForScoring) -> tuple[int, str]:
     elif snapshot.volatility_regime == "low":
         points += 1
 
-    # candle_expansion
     if snapshot.candle_expansion == "expansion":
         points += 3
     elif snapshot.candle_expansion == "normal":
@@ -65,19 +59,28 @@ def score_snapshot(snapshot: SnapshotForScoring) -> tuple[int, str]:
     elif snapshot.candle_expansion == "compression":
         points += 1
 
-    # direction_bias
-    if snapshot.direction_bias == "bullish":
-        points += 3
-    elif snapshot.direction_bias == "neutral":
-        points += 2
-    elif snapshot.direction_bias == "bearish":
-        points += 1
-
-    label = _score_label(points)
-    return points, label
+    return points
 
 
-def _score_label(points: int) -> str:
+def _direction_bonus_long(direction_bias: str) -> int:
+    """Long leg: reward bullish > neutral > bearish."""
+    if direction_bias == "bullish":
+        return 3
+    if direction_bias == "neutral":
+        return 2
+    return 1
+
+
+def _direction_bonus_short(direction_bias: str) -> int:
+    """Short leg: reward bearish > neutral > bullish."""
+    if direction_bias == "bearish":
+        return 3
+    if direction_bias == "neutral":
+        return 2
+    return 1
+
+
+def _band(points: int) -> str:
     if points >= 10:
         return "strong"
     if points >= 7:
@@ -85,3 +88,35 @@ def _score_label(points: int) -> str:
     if points >= 4:
         return "mild"
     return "weak"
+
+
+def score_snapshot(snapshot: SnapshotForScoring) -> ScoringResult:
+    """
+    Two additive scores in [0, 12]: ``score_long`` and ``score_short`` share structural
+    points (0–9) and add mirrored direction bonuses (0–3).
+
+    - Dominant leg sets ``screener_score`` and ``score_direction``.
+    - Ties map to ``neutral`` (choppy / no clear directional edge at this resolution).
+    - ``score_label`` is ``{band}_{direction}``, e.g. ``strong_bearish``, ``mild_neutral``.
+    """
+    structural = _structural_points(snapshot)
+    score_long = structural + _direction_bonus_long(snapshot.direction_bias)
+    score_short = structural + _direction_bonus_short(snapshot.direction_bias)
+
+    if score_long > score_short:
+        direction = "bullish"
+        score = score_long
+    elif score_short > score_long:
+        direction = "bearish"
+        score = score_short
+    else:
+        direction = "neutral"
+        score = score_long
+
+    band = _band(score)
+    label = f"{band}_{direction}"
+    return ScoringResult(
+        screener_score=score,
+        score_label=label,
+        score_direction=direction,
+    )

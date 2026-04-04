@@ -11,6 +11,8 @@ async def list_stored_patterns(
     *,
     symbol: str | None,
     exchange: str | None,
+    provider: str | None = None,
+    asset_type: str | None = None,
     timeframe: str | None,
     pattern_name: str | None,
     limit: int,
@@ -19,6 +21,10 @@ async def list_stored_patterns(
     stmt = select(CandlePattern).order_by(CandlePattern.timestamp.desc()).limit(limit)
     if exchange is not None:
         stmt = stmt.where(CandlePattern.exchange == exchange)
+    if provider is not None:
+        stmt = stmt.where(CandlePattern.provider == provider)
+    if asset_type is not None:
+        stmt = stmt.where(CandlePattern.asset_type == asset_type)
     if symbol is not None:
         stmt = stmt.where(CandlePattern.symbol == symbol)
     if timeframe is not None:
@@ -34,6 +40,8 @@ async def list_latest_pattern_per_series(
     *,
     symbol: str | None,
     exchange: str | None,
+    provider: str | None = None,
+    asset_type: str | None = None,
     timeframe: str | None,
 ) -> list[CandlePattern]:
     """
@@ -43,6 +51,10 @@ async def list_latest_pattern_per_series(
     conditions = []
     if exchange is not None:
         conditions.append(CandlePattern.exchange == exchange)
+    if provider is not None:
+        conditions.append(CandlePattern.provider == provider)
+    if asset_type is not None:
+        conditions.append(CandlePattern.asset_type == asset_type)
     if symbol is not None:
         conditions.append(CandlePattern.symbol == symbol)
     if timeframe is not None:

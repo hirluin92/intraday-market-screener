@@ -5,7 +5,7 @@ from app.services.context_query import list_latest_context_per_series, list_stor
 from app.services.context_extraction import extract_context
 from app.services.feature_extraction import extract_features
 from app.services.market_data_ingestion import MarketDataIngestionService
-from app.services.screener_scoring import SnapshotForScoring, score_snapshot
+from app.services.screener_scoring import ScoringResult, SnapshotForScoring, score_snapshot
 
 __all__ = [
     "MarketDataIngestionService",
@@ -15,5 +15,6 @@ __all__ = [
     "list_stored_candles",
     "list_stored_contexts",
     "score_snapshot",
+    "ScoringResult",
     "SnapshotForScoring",
 ]

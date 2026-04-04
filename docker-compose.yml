@@ -41,6 +41,8 @@ services:
     volumes:
       - ./frontend:/app
       - /app/node_modules
+      # Avoid mounting host .next into Linux (stale Turbopack manifest → 404 on new routes).
+      - frontend_next_cache:/app/.next
     depends_on:
       - backend
     environment:
@@ -48,3 +50,4 @@ services:
 
 volumes:
   postgres_data:
+  frontend_next_cache:

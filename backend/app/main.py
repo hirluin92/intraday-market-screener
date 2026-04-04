@@ -2,18 +2,27 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
 from app.api.v1.router import api_router
 from app.core.config import settings
+from app.core.logging_config import configure_application_logging
 from app.db.bootstrap import create_tables
 from app.db.session import AsyncSessionLocal, engine
+from app.scheduler.pipeline_scheduler import (
+    shutdown_pipeline_scheduler,
+    start_pipeline_scheduler,
+)
 
 logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    configure_application_logging()
+    logger.info("application startup begin")
+
     # MVP: create missing tables via SQLAlchemy metadata (no Alembic migrations yet).
     await create_tables(engine)
     try:
@@ -23,7 +32,13 @@ async def lifespan(app: FastAPI):
     except Exception:
         logger.exception("database startup check failed")
         raise
+
+    logger.info("scheduler startup invoked")
+    start_pipeline_scheduler()
+
     yield
+
+    shutdown_pipeline_scheduler()
     await engine.dispose()
 
 
@@ -34,6 +49,13 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
         docs_url="/docs" if settings.environment != "production" else None,
         redoc_url="/redoc" if settings.environment != "production" else None,
+    )
+    application.add_middleware(
+        CORSMiddleware,
+        allow_origins=settings.cors_origins_list,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
     )
     application.include_router(api_router, prefix="/api/v1")
     return application

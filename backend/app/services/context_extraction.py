@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.candle_context import CandleContext
 from app.models.candle_feature import CandleFeature
 from app.schemas.context import ContextExtractRequest, ContextExtractResponse
+from app.services.context_thresholds import thresholds_for_timeframe
 
 
 def _f(x: Any) -> float:
@@ -31,6 +32,7 @@ async def _distinct_series(
     session: AsyncSession,
     *,
     exchange: str | None,
+    provider: str | None,
     symbol: str | None,
     timeframe: str | None,
 ) -> list[tuple[str, str, str]]:
@@ -38,6 +40,8 @@ async def _distinct_series(
     conditions = []
     if exchange is not None:
         conditions.append(CandleFeature.exchange == exchange)
+    if provider is not None:
+        conditions.append(CandleFeature.provider == provider)
     if symbol is not None:
         conditions.append(CandleFeature.symbol == symbol)
     if timeframe is not None:
@@ -52,25 +56,27 @@ async def _distinct_series(
 def _classify_context(
     current: CandleFeature,
     window: list[CandleFeature],
+    *,
+    timeframe: str,
 ) -> dict[str, str]:
     """
-    Heuristics (MVP):
+    Heuristics (MVP); numeric cutoffs come from ``thresholds_for_timeframe`` (see
+    ``context_thresholds.py``).
 
     market_regime — trend vs range:
-      - "trend" if mean absolute pct_return_1 over the window exceeds a small threshold
-        (sustained directional movement in % terms), else "range".
+      - "trend" if mean absolute pct_return_1 over the window exceeds timeframe-specific
+        thresholds (optionally reinforced by volume participation), else "range".
 
     volatility_regime — low / normal / high:
       - Compare current range_size to the median range_size in the window.
-        Below ~0.7x median → low; above ~1.3x → high; else normal.
 
     candle_expansion — compression / normal / expansion:
       - Compare current range_size to the mean range_size in the window.
-        Below ~0.75x → compression; above ~1.25x → expansion; else normal.
 
     direction_bias — bullish / bearish / neutral:
-      - Use current bar: is_bullish, close_position_in_range, and pct_return_1 sign/magnitude.
+      - Current bar: is_bullish, close_position_in_range, pct_return_1 (thresholds per TF).
     """
+    t = thresholds_for_timeframe(timeframe)
     ranges = [_f(f.range_size) for f in window if _f(f.range_size) > 0]
     cur_range = _f(current.range_size)
 
@@ -79,18 +85,18 @@ def _classify_context(
 
     # Volatility vs median range in window
     vol_ratio = cur_range / med_r if med_r > 0 else 1.0
-    if vol_ratio < 0.7:
+    if vol_ratio < t.vol_low_ratio:
         volatility_regime = "low"
-    elif vol_ratio > 1.3:
+    elif vol_ratio > t.vol_high_ratio:
         volatility_regime = "high"
     else:
         volatility_regime = "normal"
 
     # Expansion vs mean range (same bar, different baseline)
     exp_ratio = cur_range / mean_r if mean_r > 0 else 1.0
-    if exp_ratio < 0.75:
+    if exp_ratio < t.exp_low_ratio:
         candle_expansion = "compression"
-    elif exp_ratio > 1.25:
+    elif exp_ratio > t.exp_high_ratio:
         candle_expansion = "expansion"
     else:
         candle_expansion = "normal"
@@ -103,8 +109,9 @@ def _classify_context(
     mean_abs_pct = sum(pcts) / len(pcts) if pcts else 0.0
     vol_ratios = [_f(f.volume_ratio_vs_prev) for f in window if f.volume_ratio_vs_prev is not None]
     mean_vol_ratio = sum(vol_ratios) / len(vol_ratios) if vol_ratios else 1.0
-    # Percent points (e.g. 0.05 ≈ 0.05% average absolute move per bar in the window).
-    if mean_abs_pct > 0.05 or (mean_abs_pct > 0.03 and mean_vol_ratio > 1.2):
+    if mean_abs_pct > t.trend_abs_pct_high or (
+        mean_abs_pct > t.trend_abs_pct_med and mean_vol_ratio > t.trend_volume_ratio
+    ):
         market_regime = "trend"
     else:
         market_regime = "range"
@@ -112,13 +119,13 @@ def _classify_context(
     # Direction on the *current* bar only (MVP)
     pr = _f(current.pct_return_1) if current.pct_return_1 is not None else 0.0
     cp = _f(current.close_position_in_range)
-    if current.is_bullish and cp >= 0.55:
+    if current.is_bullish and cp >= t.dir_cp_bull:
         direction_bias = "bullish"
-    elif (not current.is_bullish) and cp <= 0.45:
+    elif (not current.is_bullish) and cp <= t.dir_cp_bear:
         direction_bias = "bearish"
-    elif pr > 0.02:
+    elif pr > t.dir_pr:
         direction_bias = "bullish"
-    elif pr < -0.02:
+    elif pr < -t.dir_pr:
         direction_bias = "bearish"
     else:
         direction_bias = "neutral"
@@ -138,6 +145,7 @@ async def extract_context(
     series = await _distinct_series(
         session,
         exchange=request.exchange,
+        provider=request.provider,
         symbol=request.symbol,
         timeframe=request.timeframe,
     )
@@ -165,13 +173,16 @@ async def extract_context(
             window = features[start : i + 1]
             if not window:
                 continue
-            labels = _classify_context(feat, window)
+            labels = _classify_context(feat, window, timeframe=feat.timeframe)
             rows_to_upsert.append(
                 {
                     "candle_feature_id": feat.id,
+                    "asset_type": feat.asset_type,
+                    "provider": feat.provider,
                     "symbol": feat.symbol,
                     "exchange": feat.exchange,
                     "timeframe": feat.timeframe,
+                    "market_metadata": feat.market_metadata,
                     "timestamp": feat.timestamp,
                     **labels,
                 }
@@ -189,9 +200,12 @@ async def extract_context(
     stmt_ins = stmt_ins.on_conflict_do_update(
         constraint="uq_candle_contexts_candle_feature_id",
         set_={
+            "asset_type": excluded.asset_type,
+            "provider": excluded.provider,
             "symbol": excluded.symbol,
             "exchange": excluded.exchange,
             "timeframe": excluded.timeframe,
+            "market_metadata": excluded.market_metadata,
             "timestamp": excluded.timestamp,
             "market_regime": excluded.market_regime,
             "volatility_regime": excluded.volatility_regime,

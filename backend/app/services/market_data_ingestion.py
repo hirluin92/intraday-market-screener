@@ -6,13 +6,18 @@ import ccxt.async_support as ccxt
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.market_identity import (
+    DEFAULT_ASSET_TYPE_CRYPTO,
+    DEFAULT_PROVIDER_BINANCE,
+)
+from app.core.timeframes import ALLOWED_TIMEFRAMES as DEFAULT_TIMEFRAMES_TUPLE
 from app.models.candle import Candle
 from app.schemas.market_data import MarketDataIngestRequest, MarketDataIngestResponse
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_SYMBOLS = ("BTC/USDT", "ETH/USDT")
-DEFAULT_TIMEFRAMES = ("1m", "5m", "15m", "1h")
+DEFAULT_TIMEFRAMES = DEFAULT_TIMEFRAMES_TUPLE
 
 ALLOWED_SYMBOLS = frozenset(DEFAULT_SYMBOLS)
 ALLOWED_TIMEFRAMES = frozenset(DEFAULT_TIMEFRAMES)
@@ -58,9 +63,12 @@ def _parse_ohlcv_row(
 
     return (
         {
+            "asset_type": DEFAULT_ASSET_TYPE_CRYPTO,
+            "provider": DEFAULT_PROVIDER_BINANCE,
             "symbol": symbol,
             "exchange": exchange_id,
             "timeframe": timeframe,
+            "market_metadata": None,
             "timestamp": _ms_to_utc_datetime(ts_ms_int),
             "open": _to_decimal(o_open),
             "high": _to_decimal(high),
@@ -73,7 +81,12 @@ def _parse_ohlcv_row(
 
 
 class MarketDataIngestionService:
-    """Fetches OHLCV from Binance via CCXT and persists candles (MVP)."""
+    """
+    Ingestione OHLCV crypto spot via ccxt (Binance di default).
+
+    Popola ``asset_type``/``provider`` coerenti con :mod:`app.core.market_identity`.
+    Altri provider (azioni/ETF) potranno scrivere le stesse tabelle con valori diversi.
+    """
 
     exchange_id: str = "binance"
 
@@ -151,6 +164,7 @@ class MarketDataIngestionService:
 
         return MarketDataIngestResponse(
             exchange=self.exchange_id,
+            provider=DEFAULT_PROVIDER_BINANCE,
             symbols=list(symbols),
             timeframes=list(timeframes),
             candles_received=candles_received,

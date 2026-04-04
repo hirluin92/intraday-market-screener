@@ -72,9 +72,12 @@ def _compute_features_for_candle(
 
     return {
         "candle_id": candle.id,
+        "asset_type": candle.asset_type,
+        "provider": candle.provider,
         "symbol": candle.symbol,
         "exchange": candle.exchange,
         "timeframe": candle.timeframe,
+        "market_metadata": candle.market_metadata,
         "timestamp": candle.timestamp,
         "body_size": body_size,
         "range_size": range_size,
@@ -91,6 +94,7 @@ async def _distinct_series(
     session: AsyncSession,
     *,
     exchange: str | None,
+    provider: str | None,
     symbol: str | None,
     timeframe: str | None,
 ) -> list[tuple[str, str, str]]:
@@ -98,6 +102,8 @@ async def _distinct_series(
     conditions = []
     if exchange is not None:
         conditions.append(Candle.exchange == exchange)
+    if provider is not None:
+        conditions.append(Candle.provider == provider)
     if symbol is not None:
         conditions.append(Candle.symbol == symbol)
     if timeframe is not None:
@@ -115,10 +121,10 @@ async def extract_features(
     session: AsyncSession,
     request: FeatureExtractRequest,
 ) -> FeatureExtractResponse:
-    exchange = request.exchange
     series = await _distinct_series(
         session,
-        exchange=exchange,
+        exchange=request.exchange,
+        provider=request.provider,
         symbol=request.symbol,
         timeframe=request.timeframe,
     )
@@ -177,9 +183,12 @@ async def extract_features(
     stmt_ins = stmt_ins.on_conflict_do_update(
         constraint="uq_candle_features_candle_id",
         set_={
+            "asset_type": excluded.asset_type,
+            "provider": excluded.provider,
             "symbol": excluded.symbol,
             "exchange": excluded.exchange,
             "timeframe": excluded.timeframe,
+            "market_metadata": excluded.market_metadata,
             "timestamp": excluded.timestamp,
             "body_size": excluded.body_size,
             "range_size": excluded.range_size,

@@ -11,7 +11,12 @@ from app.schemas.context import (
     ContextListResponse,
     ContextRow,
 )
-from app.schemas.features import FeatureExtractRequest, FeatureExtractResponse
+from app.schemas.features import (
+    FeatureExtractRequest,
+    FeatureExtractResponse,
+    FeatureRow,
+    FeaturesListResponse,
+)
 from app.schemas.patterns import (
     PatternExtractRequest,
     PatternExtractResponse,
@@ -24,13 +29,16 @@ from app.schemas.market_data import (
     MarketDataIngestRequest,
     MarketDataIngestResponse,
 )
+from app.schemas.timeframe_fields import OptionalAllMarketsTimeframe
 from app.services.candle_query import list_stored_candles
 from app.services.context_extraction import extract_context
 from app.services.context_query import list_stored_contexts
 from app.services.feature_extraction import extract_features
+from app.services.feature_query import list_stored_features
 from app.services.pattern_extraction import extract_patterns
 from app.services.pattern_query import list_stored_patterns
 from app.services.market_data_ingestion import MarketDataIngestionService
+from app.services.yahoo_finance_ingestion import YahooFinanceIngestionService
 
 logger = logging.getLogger(__name__)
 
@@ -41,15 +49,23 @@ router = APIRouter(prefix="/market-data", tags=["market-data"])
 async def get_candles(
     symbol: str | None = Query(
         default=None,
-        description="Filter by trading pair (e.g. BTC/USDT). Omit for recent candles across symbols.",
+        description="Filter by instrument (e.g. BTC/USDT, SPY). Omit for recent candles across symbols.",
     ),
-    exchange: str = Query(
-        default="binance",
-        description="Exchange id (matches ingestion). Defaults to binance.",
-    ),
-    timeframe: str | None = Query(
+    exchange: str | None = Query(
         default=None,
-        description="Filter by timeframe (e.g. 1m). Omit for all timeframes.",
+        description="Venue id (e.g. binance, YAHOO_US). Omit to include all venues.",
+    ),
+    provider: str | None = Query(
+        default=None,
+        description="Data provider id (e.g. binance, yahoo_finance). Omit to include all providers.",
+    ),
+    asset_type: str | None = Query(
+        default=None,
+        description="Filter by asset class (crypto, stock, etf, index). Omit for all.",
+    ),
+    timeframe: OptionalAllMarketsTimeframe = Query(
+        default=None,
+        description="Filter by timeframe (e.g. 1m, 1d). Omit for all timeframes.",
     ),
     limit: int = Query(default=100, ge=1, le=1000),
     session: AsyncSession = Depends(get_db_session),
@@ -58,6 +74,8 @@ async def get_candles(
         session,
         symbol=symbol,
         exchange=exchange,
+        provider=provider,
+        asset_type=asset_type,
         timeframe=timeframe,
         limit=limit,
     )
@@ -65,19 +83,65 @@ async def get_candles(
     return CandlesListResponse(candles=candles, count=len(candles))
 
 
+@router.get("/features", response_model=FeaturesListResponse)
+async def get_candle_features(
+    symbol: str | None = Query(
+        default=None,
+        description="Filter by instrument. Omit for recent rows across symbols.",
+    ),
+    exchange: str | None = Query(
+        default=None,
+        description="Filter by venue id. Omit for all venues.",
+    ),
+    provider: str | None = Query(
+        default=None,
+        description="Filter by data provider (binance, yahoo_finance). Omit for all.",
+    ),
+    asset_type: str | None = Query(
+        default=None,
+        description="Filter by asset class (crypto, stock, etf, index). Omit for all.",
+    ),
+    timeframe: OptionalAllMarketsTimeframe = Query(
+        default=None,
+        description="Filter by timeframe (e.g. 5m, 1d). Omit for all timeframes.",
+    ),
+    limit: int = Query(default=100, ge=1, le=1000),
+    session: AsyncSession = Depends(get_db_session),
+) -> FeaturesListResponse:
+    rows = await list_stored_features(
+        session,
+        symbol=symbol,
+        exchange=exchange,
+        provider=provider,
+        asset_type=asset_type,
+        timeframe=timeframe,
+        limit=limit,
+    )
+    features = [FeatureRow.model_validate(r) for r in rows]
+    return FeaturesListResponse(features=features, count=len(features))
+
+
 @router.get("/context", response_model=ContextListResponse)
 async def get_market_context(
     symbol: str | None = Query(
         default=None,
-        description="Filter by trading pair (e.g. BTC/USDT). Omit for all symbols.",
+        description="Filter by instrument. Omit for all symbols.",
     ),
     exchange: str | None = Query(
         default=None,
-        description="Filter by exchange id. Omit for all exchanges.",
+        description="Filter by venue id. Omit for all venues.",
     ),
-    timeframe: str | None = Query(
+    provider: str | None = Query(
         default=None,
-        description="Filter by timeframe (e.g. 5m). Omit for all timeframes.",
+        description="Filter by data provider (binance, yahoo_finance). Omit for all.",
+    ),
+    asset_type: str | None = Query(
+        default=None,
+        description="Filter by asset class (crypto, stock, etf, index). Omit for all.",
+    ),
+    timeframe: OptionalAllMarketsTimeframe = Query(
+        default=None,
+        description="Filter by timeframe (e.g. 5m, 1d). Omit for all timeframes.",
     ),
     limit: int = Query(default=100, ge=1, le=1000),
     session: AsyncSession = Depends(get_db_session),
@@ -86,6 +150,8 @@ async def get_market_context(
         session,
         symbol=symbol,
         exchange=exchange,
+        provider=provider,
+        asset_type=asset_type,
         timeframe=timeframe,
         limit=limit,
     )
@@ -97,15 +163,23 @@ async def get_market_context(
 async def get_patterns(
     symbol: str | None = Query(
         default=None,
-        description="Filter by trading pair (e.g. BTC/USDT). Omit for all symbols.",
+        description="Filter by instrument. Omit for all symbols.",
     ),
     exchange: str | None = Query(
         default=None,
-        description="Filter by exchange id. Omit for all exchanges.",
+        description="Filter by venue id. Omit for all venues.",
     ),
-    timeframe: str | None = Query(
+    provider: str | None = Query(
         default=None,
-        description="Filter by timeframe (e.g. 5m). Omit for all timeframes.",
+        description="Filter by data provider (binance, yahoo_finance). Omit for all.",
+    ),
+    asset_type: str | None = Query(
+        default=None,
+        description="Filter by asset class (crypto, stock, etf, index). Omit for all.",
+    ),
+    timeframe: OptionalAllMarketsTimeframe = Query(
+        default=None,
+        description="Filter by timeframe (e.g. 5m, 1d). Omit for all timeframes.",
     ),
     pattern_name: str | None = Query(
         default=None,
@@ -118,6 +192,8 @@ async def get_patterns(
         session,
         symbol=symbol,
         exchange=exchange,
+        provider=provider,
+        asset_type=asset_type,
         timeframe=timeframe,
         pattern_name=pattern_name,
         limit=limit,
@@ -156,6 +232,16 @@ async def ingest_market_data(
     session: AsyncSession = Depends(get_db_session),
     service: MarketDataIngestionService = Depends(get_market_data_ingestion_service),
 ) -> MarketDataIngestResponse:
+    if body.provider == "yahoo_finance":
+        yahoo = YahooFinanceIngestionService()
+        try:
+            return await yahoo.ingest(session, body)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        except Exception as e:
+            logger.exception("yahoo finance ingestion error")
+            raise HTTPException(status_code=502, detail=str(e)) from e
+
     try:
         return await service.ingest(session, body)
     except ValueError as e:

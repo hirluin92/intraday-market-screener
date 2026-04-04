@@ -1,6 +1,11 @@
-from datetime import datetime
+from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field
+from datetime import datetime
+from typing import Any, Literal, Self
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from app.core.extract_scope import validate_extract_timeframe_for_scope
 
 
 class ContextExtractRequest(BaseModel):
@@ -8,15 +13,22 @@ class ContextExtractRequest(BaseModel):
 
     symbol: str | None = Field(
         default=None,
-        description="Restrict to one pair (e.g. BTC/USDT). Omit for all symbols.",
+        description="Restrict to one instrument symbol. Omit for all.",
     )
     exchange: str | None = Field(
         default=None,
-        description="Restrict to exchange id (e.g. binance). Omit for all exchanges.",
+        description="Restrict to venue id (e.g. binance, YAHOO_US). Omit for all venues.",
+    )
+    provider: Literal["binance", "yahoo_finance"] | None = Field(
+        default=None,
+        description="Restrict to data provider; combine with exchange for unambiguous Yahoo vs Binance.",
     )
     timeframe: str | None = Field(
         default=None,
-        description="Restrict to one timeframe (e.g. 5m). Omit for all timeframes.",
+        description=(
+            "Restrict to one timeframe; allowed values depend on provider/venue "
+            "(Binance: 1m,5m,15m,1h — Yahoo: 5m,1h,1d). Omit for all timeframes."
+        ),
     )
     limit: int = Field(
         default=500,
@@ -30,6 +42,11 @@ class ContextExtractRequest(BaseModel):
         le=200,
         description="Rolling window size (bars) for regime heuristics.",
     )
+
+    @model_validator(mode="after")
+    def _timeframe_matches_market(self) -> Self:
+        validate_extract_timeframe_for_scope(self.timeframe, self.provider, self.exchange)
+        return self
 
 
 class ContextExtractResponse(BaseModel):
@@ -47,9 +64,12 @@ class ContextRow(BaseModel):
 
     id: int
     candle_feature_id: int
+    asset_type: str = Field(default="crypto")
+    provider: str = Field(default="binance")
     symbol: str
     exchange: str
     timeframe: str
+    market_metadata: dict[str, Any] | None = None
     timestamp: datetime
     market_regime: str
     volatility_regime: str
@@ -68,9 +88,12 @@ class LatestContextSnapshot(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
+    asset_type: str = Field(default="crypto")
+    provider: str = Field(default="binance")
     exchange: str
     symbol: str
     timeframe: str
+    market_metadata: dict[str, Any] | None = None
     timestamp: datetime
     market_regime: str
     volatility_regime: str

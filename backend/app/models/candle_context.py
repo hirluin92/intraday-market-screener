@@ -1,6 +1,7 @@
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Index, String, UniqueConstraint
+from sqlalchemy import DateTime, ForeignKey, Index, String, UniqueConstraint, text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql import func
 
@@ -21,8 +22,19 @@ class CandleContext(Base):
         ForeignKey("candle_features.id", ondelete="CASCADE"),
         nullable=False,
     )
+    asset_type: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        server_default=text("'crypto'"),
+    )
+    provider: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        server_default=text("'binance'"),
+    )
     symbol: Mapped[str] = mapped_column(String(32), nullable=False)
     exchange: Mapped[str] = mapped_column(String(32), nullable=False)
+    market_metadata: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     timeframe: Mapped[str] = mapped_column(String(16), nullable=False)
     timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 

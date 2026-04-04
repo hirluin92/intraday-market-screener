@@ -1,7 +1,12 @@
+from __future__ import annotations
+
 from datetime import datetime
 from decimal import Decimal
+from typing import Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from app.core.extract_scope import validate_extract_timeframe_for_scope
 
 
 class PatternRow(BaseModel):
@@ -12,9 +17,12 @@ class PatternRow(BaseModel):
     id: int
     candle_feature_id: int
     candle_context_id: int | None
+    asset_type: str = Field(default="crypto")
+    provider: str = Field(default="binance")
     symbol: str
     exchange: str
     timeframe: str
+    market_metadata: dict[str, Any] | None = None
     timestamp: datetime
     pattern_name: str
     pattern_strength: Decimal
@@ -32,15 +40,22 @@ class PatternExtractRequest(BaseModel):
 
     symbol: str | None = Field(
         default=None,
-        description="Restrict to one pair (e.g. BTC/USDT). Omit for all symbols.",
+        description="Restrict to one instrument symbol. Omit for all.",
     )
     exchange: str | None = Field(
         default=None,
-        description="Restrict to exchange id (e.g. binance). Omit to include all exchanges.",
+        description="Restrict to venue id (e.g. binance, YAHOO_US). Omit to include all venues.",
+    )
+    provider: Literal["binance", "yahoo_finance"] | None = Field(
+        default=None,
+        description="Restrict to data provider; combine with exchange for unambiguous Yahoo vs Binance.",
     )
     timeframe: str | None = Field(
         default=None,
-        description="Restrict to one timeframe (e.g. 5m). Omit for all timeframes.",
+        description=(
+            "Restrict to one timeframe; allowed values depend on provider/venue "
+            "(Binance: 1m,5m,15m,1h — Yahoo: 5m,1h,1d). Omit for all timeframes."
+        ),
     )
     limit: int = Field(
         default=500,
@@ -49,11 +64,19 @@ class PatternExtractRequest(BaseModel):
         description="Max joined (feature, context) rows processed per series, oldest-first.",
     )
 
+    @model_validator(mode="after")
+    def _timeframe_matches_market(self) -> Self:
+        validate_extract_timeframe_for_scope(self.timeframe, self.provider, self.exchange)
+        return self
+
 
 class PatternExtractResponse(BaseModel):
     series_processed: int
     rows_read: int = Field(
-        description="Joined feature+context rows read from DB (per series, up to limit).",
+        description="Feature rows that had matching context and were evaluated for patterns.",
+    )
+    features_skipped_no_context: int = Field(
+        description="Feature rows in scope with no CandleContext row (skipped for detection).",
     )
     patterns_upserted: int = Field(
         description="PostgreSQL driver rowcount for bulk UPSERT; approximate.",
