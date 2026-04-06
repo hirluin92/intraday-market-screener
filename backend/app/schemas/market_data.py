@@ -29,10 +29,16 @@ class MarketDataIngestRequest(BaseModel):
         description="Depends on provider: Binance defaults 1m,5m,15m,1h; Yahoo defaults 1d,1h.",
     )
     limit: int = Field(
-        default=100,
+        default=2500,
         ge=1,
-        le=1500,
-        description="Number of most recent candles to fetch per symbol/timeframe",
+        le=20_000,
+        description=(
+            "Barre OHLCV da richiedere per simbolo/timeframe. "
+            "Yahoo Finance 1d: fino a ~2500 barre (period=10y). "
+            "Yahoo Finance 1h: fino a ~3500 barre (period=730d). "
+            "Yahoo Finance 5m: fino a ~11700 barre (period=60d); su 5m il tail non taglia lo storico. "
+            "Binance ccxt: max 1000 per chiamata singola senza paginazione. "
+        ),
     )
 
     @model_validator(mode="after")

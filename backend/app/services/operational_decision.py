@@ -11,7 +11,7 @@ from typing import Literal
 from app.schemas.opportunities import OpportunityRow
 from app.services.opportunity_final_score import compute_signal_alignment
 
-OperationalDecision = Literal["operable", "monitor", "discard"]
+OperationalDecision = Literal["execute", "monitor", "discard"]
 
 
 def _fallback_is_missing_data(r: OpportunityRow) -> bool:
@@ -64,7 +64,7 @@ def compute_operational_decision_and_rationale(
         ]
 
     # --- Operabile: promossa + alert + allineato + TF OK (+ pattern non datato) ---
-    operable_core = (
+    execute_core = (
         src == "variant_backtest"
         and st == "promoted"
         and r.alert_candidate
@@ -72,7 +72,7 @@ def compute_operational_decision_and_rationale(
         and has_pattern
         and r.pattern_timeframe_quality_ok is True
     )
-    if operable_core and r.pattern_stale:
+    if execute_core and r.pattern_stale:
         age = r.pattern_age_bars
         age_txt = f"{age} barre sul TF {r.timeframe}" if age is not None else f"sul TF {r.timeframe}"
         return "monitor", [
@@ -80,7 +80,7 @@ def compute_operational_decision_and_rationale(
             f"Ritardo stimato: {age_txt} (oltre soglia staleness).",
             "Degradato a «da monitorare»: attendere pattern più recente o conferme aggiuntive.",
         ]
-    if operable_core:
+    if execute_core:
         lines = [
             "Pattern allineato con il bias dello score.",
             "Storico sul timeframe considerato OK.",
@@ -88,7 +88,7 @@ def compute_operational_decision_and_rationale(
         ]
         if r.alert_candidate:
             lines.append("Supera le regole MVP per candidato alert.")
-        return "operable", lines[:4]
+        return "execute", lines[:4]
 
     # --- Watchlist + alert → da monitorare ---
     if st == "watchlist" and r.alert_candidate:
@@ -142,14 +142,15 @@ def compute_operational_decision_and_rationale(
 
 
 def map_decision_filter_param(raw: str | None) -> OperationalDecision | None:
-    """Query API: operable | monitor | discard o alias IT."""
+    """Query API: execute | monitor | discard o alias IT (operable/operabile → execute)."""
     if not raw or not raw.strip():
         return None
     s = raw.strip().lower()
     aliases: dict[str, OperationalDecision] = {
-        "operabile": "operable",
-        "operabili": "operable",
-        "operable": "operable",
+        "execute": "execute",
+        "operabile": "execute",
+        "operabili": "execute",
+        "operable": "execute",
         "monitor": "monitor",
         "da_monitorare": "monitor",
         "monitorare": "monitor",

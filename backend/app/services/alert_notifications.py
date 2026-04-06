@@ -282,7 +282,7 @@ async def maybe_notify_after_pipeline_refresh(
     body: PipelineRefreshRequest,
 ) -> None:
     """
-    Chiamato in coda da ``execute_pipeline_refresh`` dopo ingest/features/context/patterns:
+    Chiamato in coda da ``execute_pipeline_refresh`` dopo ingest/features/indicators/context/patterns:
     stesso percorso per ``POST /api/v1/pipeline/refresh`` e per il ciclo scheduler.
     """
     if _is_targeted_notify_request(body):

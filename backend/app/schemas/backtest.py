@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -111,6 +112,13 @@ class TradePlanBacktestResponse(BaseModel):
     eligible_trade_plans: int = Field(
         description="Piani con direzione operativa e livelli numerici (simulabili).",
     )
+    backtest_cost_rate_rt: float = Field(
+        default=0.0,
+        description=(
+            "Tasso costo round-trip usato nella simulazione (fee + slippage, frazione notional). "
+            "Es. 0.0015 = 0.15%. 0.0 indica simulazione senza costi (legacy)."
+        ),
+    )
 
 
 class TradePlanVariantRow(BaseModel):
@@ -125,7 +133,9 @@ class TradePlanVariantRow(BaseModel):
     )
     entry_strategy: str
     stop_profile: str
-    tp_profile: str = Field(description="tp_1.5_2.5 | tp_1.5_2.0 | tp_1.0_2.0")
+    tp_profile: str = Field(
+        description="Profilo TP variante (es. tp_1.5_2.5, tp_2.0_3.0, tp_2.5_4.0).",
+    )
     sample_size: int
     entry_triggered: int
     stop_hits: int
@@ -151,6 +161,10 @@ class TradePlanVariantBacktestResponse(BaseModel):
     trade_plan_engine_version: str = Field(
         default="1.1",
         description="Motore livelli base (v1.1) + varianti esecuzione esplicite.",
+    )
+    backtest_cost_rate_rt: float = Field(
+        default=0.0,
+        description="Tasso costo round-trip usato nella simulazione varianti (frazione notional).",
     )
 
 
@@ -185,6 +199,134 @@ class TradePlanVariantStatusCounts(BaseModel):
     rejected: int = 0
 
 
+class SimulationEquityPoint(BaseModel):
+    """Punto della curva equity (timestamp barra segnale / aggiornamento saldo)."""
+
+    timestamp: datetime
+    equity: float
+
+
+class SimulationTradeRow(BaseModel):
+    """Dettaglio singolo trade simulato (opzionale, solo con ``include_trades=true``)."""
+
+    timestamp: datetime
+    symbol: str
+    pattern_name: str
+    direction: str
+    strength: float = Field(
+        description="Forza pattern (CandlePattern.pattern_strength) al momento del segnale.",
+    )
+    horizon_bars: int = Field(description="Barre forward usate per il return firmato.")
+    signed_return_pct: float = Field(description="Return % direzionale prima del clamp R.")
+    pnl_r: float = Field(
+        description="R dopo clamp [min,max], prima dei costi (scala REF_PCT_PER_R).",
+    )
+    pnl_r_net: float = Field(
+        description="R netto sul risk_amount dopo costi (net / risk_amount).",
+    )
+    outcome: Literal["win", "loss", "flat"] = Field(
+        description="win/loss da segno del forward %; flat se movimento nullo.",
+    )
+    capital_after: float
+
+
+class BacktestSimulationResponse(BaseModel):
+    """
+    Simulazione in-sample: equity composta su segnali pattern storici (solo DB).
+    I rendimenti si calcolano da candele come GET /backtest/patterns (nessun campo forward su CandlePattern).
+    """
+
+    initial_capital: float
+    final_capital: float
+    total_return_pct: float
+    max_drawdown_pct: float
+    total_trades: int
+    skipped_trades: int = Field(
+        default=0,
+        description="Segnali esclusi (finestra forward insufficiente / serie mancante).",
+    )
+    win_rate: float = Field(
+        description="Percentuale trade vincenti (0–100), coerente con direzione pattern.",
+    )
+    sharpe_ratio: float | None = Field(
+        default=None,
+        description="Euristico su rendimenti per trade (non annualizzato).",
+    )
+    equity_curve: list[SimulationEquityPoint]
+    pattern_names_used: list[str] = Field(
+        default_factory=list,
+        description="Filtro effettivo (vuoto → tutti i pattern promoted per provider×TF).",
+    )
+    forward_horizons_used: tuple[int, ...] = Field(
+        default=(5, 3, 10, 1),
+        description="Ordine di tentativo orizzonti forward (barre) se +5 non disponibile.",
+    )
+    trades: list[SimulationTradeRow] = Field(
+        default_factory=list,
+        description="Elenco trade (solo se richiesto con include_trades=true).",
+    )
+    avg_simultaneous_trades: float = Field(
+        default=0.0,
+        description="Media trade eseguiti per barra (timestamp) con almeno un fill.",
+    )
+    max_simultaneous_observed: int = Field(
+        default=0,
+        description="Massimo numero di trade simultanei osservati su una singola barra.",
+    )
+    bars_with_trades: int = Field(
+        default=0,
+        description="Barre (timestamp distinti) con almeno un trade eseguito.",
+    )
+    expectancy_r: float | None = Field(
+        default=None,
+        description="Media R per trade (somma pnl_r / total_trades).",
+    )
+    profit_factor: float | None = Field(
+        default=None,
+        description="Somma R su trade vincenti / somma |R| su trade perdenti (solo R≠0).",
+    )
+    trades_skipped_by_regime: int = Field(
+        default=0,
+        description="Trade potenziali saltati per filtro regime SPY (moltiplicatore 0 sulla barra).",
+    )
+    regime_filter_active: bool = Field(
+        default=False,
+        description="True se il filtro regime SPY 1d è stato applicato (dati presenti).",
+    )
+    note: str | None = None
+
+
+class OOSSetMetrics(BaseModel):
+    """Metriche aggregate su un periodo (train o test) per validazione OOS."""
+
+    period: str
+    total_trades: int
+    total_return_pct: float
+    win_rate: float
+    expectancy_r: float | None = None
+    max_drawdown_pct: float
+    sharpe_ratio: float | None = None
+    profit_factor: float | None = None
+
+
+class OOSTestSetMetrics(OOSSetMetrics):
+    """Test set OOS: metriche + curva equity e trade opzionali."""
+
+    equity_curve: list[SimulationEquityPoint] = Field(default_factory=list)
+    trades: list[SimulationTradeRow] = Field(default_factory=list)
+
+
+class OOSValidationResponse(BaseModel):
+    """Confronto train vs test dopo split per data di cutoff."""
+
+    cutoff_date: str
+    train_set: OOSSetMetrics
+    test_set: OOSTestSetMetrics
+    performance_degradation_pct: float
+    oos_verdict: Literal["robusto", "degradazione_moderata", "possibile_overfitting"]
+    pattern_names_used: list[str] = Field(default_factory=list)
+
+
 class TradePlanVariantBestResponse(BaseModel):
     """Sintesi operativa: una riga per bucket con la variante scelta."""
 
@@ -207,3 +349,7 @@ class TradePlanVariantBestResponse(BaseModel):
         description="Soglia minima sample per ranking affidabile tra varianti.",
     )
     trade_plan_engine_version: str = Field(default="1.1")
+    backtest_cost_rate_rt: float = Field(
+        default=0.0,
+        description="Tasso costo round-trip usato per la selezione best variant (frazione notional).",
+    )

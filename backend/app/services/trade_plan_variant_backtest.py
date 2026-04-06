@@ -17,6 +17,10 @@ from typing import cast
 from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.trade_plan_variant_constants import (
+    BACKTEST_TOTAL_COST_RATE_DEFAULT,
+    TP_PROFILE_CONFIGS,
+)
 from app.models.candle import Candle
 from app.models.candle_context import CandleContext
 from app.models.candle_feature import CandleFeature
@@ -47,9 +51,7 @@ from app.services.trade_plan_engine import (
 ENTRY_STRATEGIES: tuple[str, ...] = ("breakout", "retest", "close")
 STOP_PROFILES: tuple[str, ...] = ("tighter", "structural", "wider")
 TP_PROFILES: dict[str, tuple[Decimal, Decimal]] = {
-    "tp_1.5_2.5": (Decimal("1.5"), Decimal("2.5")),
-    "tp_1.5_2.0": (Decimal("1.5"), Decimal("2.0")),
-    "tp_1.0_2.0": (Decimal("1.0"), Decimal("2.0")),
+    label: (Decimal(str(a)), Decimal(str(b))) for label, a, b in TP_PROFILE_CONFIGS
 }
 
 
@@ -90,6 +92,7 @@ async def run_trade_plan_variant_backtest(
     timeframe: str | None,
     pattern_name: str | None,
     limit: int,
+    cost_rate: float = BACKTEST_TOTAL_COST_RATE_DEFAULT,
 ) -> TradePlanVariantBacktestResponse:
     variants = iter_execution_variants()
     execution_variant_count = len(variants)
@@ -125,6 +128,7 @@ async def run_trade_plan_variant_backtest(
             rows=[],
             execution_variant_count=execution_variant_count,
             patterns_evaluated=0,
+            backtest_cost_rate_rt=cost_rate,
         )
 
     pq_lookup = await pattern_quality_lookup_by_name_tf(
@@ -245,7 +249,9 @@ async def run_trade_plan_variant_backtest(
             bucket[bkey]["sp"] = sp
             bucket[bkey]["tpk"] = tp_key
 
-            entry_ok, outcome, r_mult = simulate_trade_plan_forward(clist, idx, plan)
+            entry_ok, outcome, r_mult = simulate_trade_plan_forward(
+                clist, idx, plan, cost_rate=cost_rate
+            )
             if not entry_ok:
                 continue
             bucket[bkey]["entry_touch"] += 1
@@ -302,4 +308,5 @@ async def run_trade_plan_variant_backtest(
         rows=out_rows,
         execution_variant_count=execution_variant_count,
         patterns_evaluated=patterns_evaluated,
+        backtest_cost_rate_rt=cost_rate,
     )

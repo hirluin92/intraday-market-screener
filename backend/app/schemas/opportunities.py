@@ -191,13 +191,27 @@ class OpportunityRow(BaseModel):
             "variant_rejected | watchlist_insufficient_sample. Null se variant_backtest."
         ),
     )
-    operational_decision: Literal["operable", "monitor", "discard"] = Field(
+    operational_decision: Literal["execute", "monitor", "discard"] = Field(
         default="monitor",
-        description="Semaforo operativo: operable | monitor | discard.",
+        description="Semaforo operativo: execute | monitor | discard.",
     )
     decision_rationale: list[str] = Field(
         default_factory=list,
         description="2–4 righe IT per UI «Perché» (motivazione sintetica).",
+    )
+    regime_spy: str = Field(
+        default="unknown",
+        description=(
+            "Yahoo: regime SPY 1d (bullish | bearish | neutral). "
+            "Crypto Binance: n/a (SPY non applicabile). unknown se dati SPY assenti."
+        ),
+    )
+    regime_direction_ok: bool = Field(
+        default=True,
+        description=(
+            "True se la direzione del pattern è consentita dal filtro regime (Yahoo); "
+            "su crypto o senza dati SPY non si penalizza."
+        ),
     )
 
 

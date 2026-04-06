@@ -10,6 +10,32 @@ from app.services.context_query import list_latest_context_per_series
 from app.services.opportunities import list_opportunities, list_ranked_screener
 
 router = APIRouter(prefix="/screener", tags=["screener"])
+# Stesso contratto di GET /screener/opportunities, path breve per client e script.
+opportunities_alias_router = APIRouter(tags=["screener"])
+
+
+async def _opportunities_response(
+    session: AsyncSession,
+    *,
+    symbol: str | None,
+    exchange: str | None,
+    provider: str | None,
+    asset_type: str | None,
+    timeframe: OptionalAllMarketsTimeframe,
+    limit: int,
+    decision: str | None,
+) -> OpportunitiesResponse:
+    rows = await list_opportunities(
+        session,
+        symbol=symbol,
+        exchange=exchange,
+        provider=provider,
+        asset_type=asset_type,
+        timeframe=timeframe,
+        limit=limit,
+        decision=decision,
+    )
+    return OpportunitiesResponse(opportunities=rows, count=len(rows))
 
 
 @router.get("/latest", response_model=LatestScreenerResponse)
@@ -111,13 +137,13 @@ async def get_opportunities(
     decision: str | None = Query(
         default=None,
         description=(
-            "Filtro semaforo: operable | monitor | discard, oppure IT "
-            "(operabile, da_monitorare, scartare)."
+            "Filtro semaforo: execute | monitor | discard, oppure IT "
+            "(operabile, da_monitorare, scartare). Alias: operable → execute."
         ),
     ),
     session: AsyncSession = Depends(get_db_session),
 ) -> OpportunitiesResponse:
-    rows = await list_opportunities(
+    return await _opportunities_response(
         session,
         symbol=symbol,
         exchange=exchange,
@@ -127,4 +153,47 @@ async def get_opportunities(
         limit=limit,
         decision=decision,
     )
-    return OpportunitiesResponse(opportunities=rows, count=len(rows))
+
+
+@opportunities_alias_router.get("/opportunities", response_model=OpportunitiesResponse)
+async def get_opportunities_short_path(
+    symbol: str | None = Query(
+        default=None,
+        description="Filter by trading pair. Omit for all series.",
+    ),
+    exchange: str | None = Query(
+        default=None,
+        description="Filter by venue. Omit for all venues.",
+    ),
+    provider: str | None = Query(
+        default=None,
+        description="Filter by data provider (binance, yahoo_finance). Omit for all.",
+    ),
+    asset_type: str | None = Query(
+        default=None,
+        description="Filter by asset class (crypto, stock, etf, index). Omit for all.",
+    ),
+    timeframe: OptionalAllMarketsTimeframe = Query(
+        default=None,
+        description="Filter by timeframe. Omit for all timeframes.",
+    ),
+    limit: int = Query(default=100, ge=1, le=1000),
+    decision: str | None = Query(
+        default=None,
+        description=(
+            "Filtro semaforo: execute | monitor | discard, oppure IT "
+            "(operabile, da_monitorare, scartare). Alias: operable → execute."
+        ),
+    ),
+    session: AsyncSession = Depends(get_db_session),
+) -> OpportunitiesResponse:
+    return await _opportunities_response(
+        session,
+        symbol=symbol,
+        exchange=exchange,
+        provider=provider,
+        asset_type=asset_type,
+        timeframe=timeframe,
+        limit=limit,
+        decision=decision,
+    )

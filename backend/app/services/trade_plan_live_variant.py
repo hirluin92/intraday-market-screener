@@ -10,6 +10,7 @@ from typing import Literal, cast
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.trade_plan_variant_constants import (
+    BACKTEST_TOTAL_COST_RATE_DEFAULT,
     TRADE_PLAN_VARIANT_WATCHLIST_MIN_SAMPLE_FOR_LIVE,
 )
 from app.schemas.backtest import TradePlanVariantBestRow
@@ -69,6 +70,7 @@ async def load_best_variant_lookup_for_live(
     asset_type: str | None,
     timeframe: str | None,
     limit: int = 300,
+    cost_rate: float = BACKTEST_TOTAL_COST_RATE_DEFAULT,
 ) -> dict[tuple[str, str, str, str], TradePlanVariantBestRow]:
     """Mappa bucket → riga best variant (stesso universo del trade plan variant backtest)."""
     v = await run_trade_plan_variant_backtest(
@@ -80,6 +82,7 @@ async def load_best_variant_lookup_for_live(
         timeframe=timeframe,
         pattern_name=None,
         limit=limit,
+        cost_rate=cost_rate,
     )
     best_rows = build_best_rows_from_variant_rows(v.rows)
     return {

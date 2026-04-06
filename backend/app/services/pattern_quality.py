@@ -10,6 +10,8 @@ Heuristic (tunable):
 
 from __future__ import annotations
 
+from app.core.trade_plan_variant_constants import PATTERN_QUALITY_MIN_SAMPLE
+
 
 def compute_pattern_quality_score(
     *,
@@ -30,6 +32,12 @@ def compute_pattern_quality_score(
 
     n_eff = max(sample_size_5, sample_size_3, 0)
     if n_eff == 0:
+        return None
+
+    # Campione troppo piccolo → score non affidabile, restituire None.
+    # Sotto PATTERN_QUALITY_MIN_SAMPLE i numeri sono rumore statistico.
+    # pattern_timeframe_policy gestisce None con penalità PENALTY_UNKNOWN (-6 pt).
+    if n_eff < PATTERN_QUALITY_MIN_SAMPLE:
         return None
 
     # Map typical intraday % moves into 0..1 (wider clamp keeps MVP stable).

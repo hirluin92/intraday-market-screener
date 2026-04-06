@@ -55,9 +55,45 @@ class Settings(BaseSettings):
         default="",
         description="(legacy mode only) Comma-separated (e.g. 1m,5m,15m). Empty = default timeframes.",
     )
-    pipeline_ingest_limit: int = Field(default=100, ge=1, le=1500)
-    pipeline_extract_limit: int = Field(default=500, ge=1, le=10_000)
-    pipeline_lookback: int = Field(default=20, ge=3, le=200)
+    pipeline_ingest_limit: int = Field(
+        default=2500,
+        ge=1,
+        le=5000,
+        description=(
+            "Barre OHLCV da richiedere per simbolo/timeframe a ogni ciclo pipeline. "
+            "Binance: ccxt resta ~1000 barre per chiamata. Yahoo: fino a ~2500/3500 barre (1d/1h); "
+            "le=5000 evita di tagliare lo storico yfinance con df.tail(limit)."
+        ),
+    )
+    pipeline_ingest_limit_5m: int = Field(
+        default=10_000,
+        ge=1,
+        le=20_000,
+        description=(
+            "Yahoo Finance 5m: valore passato a ingest quando timeframe=5m (pipeline refresh); "
+            "lo storico effettivo segue il periodo Yahoo (es. 60d) e non è più tagliato da tail su 5m."
+        ),
+    )
+    pipeline_extract_limit: int = Field(
+        default=5000,
+        ge=1,
+        le=10_000,
+        description=(
+            "Max barre per serie da processare in feature/context/pattern extraction. "
+            "5000 permette di sfruttare tutto lo storico accumulato dopo ingest massivo. "
+            "Abbassare a 1000–2000 se la pipeline è troppo lenta su hardware limitato."
+        ),
+    )
+    pipeline_lookback: int = Field(
+        default=50,
+        ge=3,
+        le=200,
+        description=(
+            "Finestra rolling per context extraction (regime, volatilità, espansione). "
+            "50 barre dà una classificazione più stabile rispetto al default 20, "
+            "specialmente su 1h e 1d dove 20 barre sono meno di un mese."
+        ),
+    )
 
     # Comma-separated origins for browser clients (e.g. Next.js on another port).
     cors_origins: str = Field(
@@ -90,6 +126,30 @@ class Settings(BaseSettings):
         description="Telegram chat id for sendMessage (optional).",
     )
 
+    # Pattern alerts (Telegram/Discord) dopo estrazione pattern nel pipeline — vedi app.services.alert_service.
+    alert_pattern_signals_enabled: bool = Field(
+        default=True,
+        description=(
+            "Se true, dopo extract_patterns invia alert su pattern operativi (1h/5m) se canali configurati."
+        ),
+    )
+    alert_min_quality_score: float = Field(
+        default=55.0,
+        ge=0.0,
+        le=100.0,
+        description="Score qualità backtest minimo (0–100) per inviare alert pattern.",
+    )
+    alert_min_strength: float = Field(
+        default=0.60,
+        ge=0.0,
+        le=1.0,
+        description="Pattern strength minima per inviare alert.",
+    )
+    alert_regime_filter: bool = Field(
+        default=True,
+        description="Se true, non inviare alert se direzione pattern non è allineata al regime SPY 1d.",
+    )
+
     @property
     def cors_origins_list(self) -> list[str]:
         parts = [x.strip() for x in self.cors_origins.split(",") if x.strip()]
@@ -106,6 +166,24 @@ class Settings(BaseSettings):
             f"postgresql+asyncpg://{user}:{password}"
             f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
         )
+
+
+# ---------------------------------------------------------------------------
+# NOTE OPERATIVE — storico massimo per provider:
+#
+# Binance (crypto):
+#   fetch_ohlcv restituisce max 1000 barre per chiamata (ccxt default).
+#   Con pipeline_ingest_limit=1000 si ottiene il massimo senza paginazione.
+#   1h × 1000 barre = ~42 giorni; 1m × 1000 = ~17 ore.
+#   Per storico più lungo su 1h/1d usare Yahoo Finance (ETF proxy o indici).
+#
+# Yahoo Finance (ETF/stock US):
+#   1d: period="10y" → ~2500 barre (10 anni) — ottimo per backtest
+#   1h: period="730d" → ~3500 barre (2 anni) — sufficiente per n>200 per pattern
+#   5m: period="60d" → ~11700 barre (60 giorni) — buono per intraday
+#   pipeline_ingest_limit su Yahoo taglia solo se < barre disponibili;
+#   default 2500 e cap le=5000 per non perdere storico 1d/1h (~2500–3500 barre).
+# ---------------------------------------------------------------------------
 
 
 settings = Settings()

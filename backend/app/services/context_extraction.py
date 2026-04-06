@@ -28,6 +28,45 @@ def _f(x: Any) -> float:
     return float(x)
 
 
+_UPSERT_CHUNK_SIZE = 500
+
+
+async def _chunked_upsert_contexts(
+    session: AsyncSession,
+    rows: list[dict[str, Any]],
+) -> int:
+    """Bulk upsert CandleContext in chunk (limite parametri asyncpg)."""
+    if not rows:
+        return 0
+    total_rc = 0
+    for i in range(0, len(rows), _UPSERT_CHUNK_SIZE):
+        chunk = rows[i : i + _UPSERT_CHUNK_SIZE]
+        stmt_ins = insert(CandleContext).values(chunk)
+        excluded = stmt_ins.excluded
+        stmt_ins = stmt_ins.on_conflict_do_update(
+            constraint="uq_candle_contexts_candle_feature_id",
+            set_={
+                "asset_type": excluded.asset_type,
+                "provider": excluded.provider,
+                "symbol": excluded.symbol,
+                "exchange": excluded.exchange,
+                "timeframe": excluded.timeframe,
+                "market_metadata": excluded.market_metadata,
+                "timestamp": excluded.timestamp,
+                "market_regime": excluded.market_regime,
+                "volatility_regime": excluded.volatility_regime,
+                "candle_expansion": excluded.candle_expansion,
+                "direction_bias": excluded.direction_bias,
+            },
+        )
+        result = await session.execute(stmt_ins)
+        rc = result.rowcount
+        if rc is not None and rc >= 0:
+            total_rc += int(rc)
+    await session.commit()
+    return total_rc
+
+
 async def _distinct_series(
     session: AsyncSession,
     *,
@@ -195,29 +234,7 @@ async def extract_context(
             contexts_upserted=0,
         )
 
-    stmt_ins = insert(CandleContext).values(rows_to_upsert)
-    excluded = stmt_ins.excluded
-    stmt_ins = stmt_ins.on_conflict_do_update(
-        constraint="uq_candle_contexts_candle_feature_id",
-        set_={
-            "asset_type": excluded.asset_type,
-            "provider": excluded.provider,
-            "symbol": excluded.symbol,
-            "exchange": excluded.exchange,
-            "timeframe": excluded.timeframe,
-            "market_metadata": excluded.market_metadata,
-            "timestamp": excluded.timestamp,
-            "market_regime": excluded.market_regime,
-            "volatility_regime": excluded.volatility_regime,
-            "candle_expansion": excluded.candle_expansion,
-            "direction_bias": excluded.direction_bias,
-        },
-    )
-    result = await session.execute(stmt_ins)
-    await session.commit()
-
-    rc = result.rowcount
-    contexts_upserted = int(rc) if rc is not None and rc >= 0 else 0
+    contexts_upserted = await _chunked_upsert_contexts(session, rows_to_upsert)
 
     return ContextExtractResponse(
         series_processed=len(series),

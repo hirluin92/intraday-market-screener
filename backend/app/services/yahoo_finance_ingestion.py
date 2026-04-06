@@ -34,12 +34,29 @@ from app.schemas.market_data import MarketDataIngestRequest, MarketDataIngestRes
 
 logger = logging.getLogger(__name__)
 
-# (timeframe_db, yfinance_interval, yfinance_period) — period scelto per avere abbastanza barre.
+# Timeframe intraday con limite di periodo imposto da Yahoo: usare period massimo, senza tail(ingest_limit).
+_SHORT_TF_YAHOO = frozenset({"1m", "5m", "15m", "30m"})
+
+# (timeframe_db) → (yfinance_interval, yfinance_period) — solo TF lunghi; 1m/5m/15m/30m usano _max_period_for_timeframe.
 _YAHOO_TF_PARAMS: dict[str, tuple[str, str]] = {
     "1d": ("1d", "10y"),
     "1h": ("1h", "730d"),
-    "5m": ("5m", "60d"),
 }
+
+
+def _max_period_for_timeframe(timeframe: str) -> str:
+    """
+    Ritorna il period massimo supportato da Yahoo Finance per timeframe.
+    Documentazione yfinance: 1m=7d, 5m=60d, 15m=60d, 1h=730d, 1d=max.
+    """
+    return {
+        "1m": "7d",
+        "5m": "60d",
+        "15m": "60d",
+        "30m": "60d",
+        "1h": "730d",
+        "1d": "max",
+    }.get(timeframe, "60d")
 
 
 def _to_decimal(value: object) -> Decimal:
@@ -53,6 +70,37 @@ def _history_sync(ticker: str, yf_interval: str, period: str) -> Any:
     t = yf.Ticker(ticker)
     # auto_adjust=False: OHLC non modificati per split/dividend (più vicini a dati “raw”).
     return t.history(period=period, interval=yf_interval, auto_adjust=False)
+
+
+_UPSERT_CHUNK_SIZE = 500
+
+
+async def _chunked_upsert_candles(
+    session: AsyncSession,
+    rows: list[dict[str, Any]],
+) -> int:
+    """
+    Esegue bulk upsert in chunk da _UPSERT_CHUNK_SIZE righe.
+    asyncpg ha un limite di 65535 parametri per statement;
+    con 12 colonne per riga il massimo teorico è ~5400 righe,
+    ma 500 è conservativo e sicuro su qualsiasi configurazione.
+    Restituisce il rowcount totale (approssimativo come da asyncpg).
+    """
+    if not rows:
+        return 0
+    total_rc = 0
+    for i in range(0, len(rows), _UPSERT_CHUNK_SIZE):
+        chunk = rows[i : i + _UPSERT_CHUNK_SIZE]
+        stmt = insert(Candle).values(chunk)
+        stmt = stmt.on_conflict_do_nothing(
+            constraint="uq_candles_exchange_symbol_timeframe_timestamp",
+        )
+        result = await session.execute(stmt)
+        rc = result.rowcount
+        if rc is not None and rc >= 0:
+            total_rc += int(rc)
+    await session.commit()
+    return total_rc
 
 
 class YahooFinanceIngestionService:
@@ -85,7 +133,11 @@ class YahooFinanceIngestionService:
         for symbol in symbols:
             asset_type = YAHOO_SYMBOL_ASSET_TYPE[symbol]
             for tf in timeframes:
-                yf_interval, period = _YAHOO_TF_PARAMS[tf]
+                if tf in _SHORT_TF_YAHOO:
+                    yf_interval = tf
+                    period = _max_period_for_timeframe(tf)
+                else:
+                    yf_interval, period = _YAHOO_TF_PARAMS[tf]
                 try:
                     df = await asyncio.to_thread(_history_sync, symbol, yf_interval, period)
                 except Exception:
@@ -106,7 +158,11 @@ class YahooFinanceIngestionService:
                     df.index = df.index.tz_localize("America/New_York", ambiguous="infer")
                 df.index = df.index.tz_convert("UTC")
 
-                if request.limit and len(df) > request.limit:
+                if (
+                    request.limit
+                    and tf not in _SHORT_TF_YAHOO
+                    and len(df) > request.limit
+                ):
                     df = df.tail(request.limit)
 
                 # Ultima barra spesso ancora in formazione → stesso criterio del path Binance.
@@ -136,7 +192,7 @@ class YahooFinanceIngestionService:
 
                     o = _to_decimal(row["Open"])
                     h = _to_decimal(row["High"])
-                    l = _to_decimal(row["Low"])
+                    low = _to_decimal(row["Low"])
                     c = _to_decimal(row["Close"])
                     v_raw = row["Volume"] if "Volume" in row.index else None
                     if v_raw is None or pd.isna(v_raw):
@@ -162,23 +218,14 @@ class YahooFinanceIngestionService:
                             "timestamp": ts_utc,
                             "open": o,
                             "high": h,
-                            "low": l,
+                            "low": low,
                             "close": c,
                             "volume": vol,
                         }
                     )
                     candles_received += 1
 
-        rows_inserted = 0
-        if rows:
-            stmt = insert(Candle).values(rows)
-            stmt = stmt.on_conflict_do_nothing(
-                constraint="uq_candles_exchange_symbol_timeframe_timestamp",
-            )
-            result = await session.execute(stmt)
-            rc = result.rowcount
-            rows_inserted = int(rc) if rc is not None and rc >= 0 else 0
-            await session.commit()
+        rows_inserted = await _chunked_upsert_candles(session, rows)
 
         return MarketDataIngestResponse(
             exchange=YAHOO_VENUE_LABEL,

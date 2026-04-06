@@ -1,6 +1,5 @@
 "use client";
 
-import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   fetchBacktestPatterns,
@@ -8,7 +7,11 @@ import {
 } from "@/lib/api";
 import { timeframeFilterLabel } from "@/lib/displayLabels";
 
-const TIMEFRAMES = ["", "1m", "5m", "15m", "1h"] as const;
+const TIMEFRAMES = ["", "1m", "5m", "15m", "1h", "1d"] as const;
+
+const PROVIDERS = ["", "binance", "yahoo_finance"] as const;
+
+const ASSET_TYPES = ["", "crypto", "etf", "stock"] as const;
 
 function fmtPct(v: number | null | undefined, digits = 2): string {
   if (v === null || v === undefined) return "—";
@@ -29,12 +32,18 @@ export default function BacktestPage() {
   const [filterSymbol, setFilterSymbol] = useState("");
   const [filterTimeframe, setFilterTimeframe] = useState("");
   const [filterPatternName, setFilterPatternName] = useState("");
+  const [filterProvider, setFilterProvider] = useState("");
+  const [filterAssetType, setFilterAssetType] = useState("");
   const filterSymbolRef = useRef(filterSymbol);
   const filterTimeframeRef = useRef(filterTimeframe);
   const filterPatternNameRef = useRef(filterPatternName);
+  const filterProviderRef = useRef(filterProvider);
+  const filterAssetTypeRef = useRef(filterAssetType);
   filterSymbolRef.current = filterSymbol;
   filterTimeframeRef.current = filterTimeframe;
   filterPatternNameRef.current = filterPatternName;
+  filterProviderRef.current = filterProvider;
+  filterAssetTypeRef.current = filterAssetType;
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -44,7 +53,9 @@ export default function BacktestPage() {
         symbol: filterSymbolRef.current.trim() || undefined,
         timeframe: filterTimeframeRef.current || undefined,
         pattern_name: filterPatternNameRef.current.trim() || undefined,
-        limit: 500,
+        provider: filterProviderRef.current.trim() || undefined,
+        asset_type: filterAssetTypeRef.current.trim() || undefined,
+        limit: 5000,
       });
       setAggregates(data.aggregates);
       setPatternsEvaluated(data.patterns_evaluated);
@@ -76,7 +87,7 @@ export default function BacktestPage() {
 
   return (
     <div className="mx-auto flex min-h-full max-w-[120rem] flex-col gap-6 p-6">
-      <header className="flex flex-wrap items-baseline justify-between gap-4 border-b border-zinc-200 pb-4 dark:border-zinc-800">
+      <header className="border-b border-zinc-200 pb-4 dark:border-zinc-800">
         <div>
           <h1 className="text-xl font-semibold tracking-tight">
             Backtest pattern
@@ -86,32 +97,10 @@ export default function BacktestPage() {
             score di qualità è un’euristica MVP semplice da win rate, rendimento
             medio e profondità del campione.
           </p>
-        </div>
-        <div className="flex gap-4 text-sm">
-          <Link
-            href="/"
-            className="text-zinc-600 underline underline-offset-4 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
-          >
-            Home
-          </Link>
-          <Link
-            href="/opportunities"
-            className="text-zinc-600 underline underline-offset-4 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
-          >
-            Opportunità
-          </Link>
-          <Link
-            href="/trade-plan-lab"
-            className="text-zinc-600 underline underline-offset-4 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
-          >
-            Trade plan lab
-          </Link>
-          <Link
-            href="/diagnostica"
-            className="text-zinc-600 underline underline-offset-4 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
-          >
-            Diagnostica
-          </Link>
+          <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-500">
+            Nota: il backtest pattern mostra rendimenti lordi (senza costi). I costi vengono inclusi
+            solo nei backtest trade plan e varianti.
+          </p>
         </div>
       </header>
 
@@ -153,6 +142,38 @@ export default function BacktestPage() {
             onChange={(e) => setFilterPatternName(e.target.value)}
             placeholder="es. impulsive_bullish_candle"
           />
+        </label>
+        <label className="flex flex-col gap-1 text-xs">
+          <span className="font-medium text-zinc-700 dark:text-zinc-300">
+            Provider
+          </span>
+          <select
+            className="rounded border border-zinc-300 bg-white px-2 py-1.5 text-sm dark:border-zinc-600 dark:bg-zinc-900"
+            value={filterProvider}
+            onChange={(e) => setFilterProvider(e.target.value)}
+          >
+            {PROVIDERS.map((p) => (
+              <option key={p || "all"} value={p}>
+                {p === "" ? "Tutti" : p === "yahoo_finance" ? "Yahoo Finance" : "Binance"}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="flex flex-col gap-1 text-xs">
+          <span className="font-medium text-zinc-700 dark:text-zinc-300">
+            Asset
+          </span>
+          <select
+            className="rounded border border-zinc-300 bg-white px-2 py-1.5 text-sm dark:border-zinc-600 dark:bg-zinc-900"
+            value={filterAssetType}
+            onChange={(e) => setFilterAssetType(e.target.value)}
+          >
+            {ASSET_TYPES.map((a) => (
+              <option key={a || "all"} value={a}>
+                {a || "Tutti"}
+              </option>
+            ))}
+          </select>
         </label>
         <button
           type="button"

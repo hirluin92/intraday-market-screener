@@ -50,7 +50,7 @@ export function flattenRecommendedSizing(
     estimated_net_tp1_eur: preview.estimatedNetProfitAtTp1,
     estimated_net_tp2_eur: preview.estimatedNetProfitAtTp2,
     effective_risk_pct_of_account: effectiveRiskPct,
-    account_allocation_pct: preview.accountCapitalPctAllocated,
+    account_allocation_pct: preview.marginPctOfAccount,
     sizing_limited_by: preview.sizingLimitedBy,
   };
 }
@@ -58,9 +58,11 @@ export function flattenRecommendedSizing(
 export function computeOpportunityEconomicSnapshot(
   plan: TradePlanV1 | null | undefined,
   input: PositionSizingUserInput,
+  opportunityScore?: number,
+  variantStatus?: string | null,
 ): OpportunityEconomicSnapshot | null {
   if (!plan || plan.trade_direction === "none") return null;
-  const preview = computePositionSizingPreview(input, plan);
+  const preview = computePositionSizingPreview(input, plan, opportunityScore, variantStatus);
   const viability = computeEconomicViability(preview, input);
   const simple = computeSimpleEconomicVerdict(preview, input, viability);
   return { preview, viability, simple };
@@ -69,8 +71,10 @@ export function computeOpportunityEconomicSnapshot(
 export function computeRecommendedSizingFlat(
   plan: TradePlanV1 | null | undefined,
   input: PositionSizingUserInput,
+  opportunityScore?: number,
+  variantStatus?: string | null,
 ): RecommendedSizingFlat | null {
-  const snap = computeOpportunityEconomicSnapshot(plan, input);
+  const snap = computeOpportunityEconomicSnapshot(plan, input, opportunityScore, variantStatus);
   if (!snap?.preview.ok) return null;
   return flattenRecommendedSizing(snap.preview, input.accountCapital);
 }

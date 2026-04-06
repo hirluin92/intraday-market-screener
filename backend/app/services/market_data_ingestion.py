@@ -16,7 +16,15 @@ from app.schemas.market_data import MarketDataIngestRequest, MarketDataIngestRes
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_SYMBOLS = ("BTC/USDT", "ETH/USDT")
+DEFAULT_SYMBOLS = (
+    "BTC/USDT",
+    "ETH/USDT",
+    "BNB/USDT",
+    "SOL/USDT",
+    "XRP/USDT",
+    "DOGE/USDT",
+    "ADA/USDT",
+)
 DEFAULT_TIMEFRAMES = DEFAULT_TIMEFRAMES_TUPLE
 
 ALLOWED_SYMBOLS = frozenset(DEFAULT_SYMBOLS)
@@ -78,6 +86,31 @@ def _parse_ohlcv_row(
         },
         ts_ms_int,
     )
+
+
+_UPSERT_CHUNK_SIZE = 500
+
+
+async def _chunked_upsert_candles(
+    session: AsyncSession,
+    rows: list[dict],
+) -> int:
+    """Bulk upsert in chunk da 500 righe (limite parametri asyncpg)."""
+    if not rows:
+        return 0
+    total_rc = 0
+    for i in range(0, len(rows), _UPSERT_CHUNK_SIZE):
+        chunk = rows[i : i + _UPSERT_CHUNK_SIZE]
+        stmt = insert(Candle).values(chunk)
+        stmt = stmt.on_conflict_do_nothing(
+            constraint="uq_candles_exchange_symbol_timeframe_timestamp",
+        )
+        result = await session.execute(stmt)
+        rc = result.rowcount
+        if rc is not None and rc >= 0:
+            total_rc += int(rc)
+    await session.commit()
+    return total_rc
 
 
 class MarketDataIngestionService:
@@ -150,17 +183,8 @@ class MarketDataIngestionService:
         finally:
             await exchange.close()
 
-        rows_inserted = 0
-        if rows:
-            stmt = insert(Candle).values(rows)
-            stmt = stmt.on_conflict_do_nothing(
-                constraint="uq_candles_exchange_symbol_timeframe_timestamp",
-            )
-            result = await session.execute(stmt)
-            rc = result.rowcount
-            # asyncpg/psycopg bulk INSERT rowcount is not always a precise "inserted rows" count.
-            rows_inserted = int(rc) if rc is not None and rc >= 0 else 0
-            await session.commit()
+        # asyncpg/psycopg bulk INSERT rowcount is not always a precise "inserted rows" count.
+        rows_inserted = await _chunked_upsert_candles(session, rows)
 
         return MarketDataIngestResponse(
             exchange=self.exchange_id,

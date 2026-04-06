@@ -136,32 +136,6 @@ export default function DiagnosticaPage() {
           Sintesi da backtest aggregati e lista opportunità corrente (nessun filtro applicato
           oltre al limite richiesto all&apos;API).
         </p>
-        <div className="mt-3 flex flex-wrap gap-4 text-sm">
-          <Link
-            href="/"
-            className="text-zinc-600 underline underline-offset-4 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
-          >
-            Home
-          </Link>
-          <Link
-            href="/opportunities"
-            className="text-zinc-600 underline underline-offset-4 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
-          >
-            Opportunità
-          </Link>
-          <Link
-            href="/backtest"
-            className="text-zinc-600 underline underline-offset-4 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
-          >
-            Backtest
-          </Link>
-          <Link
-            href="/trade-plan-lab"
-            className="text-zinc-600 underline underline-offset-4 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
-          >
-            Trade plan lab
-          </Link>
-        </div>
       </header>
 
       {loading && (

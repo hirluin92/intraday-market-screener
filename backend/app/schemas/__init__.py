@@ -17,6 +17,12 @@ from app.schemas.context import (
     LatestScreenerResponse,
 )
 from app.schemas.features import FeatureExtractRequest, FeatureExtractResponse
+from app.schemas.indicators import (
+    IndicatorExtractRequest,
+    IndicatorExtractResponse,
+    IndicatorRow,
+    IndicatorsListResponse,
+)
 from app.schemas.market_data import (
     CandleRow,
     CandlesListResponse,
@@ -51,6 +57,10 @@ __all__ = [
     "LatestScreenerResponse",
     "FeatureExtractRequest",
     "FeatureExtractResponse",
+    "IndicatorExtractRequest",
+    "IndicatorExtractResponse",
+    "IndicatorRow",
+    "IndicatorsListResponse",
     "MarketDataIngestRequest",
     "MarketDataIngestResponse",
     "OpportunitiesResponse",

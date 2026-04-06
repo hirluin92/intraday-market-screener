@@ -19,6 +19,49 @@ def _d(x: Any) -> Decimal:
     return x if isinstance(x, Decimal) else Decimal(str(x))
 
 
+_UPSERT_CHUNK_SIZE = 500
+
+
+async def _chunked_upsert_features(
+    session: AsyncSession,
+    rows: list[dict[str, Any]],
+) -> int:
+    """Bulk upsert CandleFeature in chunk (limite parametri asyncpg ~65535)."""
+    if not rows:
+        return 0
+    total_rc = 0
+    for i in range(0, len(rows), _UPSERT_CHUNK_SIZE):
+        chunk = rows[i : i + _UPSERT_CHUNK_SIZE]
+        stmt_ins = insert(CandleFeature).values(chunk)
+        excluded = stmt_ins.excluded
+        stmt_ins = stmt_ins.on_conflict_do_update(
+            constraint="uq_candle_features_candle_id",
+            set_={
+                "asset_type": excluded.asset_type,
+                "provider": excluded.provider,
+                "symbol": excluded.symbol,
+                "exchange": excluded.exchange,
+                "timeframe": excluded.timeframe,
+                "market_metadata": excluded.market_metadata,
+                "timestamp": excluded.timestamp,
+                "body_size": excluded.body_size,
+                "range_size": excluded.range_size,
+                "upper_wick": excluded.upper_wick,
+                "lower_wick": excluded.lower_wick,
+                "close_position_in_range": excluded.close_position_in_range,
+                "pct_return_1": excluded.pct_return_1,
+                "volume_ratio_vs_prev": excluded.volume_ratio_vs_prev,
+                "is_bullish": excluded.is_bullish,
+            },
+        )
+        result = await session.execute(stmt_ins)
+        rc = result.rowcount
+        if rc is not None and rc >= 0:
+            total_rc += int(rc)
+    await session.commit()
+    return total_rc
+
+
 def _compute_features_for_candle(
     candle: Candle,
     prev: Candle | None,
@@ -27,27 +70,27 @@ def _compute_features_for_candle(
     try:
         o = _d(candle.open)
         h = _d(candle.high)
-        l = _d(candle.low)
+        low = _d(candle.low)
         c = _d(candle.close)
         v = _d(candle.volume)
     except Exception:
         logger.warning("skipping candle id=%s: non-numeric OHLCV", candle.id)
         return None
 
-    if l > h:
+    if low > h:
         logger.warning("skipping candle id=%s: low > high", candle.id)
         return None
-    if not (l <= o <= h and l <= c <= h):
+    if not (low <= o <= h and low <= c <= h):
         logger.warning("skipping candle id=%s: open/close outside [low, high]", candle.id)
         return None
 
     body_size = abs(c - o)
-    range_size = h - l
+    range_size = h - low
     upper_wick = h - max(o, c)
-    lower_wick = min(o, c) - l
+    lower_wick = min(o, c) - low
 
     if range_size > 0:
-        close_position_in_range = (c - l) / range_size
+        close_position_in_range = (c - low) / range_size
     else:
         close_position_in_range = Decimal("0.5")
 
@@ -178,33 +221,7 @@ async def extract_features(
             rows_upserted=0,
         )
 
-    stmt_ins = insert(CandleFeature).values(rows_to_upsert)
-    excluded = stmt_ins.excluded
-    stmt_ins = stmt_ins.on_conflict_do_update(
-        constraint="uq_candle_features_candle_id",
-        set_={
-            "asset_type": excluded.asset_type,
-            "provider": excluded.provider,
-            "symbol": excluded.symbol,
-            "exchange": excluded.exchange,
-            "timeframe": excluded.timeframe,
-            "market_metadata": excluded.market_metadata,
-            "timestamp": excluded.timestamp,
-            "body_size": excluded.body_size,
-            "range_size": excluded.range_size,
-            "upper_wick": excluded.upper_wick,
-            "lower_wick": excluded.lower_wick,
-            "close_position_in_range": excluded.close_position_in_range,
-            "pct_return_1": excluded.pct_return_1,
-            "volume_ratio_vs_prev": excluded.volume_ratio_vs_prev,
-            "is_bullish": excluded.is_bullish,
-        },
-    )
-    result = await session.execute(stmt_ins)
-    await session.commit()
-
-    rc = result.rowcount
-    rows_upserted = int(rc) if rc is not None and rc >= 0 else 0
+    rows_upserted = await _chunked_upsert_features(session, rows_to_upsert)
 
     return FeatureExtractResponse(
         series_processed=len(series),

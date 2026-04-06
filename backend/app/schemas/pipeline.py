@@ -8,12 +8,13 @@ from app.core.extract_scope import validate_extract_timeframe_for_scope
 from app.core.yahoo_finance_constants import YAHOO_VENUE_LABEL
 from app.schemas.context import ContextExtractResponse
 from app.schemas.features import FeatureExtractResponse
+from app.schemas.indicators import IndicatorExtractResponse
 from app.schemas.market_data import MarketDataIngestResponse
 from app.schemas.patterns import PatternExtractResponse
 
 
 class PipelineRefreshRequest(BaseModel):
-    """Run ingest → features → context → patterns with the same optional series filters."""
+    """Run ingest → features → indicators → context → patterns with the same optional series filters."""
 
     provider: Literal["binance", "yahoo_finance"] = Field(
         default="binance",
@@ -32,22 +33,22 @@ class PipelineRefreshRequest(BaseModel):
         description="If set, restricts ingest and extract; TF ammessi dipendono dal provider.",
     )
     ingest_limit: int = Field(
-        default=100,
-        ge=1,
-        le=1500,
-        description="OHLCV fetch limit per symbol/timeframe (ingest).",
-    )
-    extract_limit: int = Field(
-        default=500,
+        default=2500,
         ge=1,
         le=10_000,
-        description="Max rows per series for feature/context/pattern extraction.",
+        description="Barre OHLCV per simbolo/timeframe (ingest). 2500 default; Yahoo 5m usa anche pipeline_ingest_limit_5m.",
+    )
+    extract_limit: int = Field(
+        default=5000,
+        ge=1,
+        le=10_000,
+        description="Max barre per serie in feature/context/pattern extraction.",
     )
     lookback: int = Field(
-        default=20,
+        default=50,
         ge=3,
         le=200,
-        description="Context rolling window (context extract only).",
+        description="Finestra rolling context (barre). 50 più stabile di 20 su TF lunghi.",
     )
 
     @model_validator(mode="after")
@@ -65,5 +66,6 @@ class PipelineRefreshRequest(BaseModel):
 class PipelineRefreshResponse(BaseModel):
     ingest: MarketDataIngestResponse
     features: FeatureExtractResponse
+    indicators: IndicatorExtractResponse
     context: ContextExtractResponse
     patterns: PatternExtractResponse

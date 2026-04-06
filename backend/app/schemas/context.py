@@ -31,13 +31,13 @@ class ContextExtractRequest(BaseModel):
         ),
     )
     limit: int = Field(
-        default=500,
+        default=5000,
         ge=1,
         le=10_000,
         description="Max candle-feature rows processed per series (oldest-first).",
     )
     lookback: int = Field(
-        default=20,
+        default=50,
         ge=3,
         le=200,
         description="Rolling window size (bars) for regime heuristics.",

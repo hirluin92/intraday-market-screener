@@ -17,6 +17,7 @@ from app.schemas.features import (
     FeatureRow,
     FeaturesListResponse,
 )
+from app.schemas.indicators import IndicatorRow, IndicatorsListResponse
 from app.schemas.patterns import (
     PatternExtractRequest,
     PatternExtractResponse,
@@ -35,6 +36,7 @@ from app.services.context_extraction import extract_context
 from app.services.context_query import list_stored_contexts
 from app.services.feature_extraction import extract_features
 from app.services.feature_query import list_stored_features
+from app.services.indicator_query import list_stored_indicators
 from app.services.pattern_extraction import extract_patterns
 from app.services.pattern_query import list_stored_patterns
 from app.services.market_data_ingestion import MarketDataIngestionService
@@ -67,7 +69,7 @@ async def get_candles(
         default=None,
         description="Filter by timeframe (e.g. 1m, 1d). Omit for all timeframes.",
     ),
-    limit: int = Query(default=100, ge=1, le=1000),
+    limit: int = Query(default=500, ge=1, le=10_000),
     session: AsyncSession = Depends(get_db_session),
 ) -> CandlesListResponse:
     rows = await list_stored_candles(
@@ -119,6 +121,49 @@ async def get_candle_features(
     )
     features = [FeatureRow.model_validate(r) for r in rows]
     return FeaturesListResponse(features=features, count=len(features))
+
+
+@router.get("/indicators", response_model=IndicatorsListResponse)
+async def get_candle_indicators(
+    symbol: str | None = Query(
+        default=None,
+        description="Filter by instrument. Omit for recent rows across symbols.",
+    ),
+    exchange: str | None = Query(
+        default=None,
+        description="Filter by venue id. Omit for all venues.",
+    ),
+    provider: str | None = Query(
+        default=None,
+        description="Filter by data provider (binance, yahoo_finance). Omit for all.",
+    ),
+    asset_type: str | None = Query(
+        default=None,
+        description="Filter by asset class (crypto, stock, etf, index). Omit for all.",
+    ),
+    timeframe: OptionalAllMarketsTimeframe = Query(
+        default=None,
+        description="Filter by timeframe (e.g. 5m, 1d). Omit for all timeframes.",
+    ),
+    limit: int = Query(
+        default=100,
+        ge=1,
+        le=5000,
+        description="Massimo righe restituite (ordine timestamp desc). Fino a 5000 per analisi storiche.",
+    ),
+    session: AsyncSession = Depends(get_db_session),
+) -> IndicatorsListResponse:
+    rows = await list_stored_indicators(
+        session,
+        symbol=symbol,
+        exchange=exchange,
+        provider=provider,
+        asset_type=asset_type,
+        timeframe=timeframe,
+        limit=limit,
+    )
+    indicators = [IndicatorRow.model_validate(r) for r in rows]
+    return IndicatorsListResponse(indicators=indicators, count=len(indicators))
 
 
 @router.get("/context", response_model=ContextListResponse)

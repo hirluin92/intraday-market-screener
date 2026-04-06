@@ -1,100 +1,72 @@
 /**
- * Position sizing e preview rischio/premio da TradePlanV1 (solo frontend, puro e testabile).
+ * Position sizing — rischio ancorato al conto, leva riduce il margine richiesto.
  *
- * feeRoundTripPercent: commissioni stimate round-trip sul notional (ingresso+uscita, un solo numero %).
- * slippagePercent: buffer prudenziale sul notional (slippage medio stimato sul trade).
+ * 1. maxRiskMoney = capitale × risk% (o fisso)
+ * 2. size = maxRiskMoney / stopDistanceAbs
+ * 3. notional = size × entry
+ * 4. marginRequired = notional / leva
+ * 5. Tetto: maxNotional = (capitale × maxMargin%) × leva — se notional dal rischio lo supera, si riduce la size
  */
 
 import type { TradePlanV1 } from "./api";
 
 export type PositionSizingRiskMode = "percent" | "fixed";
 
-/** Input utente (persistibile in localStorage). */
 export type PositionSizingUserInput = {
   accountCapital: number;
   riskMode: PositionSizingRiskMode;
-  /** Se riskMode === "percent" (es. 1 = 1%). */
   riskPercent: number;
-  /** Se riskMode === "fixed" (valuta conto). */
   riskFixed: number;
-  /** Fee round-trip sul notional, % (es. 0.1 = 0.1%). */
   feeRoundTripPercent: number;
-  /** Slippage stimato sul notional, % (prudenziale). */
   slippagePercent: number;
-  /** Leva massima ammessa (es. 5); null = non controllare. */
   maxLeverage: number | null;
-  /** Massimo % del conto utilizzabile come notional per questo trade. */
-  maxCapitalPercentPerTrade: number;
+  /** Max % del conto utilizzabile come margine (garanzia) per questo trade. */
+  maxMarginPercent: number;
 };
 
 export const DEFAULT_POSITION_SIZING_INPUT: PositionSizingUserInput = {
-  accountCapital: 10_000,
+  accountCapital: 1_000,
   riskMode: "percent",
   riskPercent: 1,
-  riskFixed: 100,
+  riskFixed: 10,
   feeRoundTripPercent: 0.08,
   slippagePercent: 0.05,
-  maxLeverage: 5,
-  maxCapitalPercentPerTrade: 100,
+  maxLeverage: 1,
+  maxMarginPercent: 50,
 };
 
-/** Quale vincolo determina la size effettiva (il minimo tra i tetti). */
 export type SizingLimitReason =
   | "risk_budget"
-  | "max_account_allocation"
-  | "leverage_cap"
-  | "min_trade_size"
+  | "margin_cap"
+  | "no_leverage"
   | "unknown";
 
 export type PositionSizingPreview = {
   ok: boolean;
-  /** Rischio monetario massimo richiesto dalle impostazioni (prima del cap notional). */
   maxRiskMoney: number;
-  /**
-   * True se la size è stata ridotta dal massimo notional consentito (% conto allocabile).
-   * In quel caso aumentare il «rischio %» non aumenta size/PnL finché il cap resta attivo:
-   * la colonna maxRiskMoney resta un obiettivo teorico, mentre perdita a stop e utili riflettono la size effettiva.
-   */
-  positionSizingCappedByNotional: boolean;
-  /** True se la size è stata ridotta dal limite di leva massima (notional/conto). */
-  positionSizingCappedByLeverage: boolean;
-  /** Vincolo attivo che ha fissato la size (dopo min tra rischio, allocazione, leva). */
-  sizingLimitedBy: SizingLimitReason;
-  stopDistanceAbs: number;
-  stopDistancePct: number;
+  effectiveLeverage: number;
   positionSizeUnits: number;
   notionalPositionValue: number;
-  estimatedLossAtStop: number;
+  marginUsed: number;
+  marginPctOfAccount: number;
+  sizingLimitedBy: SizingLimitReason;
+  cappedByMargin: boolean;
+  actualRiskAtStop: number;
+  actualRiskPctOfAccount: number;
+  stopDistanceAbs: number;
+  stopDistancePct: number;
+  estimatedTotalCosts: number;
+  estimatedLossAtStopWithCosts: number;
   estimatedGrossProfitAtTp1: number | null;
   estimatedGrossProfitAtTp2: number | null;
-  /** Perdita lorda a stop + costi stimati (fee+slippage sul notional). */
-  estimatedLossAtStopWithCosts: number;
-  /** Utile netto stimato a TP1/TP2 dopo costi. */
   estimatedNetProfitAtTp1: number | null;
   estimatedNetProfitAtTp2: number | null;
-  rrTp1Money: number | null;
-  rrTp2Money: number | null;
-  /** % del conto coperta dal notional. */
-  accountCapitalPctAllocated: number;
-  /** notional / accountCapital (rapporto esposizione vs equity). */
-  impliedLeverage: number;
-  /** Costi totali stimati (fee+slippage) sul notional. */
-  estimatedTotalCosts: number;
+  rrNetTp1: number | null;
+  rrNetTp2: number | null;
+  recommendedRiskPct: number;
+  recommendedRiskRationale: string;
   warnings: string[];
 };
-
-function resolveSizingLimitedBy(sRisk: number, sCap: number, sLev: number): SizingLimitReason {
-  if (!Number.isFinite(sRisk) || sRisk <= 0) return "unknown";
-  const size = Math.min(sRisk, sCap, sLev);
-  if (size <= 0 || !Number.isFinite(size)) return "unknown";
-  const tol = 1e-9 * Math.max(size, 1);
-  const at = (a: number) => Math.abs(size - a) <= tol;
-  // In caso di pareggio: allocazione e leva hanno priorità esplicativa (vincoli operativi).
-  if (at(sCap)) return "max_account_allocation";
-  if (at(sLev)) return "leverage_cap";
-  if (at(sRisk)) return "risk_budget";
-  return "unknown";
-}
 
 function parsePrice(s: string | null | undefined): number | null {
   if (s == null || String(s).trim() === "") return null;
@@ -102,22 +74,44 @@ function parsePrice(s: string | null | undefined): number | null {
   return Number.isFinite(n) && n > 0 ? n : null;
 }
 
-function grossPnlAtPrice(
-  direction: "long" | "short",
-  entry: number,
-  exit: number,
-  size: number,
-): number {
-  if (direction === "long") return (exit - entry) * size;
-  return (entry - exit) * size;
+function grossPnl(dir: "long" | "short", entry: number, exit: number, size: number): number {
+  return dir === "long" ? (exit - entry) * size : (entry - exit) * size;
 }
 
-/**
- * Calcola preview position sizing. Non modifica lo stato; output serializzabile.
- */
+function empty(warnings: string[]): PositionSizingPreview {
+  return {
+    ok: false,
+    maxRiskMoney: 0,
+    effectiveLeverage: 1,
+    positionSizeUnits: 0,
+    notionalPositionValue: 0,
+    marginUsed: 0,
+    marginPctOfAccount: 0,
+    sizingLimitedBy: "unknown",
+    cappedByMargin: false,
+    actualRiskAtStop: 0,
+    actualRiskPctOfAccount: 0,
+    stopDistanceAbs: 0,
+    stopDistancePct: 0,
+    estimatedTotalCosts: 0,
+    estimatedLossAtStopWithCosts: 0,
+    estimatedGrossProfitAtTp1: null,
+    estimatedGrossProfitAtTp2: null,
+    estimatedNetProfitAtTp1: null,
+    estimatedNetProfitAtTp2: null,
+    rrNetTp1: null,
+    rrNetTp2: null,
+    recommendedRiskPct: 1,
+    recommendedRiskRationale: "",
+    warnings,
+  };
+}
+
 export function computePositionSizingPreview(
   user: PositionSizingUserInput,
   plan: TradePlanV1,
+  opportunityScore?: number,
+  variantStatus?: string | null,
 ): PositionSizingPreview {
   const warnings: string[] = [];
   const dir = plan.trade_direction;
@@ -127,190 +121,222 @@ export function computePositionSizingPreview(
   const tp2 = parsePrice(plan.take_profit_2);
 
   if (dir === "none" || !entry || !stop) {
-    warnings.push("Direzione assente o prezzi ingresso/stop non validi: preview non applicabile.");
-    return emptyPreview(warnings);
+    return empty(["Direzione assente o prezzi non validi."]);
   }
 
-  let stopDistanceAbs = Math.abs(entry - stop);
-  if (stopDistanceAbs <= 0) {
-    warnings.push("Distanza stop nulla: risk per unità non definito.");
-    return emptyPreview(warnings);
-  }
-
-  if (dir === "long" && stop >= entry) {
-    warnings.push("Long: lo stop deve essere sotto l’ingresso per definire il rischio.");
-    return emptyPreview(warnings);
-  }
-  if (dir === "short" && stop <= entry) {
-    warnings.push("Short: lo stop deve essere sopra l’ingresso per definire il rischio.");
-    return emptyPreview(warnings);
-  }
+  const stopDistanceAbs = Math.abs(entry - stop);
+  if (stopDistanceAbs <= 0) return empty(["Distanza stop nulla."]);
+  if (dir === "long" && stop >= entry) return empty(["Long: stop deve essere sotto l'entry."]);
+  if (dir === "short" && stop <= entry) return empty(["Short: stop deve essere sopra l'entry."]);
 
   const stopDistancePct = (stopDistanceAbs / entry) * 100;
 
-  const cap = Math.max(0, user.accountCapital) * (user.maxCapitalPercentPerTrade / 100);
-
-  let maxRiskMoney =
+  const capital = Math.max(0, user.accountCapital);
+  const maxRiskMoney =
     user.riskMode === "percent"
-      ? Math.max(0, user.accountCapital) * (user.riskPercent / 100)
+      ? capital * (Math.max(0, user.riskPercent) / 100)
       : Math.max(0, user.riskFixed);
 
-  if (user.riskMode === "fixed" && user.riskFixed > user.accountCapital && user.accountCapital > 0) {
-    warnings.push("Rischio fisso supera il capitale conto: riduci il valore o il capitale.");
-  }
-  if (user.accountCapital <= 0) {
-    warnings.push("Capitale conto non positivo.");
-  }
+  if (capital <= 0) warnings.push("Capitale conto non positivo.");
 
-  const riskPerUnit = stopDistanceAbs;
-  if (riskPerUnit <= 0) {
-    warnings.push("Risk per unità ≤ 0.");
-    return emptyPreview(warnings);
-  }
+  const effectiveLeverage = Math.max(1, user.maxLeverage ?? 1);
 
-  const sizeFromRisk = maxRiskMoney / riskPerUnit;
-  const maxSizeFromCap = entry > 0 ? cap / entry : 0;
-  const maxSizeFromLeverage =
-    user.maxLeverage != null &&
-    user.maxLeverage > 0 &&
-    user.accountCapital > 0 &&
-    entry > 0
-      ? (user.accountCapital * user.maxLeverage) / entry
-      : Number.POSITIVE_INFINITY;
+  const sizeFromRisk = maxRiskMoney / stopDistanceAbs;
+  const notionalFromRisk = sizeFromRisk * entry;
 
-  let positionSizeUnits = Math.min(sizeFromRisk, maxSizeFromCap, maxSizeFromLeverage);
-  const sizingLimitedBy = resolveSizingLimitedBy(sizeFromRisk, maxSizeFromCap, maxSizeFromLeverage);
+  const maxMargin = capital * (Math.max(0, Math.min(100, user.maxMarginPercent)) / 100);
+  const maxNotionalFromMarginCap = maxMargin * effectiveLeverage;
+  const maxSizeFromMarginCap = entry > 0 ? maxNotionalFromMarginCap / entry : 0;
 
-  const positionSizingCappedByNotional = sizingLimitedBy === "max_account_allocation";
-  if (positionSizingCappedByNotional) {
-    warnings.push("Size limitata dal massimo % del conto allocabile per trade.");
+  const cappedByMargin = notionalFromRisk > maxNotionalFromMarginCap + 1e-6;
+  const positionSizeUnits = cappedByMargin ? maxSizeFromMarginCap : sizeFromRisk;
+  const notionalPositionValue = positionSizeUnits * entry;
+  const marginUsed = notionalPositionValue / effectiveLeverage;
+  const marginPctOfAccount = capital > 0 ? (marginUsed / capital) * 100 : 0;
+
+  let sizingLimitedBy: SizingLimitReason;
+  if (cappedByMargin) {
+    sizingLimitedBy = effectiveLeverage <= 1 ? "no_leverage" : "margin_cap";
+  } else {
+    sizingLimitedBy = "risk_budget";
   }
 
-  const positionSizingCappedByLeverage = sizingLimitedBy === "leverage_cap";
-  if (positionSizingCappedByLeverage) {
+  if (cappedByMargin) {
     warnings.push(
-      `Size limitata dalla leva massima impostata (${user.maxLeverage}× notional rispetto al conto).`,
+      `Size ridotta: il margine richiesto supererebbe il ${user.maxMarginPercent}% del conto. ` +
+        `Abbassa il rischio % o aumenta «Max margine % conto» per usare la size completa.`,
     );
   }
 
-  if (!Number.isFinite(positionSizeUnits) || positionSizeUnits <= 0) {
-    warnings.push("Size non valida o zero: controlla rischio, stop e capitale allocabile.");
-    positionSizeUnits = 0;
-  }
+  const actualRiskAtStop = positionSizeUnits * stopDistanceAbs;
+  const actualRiskPctOfAccount = capital > 0 ? (actualRiskAtStop / capital) * 100 : 0;
 
-  const notionalPositionValue = positionSizeUnits * entry;
   const feeRt = Math.max(0, user.feeRoundTripPercent) / 100;
   const slipRt = Math.max(0, user.slippagePercent) / 100;
   const estimatedTotalCosts = notionalPositionValue * (feeRt + slipRt);
-
-  const grossLossAtStop =
-    positionSizeUnits > 0
-      ? Math.abs(grossPnlAtPrice(dir, entry, stop, positionSizeUnits))
-      : 0;
-  const estimatedLossAtStopWithCosts = grossLossAtStop + estimatedTotalCosts;
+  const estimatedLossAtStopWithCosts = actualRiskAtStop + estimatedTotalCosts;
 
   let estimatedGrossProfitAtTp1: number | null = null;
   let estimatedGrossProfitAtTp2: number | null = null;
-  if (positionSizeUnits > 0 && tp1 != null) {
-    const g = grossPnlAtPrice(dir, entry, tp1, positionSizeUnits);
+
+  if (tp1 != null) {
+    const g = grossPnl(dir, entry, tp1, positionSizeUnits);
     if (g > 0) estimatedGrossProfitAtTp1 = g;
-    else warnings.push("TP1 non favorevole rispetto all’ingresso per questa direzione.");
+    else warnings.push("TP1 non favorevole per questa direzione.");
   }
-  if (positionSizeUnits > 0 && tp2 != null) {
-    const g = grossPnlAtPrice(dir, entry, tp2, positionSizeUnits);
+  if (tp2 != null) {
+    const g = grossPnl(dir, entry, tp2, positionSizeUnits);
     if (g > 0) estimatedGrossProfitAtTp2 = g;
   }
 
   const estimatedNetProfitAtTp1 =
-    estimatedGrossProfitAtTp1 != null
-      ? estimatedGrossProfitAtTp1 - estimatedTotalCosts
-      : null;
+    estimatedGrossProfitAtTp1 != null ? estimatedGrossProfitAtTp1 - estimatedTotalCosts : null;
   const estimatedNetProfitAtTp2 =
-    estimatedGrossProfitAtTp2 != null
-      ? estimatedGrossProfitAtTp2 - estimatedTotalCosts
-      : null;
+    estimatedGrossProfitAtTp2 != null ? estimatedGrossProfitAtTp2 - estimatedTotalCosts : null;
 
-  const rrTp1Money =
+  const rrNetTp1 =
     estimatedLossAtStopWithCosts > 0 && estimatedNetProfitAtTp1 != null
       ? estimatedNetProfitAtTp1 / estimatedLossAtStopWithCosts
       : null;
-  const rrTp2Money =
+  const rrNetTp2 =
     estimatedLossAtStopWithCosts > 0 && estimatedNetProfitAtTp2 != null
       ? estimatedNetProfitAtTp2 / estimatedLossAtStopWithCosts
       : null;
 
-  const accountCapitalPctAllocated =
-    user.accountCapital > 0 ? (notionalPositionValue / user.accountCapital) * 100 : 0;
-  const impliedLeverage =
-    user.accountCapital > 0 ? notionalPositionValue / user.accountCapital : 0;
+  const { pct: recommendedRiskPct, rationale: recommendedRiskRationale } = computeRecommendedRiskPct({
+    opportunityScore,
+    variantStatus,
+    rrNetTp1,
+    cappedByMargin,
+    stopDistancePct,
+    currentRiskPct: user.riskMode === "percent" ? user.riskPercent : null,
+  });
 
-  if (notionalPositionValue > cap + 1e-6) {
-    warnings.push("Notional supera il massimo allocabile per trade (cap % conto).");
-  }
-  if (positionSizeUnits <= 0 || !Number.isFinite(positionSizeUnits)) {
-    warnings.push("Trade non eseguibile con i parametri attuali.");
-  }
-
-  const leverageOk =
-    user.maxLeverage == null || user.maxLeverage <= 0 || impliedLeverage <= user.maxLeverage + 1e-6;
-  const ok =
-    positionSizeUnits > 0 &&
-    user.accountCapital > 0 &&
-    leverageOk &&
-    !warnings.some((w) => w.includes("Trade non eseguibile"));
+  const ok = positionSizeUnits > 0 && capital > 0;
 
   return {
     ok,
     maxRiskMoney,
-    positionSizingCappedByNotional,
-    positionSizingCappedByLeverage,
-    sizingLimitedBy: positionSizeUnits > 0 ? sizingLimitedBy : "unknown",
-    stopDistanceAbs,
-    stopDistancePct,
+    effectiveLeverage,
     positionSizeUnits,
     notionalPositionValue,
-    estimatedLossAtStop: grossLossAtStop,
+    marginUsed,
+    marginPctOfAccount,
+    sizingLimitedBy,
+    cappedByMargin,
+    actualRiskAtStop,
+    actualRiskPctOfAccount,
+    stopDistanceAbs,
+    stopDistancePct,
+    estimatedTotalCosts,
+    estimatedLossAtStopWithCosts,
     estimatedGrossProfitAtTp1,
     estimatedGrossProfitAtTp2,
-    estimatedLossAtStopWithCosts,
     estimatedNetProfitAtTp1,
     estimatedNetProfitAtTp2,
-    rrTp1Money,
-    rrTp2Money,
-    accountCapitalPctAllocated,
-    impliedLeverage,
-    estimatedTotalCosts,
+    rrNetTp1,
+    rrNetTp2,
+    recommendedRiskPct,
+    recommendedRiskRationale,
     warnings,
   };
 }
 
-function emptyPreview(warnings: string[]): PositionSizingPreview {
+type RiskRecommendInput = {
+  opportunityScore?: number;
+  variantStatus?: string | null;
+  rrNetTp1: number | null;
+  cappedByMargin: boolean;
+  stopDistancePct: number;
+  currentRiskPct: number | null;
+};
+
+function computeRecommendedRiskPct(inp: RiskRecommendInput): { pct: number; rationale: string } {
+  const { opportunityScore, variantStatus, rrNetTp1, cappedByMargin, stopDistancePct } = inp;
+
+  let basePct = 1.0;
+  const reasons: string[] = [];
+
+  if (variantStatus === "promoted") {
+    basePct = 1.5;
+    reasons.push("variante promossa dal backtest");
+  } else if (variantStatus === "watchlist") {
+    basePct = 1.0;
+    reasons.push("variante in watchlist (affidabilità media)");
+  } else {
+    basePct = 0.5;
+    reasons.push("nessuna variante validata (fallback)");
+  }
+
+  if (opportunityScore != null) {
+    if (opportunityScore >= 70) {
+      basePct = Math.min(basePct + 0.5, 2.0);
+      reasons.push("score opportunità alto (≥70)");
+    } else if (opportunityScore < 45) {
+      basePct = Math.max(basePct - 0.5, 0.5);
+      reasons.push("score opportunità basso (<45)");
+    }
+  }
+
+  if (stopDistancePct > 3) {
+    basePct = Math.max(basePct - 0.5, 0.25);
+    reasons.push("stop lontano (>3% da entry)");
+  }
+
+  if (rrNetTp1 != null && rrNetTp1 < 0.8) {
+    basePct = Math.max(basePct - 0.25, 0.25);
+    reasons.push("R:R netto debole (<0.8:1)");
+  }
+
+  if (cappedByMargin) {
+    reasons.push("cap margine attivo — aumenta «Max margine %» per usare il rischio target");
+  }
+
+  const rounded = Math.round(basePct * 4) / 4;
+  const final = Math.max(0.25, Math.min(3.0, rounded));
+
   return {
-    ok: false,
-    maxRiskMoney: 0,
-    positionSizingCappedByNotional: false,
-    positionSizingCappedByLeverage: false,
-    sizingLimitedBy: "unknown",
-    stopDistanceAbs: 0,
-    stopDistancePct: 0,
-    positionSizeUnits: 0,
-    notionalPositionValue: 0,
-    estimatedLossAtStop: 0,
-    estimatedGrossProfitAtTp1: null,
-    estimatedGrossProfitAtTp2: null,
-    estimatedLossAtStopWithCosts: 0,
-    estimatedNetProfitAtTp1: null,
-    estimatedNetProfitAtTp2: null,
-    rrTp1Money: null,
-    rrTp2Money: null,
-    accountCapitalPctAllocated: 0,
-    impliedLeverage: 0,
-    estimatedTotalCosts: 0,
-    warnings,
+    pct: final,
+    rationale: reasons.join(" · "),
   };
 }
 
-const STORAGE_KEY = "positionSizingUserInputV1";
+export type RiskPresetRow = {
+  riskPct: number;
+  preview: PositionSizingPreview;
+  isRecommended: boolean;
+};
+
+export function computeRiskPresets(
+  user: PositionSizingUserInput,
+  plan: TradePlanV1,
+  opportunityScore?: number,
+  variantStatus?: string | null,
+  presets: number[] = [0.5, 1, 1.5, 2, 3],
+): RiskPresetRow[] {
+  const recommended = computePositionSizingPreview(
+    user,
+    plan,
+    opportunityScore,
+    variantStatus,
+  ).recommendedRiskPct;
+
+  return presets.map((rp) => {
+    const p = computePositionSizingPreview(
+      { ...user, riskMode: "percent", riskPercent: rp },
+      plan,
+      opportunityScore,
+      variantStatus,
+    );
+    return {
+      riskPct: rp,
+      preview: p,
+      isRecommended: Math.abs(rp - recommended) < 0.125,
+    };
+  });
+}
+
+const STORAGE_KEY = "positionSizingUserInputV2";
 
 export function loadPositionSizingInput(): PositionSizingUserInput {
   if (typeof window === "undefined") return DEFAULT_POSITION_SIZING_INPUT;
@@ -318,12 +344,7 @@ export function loadPositionSizingInput(): PositionSizingUserInput {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return DEFAULT_POSITION_SIZING_INPUT;
     const p = JSON.parse(raw) as Partial<PositionSizingUserInput>;
-    return {
-      ...DEFAULT_POSITION_SIZING_INPUT,
-      ...p,
-      maxLeverage:
-        p.maxLeverage === undefined ? DEFAULT_POSITION_SIZING_INPUT.maxLeverage : p.maxLeverage,
-    };
+    return { ...DEFAULT_POSITION_SIZING_INPUT, ...p };
   } catch {
     return DEFAULT_POSITION_SIZING_INPUT;
   }
@@ -335,21 +356,5 @@ export function savePositionSizingInput(input: PositionSizingUserInput): void {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(input));
   } catch {
     /* ignore */
-  }
-}
-
-/** Una riga di spiegazione per la card «Risposta diretta» (vincolo attivo sulla size). */
-export function sizingLimitShortLineItalian(reason: SizingLimitReason): string | null {
-  switch (reason) {
-    case "risk_budget":
-      return "Puntata determinata dall’obiettivo di rischio e dalla distanza dello stop.";
-    case "max_account_allocation":
-      return "Puntata limitata dal «Max % conto per trade» (non è obbligatorio usare tutto il conto).";
-    case "leverage_cap":
-      return "Puntata limitata dal tetto di leva impostato (notional rispetto al capitale).";
-    case "min_trade_size":
-      return "Possibile vincolo minimo di lotto non modellato in questa anteprima.";
-    default:
-      return null;
   }
 }

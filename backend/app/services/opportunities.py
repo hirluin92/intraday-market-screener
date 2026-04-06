@@ -31,10 +31,9 @@ from app.services.trade_plan_live_variant import (
     build_live_trade_plan_for_opportunity,
     load_best_variant_lookup_for_live,
 )
-from app.services.operational_decision import (
-    compute_operational_decision_and_rationale,
-    map_decision_filter_param,
-)
+from app.services.operational_decision import map_decision_filter_param
+from app.services.opportunity_validator import validate_opportunity
+from app.services.regime_filter_service import load_regime_filter
 from app.services.pattern_staleness import (
     compute_pattern_staleness_fields,
     stale_threshold_bars,
@@ -75,7 +74,7 @@ def _pre_enrich_sort(rows: list[OpportunityRow]) -> list[OpportunityRow]:
 def _decision_sort_priority(r: OpportunityRow) -> int:
     """Operabile > Da monitorare > Scartare."""
     d = r.operational_decision or "monitor"
-    if d == "operable":
+    if d == "execute":
         return 0
     if d == "monitor":
         return 1
@@ -305,6 +304,12 @@ async def list_opportunities(
         )
         variant_lookup = {}
 
+    try:
+        regime_filter = await load_regime_filter(session)
+    except Exception:
+        logger.exception("list_opportunities: load_regime_filter failed; regime fields degraded")
+        regime_filter = None
+
     enriched: list[OpportunityRow] = []
     for r in ranked:
         c = candle_map.get((r.provider, r.exchange, r.symbol, r.timeframe))
@@ -339,12 +344,38 @@ async def list_opportunities(
                 "trade_plan_fallback_reason": fbr,
             },
         )
-        dec, rationale_lines = compute_operational_decision_and_rationale(row_with_plan)
+        ts_ref = row_with_plan.pattern_timestamp or row_with_plan.context_timestamp
+        if row_with_plan.provider == "binance":
+            regime_spy = "n/a"
+            regime_direction_ok = True
+        elif regime_filter is not None:
+            regime_spy = regime_filter.get_regime_label(ts_ref)
+            if row_with_plan.provider == "yahoo_finance":
+                allowed = regime_filter.get_allowed_directions(ts_ref)
+                d = (row_with_plan.latest_pattern_direction or "").strip().lower()
+                regime_direction_ok = d in allowed if d in ("bullish", "bearish") else False
+            else:
+                regime_direction_ok = True
+        else:
+            regime_spy = "unknown"
+            regime_direction_ok = True
+
+        v_dec, v_rationale = validate_opportunity(
+            symbol=row_with_plan.symbol,
+            timeframe=row_with_plan.timeframe,
+            provider=row_with_plan.provider,
+            pattern_name=row_with_plan.latest_pattern_name,
+            direction=row_with_plan.latest_pattern_direction,
+            regime_filter=regime_filter,
+            timestamp=ts_ref,
+        )
         enriched.append(
             row_with_plan.model_copy(
                 update={
-                    "operational_decision": dec,
-                    "decision_rationale": rationale_lines,
+                    "operational_decision": v_dec,
+                    "decision_rationale": v_rationale,
+                    "regime_spy": regime_spy,
+                    "regime_direction_ok": regime_direction_ok,
                 },
             ),
         )

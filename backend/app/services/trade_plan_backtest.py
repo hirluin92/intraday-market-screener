@@ -23,6 +23,7 @@ from typing import Any, Literal
 from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.trade_plan_variant_constants import BACKTEST_TOTAL_COST_RATE_DEFAULT
 from app.models.candle import Candle
 from app.models.candle_context import CandleContext
 from app.models.candle_feature import CandleFeature
@@ -44,6 +45,21 @@ MAX_BARS_ENTRY_SCAN = 20
 MAX_BARS_AFTER_ENTRY = 48
 
 Outcome = Literal["stop", "tp1", "tp2", "timeout"]
+
+
+def _cost_r(entry: Decimal, risk: Decimal, cost_rate: float) -> float:
+    """
+    Costo round-trip espresso in R-multipli.
+
+    cost_rate: frazione del notional (es. 0.0015 per 0.15% round-trip).
+    risk: distanza assoluta entry→stop in unità di prezzo (già Decimal).
+
+    Il costo è simmetrico: viene pagato sia all'apertura che alla chiusura
+    indipendentemente dall'esito (stop, TP, timeout).
+    """
+    if risk <= 0 or entry <= 0:
+        return 0.0
+    return float(cost_rate) * float(entry / risk)
 
 
 def _d(x: Any) -> Decimal:
@@ -105,6 +121,7 @@ def _simulate_long_after_entry(
     tp1: Decimal,
     tp2: Decimal,
     max_bars: int,
+    cost_rate: float = 0.0,
 ) -> tuple[Outcome, float]:
     """
     Long: stop sotto; TP sopra (tp1 più vicino, tp2 più lontano).
@@ -112,19 +129,20 @@ def _simulate_long_after_entry(
     toccati — interpretazione «obiettivo pieno TP2» quando il movimento arriva in alto.
     """
     risk = entry - stop
+    cr = _cost_r(entry, risk, cost_rate)
     if risk <= 0:
-        return "stop", -1.0
+        return "stop", -(1.0 + cr)
     end = min(entry_idx + max_bars, len(candles))
     for k in range(entry_idx, end):
         c = candles[k]
         lo, hi = _d(c.low), _d(c.high)
         if lo <= stop:
-            return "stop", -1.0
+            return "stop", -(1.0 + cr)
         if hi >= tp2:
-            return "tp2", float((tp2 - entry) / risk)
+            return "tp2", float((tp2 - entry) / risk) - cr
         if hi >= tp1:
-            return "tp1", float((tp1 - entry) / risk)
-    return "timeout", 0.0
+            return "tp1", float((tp1 - entry) / risk) - cr
+    return "timeout", -cr
 
 
 def _simulate_short_after_entry(
@@ -136,25 +154,27 @@ def _simulate_short_after_entry(
     tp1: Decimal,
     tp2: Decimal,
     max_bars: int,
+    cost_rate: float = 0.0,
 ) -> tuple[Outcome, float]:
     """
     Short: stop sopra; TP sotto (tp1 più vicino al prezzo, tp2 più lontano in basso).
     Stessa candela: stop prima; poi TP2 prima di TP1 se il ribasso tocca entrambi.
     """
     risk = stop - entry
+    cr = _cost_r(entry, risk, cost_rate)
     if risk <= 0:
-        return "stop", -1.0
+        return "stop", -(1.0 + cr)
     end = min(entry_idx + max_bars, len(candles))
     for k in range(entry_idx, end):
         c = candles[k]
         lo, hi = _d(c.low), _d(c.high)
         if hi >= stop:
-            return "stop", -1.0
+            return "stop", -(1.0 + cr)
         if lo <= tp2:
-            return "tp2", float((entry - tp2) / risk)
+            return "tp2", float((entry - tp2) / risk) - cr
         if lo <= tp1:
-            return "tp1", float((entry - tp1) / risk)
-    return "timeout", 0.0
+            return "tp1", float((entry - tp1) / risk) - cr
+    return "timeout", -cr
 
 
 def _eligible_plan(plan: TradePlanV1) -> bool:
@@ -174,6 +194,7 @@ def _simulate_one(
     candles: list[Candle],
     pattern_idx: int,
     plan: TradePlanV1,
+    cost_rate: float = 0.0,
 ) -> tuple[bool, Outcome | None, float | None]:
     """
     Ritorna (entry_triggered, outcome, r_multiple).
@@ -206,6 +227,7 @@ def _simulate_one(
             tp1=tp1,
             tp2=tp2,
             max_bars=MAX_BARS_AFTER_ENTRY,
+            cost_rate=cost_rate,
         )
         return True, out, r
     out, r = _simulate_short_after_entry(
@@ -216,6 +238,7 @@ def _simulate_one(
         tp1=tp1,
         tp2=tp2,
         max_bars=MAX_BARS_AFTER_ENTRY,
+        cost_rate=cost_rate,
     )
     return True, out, r
 
@@ -224,13 +247,90 @@ def simulate_trade_plan_forward(
     candles: list[Candle],
     pattern_idx: int,
     plan: TradePlanV1,
+    cost_rate: float = 0.0,
 ) -> tuple[bool, Outcome | None, float | None]:
     """API pubblica per altri moduli (es. variant backtest) senza importare simboli privati."""
-    return _simulate_one(candles, pattern_idx, plan)
+    return _simulate_one(candles, pattern_idx, plan, cost_rate=cost_rate)
 
 
 def trade_plan_eligible_for_simulation(plan: TradePlanV1) -> bool:
     return _eligible_plan(plan)
+
+
+def build_trade_plan_v1_for_stored_pattern(
+    pat: CandlePattern,
+    candle: Candle,
+    ctx: CandleContext,
+    pq_lookup: dict[tuple[str, str], PatternBacktestAggregateRow],
+) -> TradePlanV1:
+    """
+    Stessa pipeline di ``run_trade_plan_backtest`` per un singolo segnale:
+    scoring contesto + ``build_trade_plan_v1`` (livelli da Trade Plan Engine v1.1).
+    """
+    snap = SnapshotForScoring(
+        exchange=ctx.exchange,
+        symbol=ctx.symbol,
+        timeframe=ctx.timeframe,
+        timestamp=ctx.timestamp,
+        market_regime=ctx.market_regime,
+        volatility_regime=ctx.volatility_regime,
+        candle_expansion=ctx.candle_expansion,
+        direction_bias=ctx.direction_bias,
+    )
+    scored = score_snapshot(snap)
+    pq_score, pq_label = _pattern_quality_pair(pq_lookup, pat.pattern_name, pat.timeframe)
+    base_final = compute_final_opportunity_score(
+        screener_score=scored.screener_score,
+        score_direction=scored.score_direction,
+        latest_pattern_direction=pat.direction,
+        pattern_quality_score=pq_score,
+        pattern_quality_label=pq_label,
+        latest_pattern_strength=pat.pattern_strength,
+    )
+    final, _tf_ok, tf_gate, _tf_f = apply_pattern_timeframe_policy(
+        has_pattern=True,
+        pattern_quality_score=pq_score,
+        _pattern_quality_label=pq_label,
+        base_final_opportunity_score=base_final,
+    )
+    final_lbl = final_opportunity_label_from_score(final)
+
+    return build_trade_plan_v1(
+        final_opportunity_label=final_lbl,
+        final_opportunity_score=final,
+        score_direction=scored.score_direction,
+        latest_pattern_direction=pat.direction,
+        latest_pattern_name=pat.pattern_name,
+        candle_expansion=ctx.candle_expansion,
+        pattern_timeframe_gate_label=tf_gate,
+        volatility_regime=ctx.volatility_regime,
+        market_regime=ctx.market_regime,
+        candle_high=candle.high,
+        candle_low=candle.low,
+        candle_close=candle.close,
+    )
+
+
+def compute_trade_plan_pnl_from_pattern_row(
+    pat: CandlePattern,
+    candle: Candle,
+    ctx: CandleContext,
+    clist: list[Candle],
+    idx: int,
+    pq_lookup: dict[tuple[str, str], PatternBacktestAggregateRow],
+    cost_rate: float,
+) -> tuple[float, Outcome] | None:
+    """
+    R (multiplo) e outcome forward come ``run_trade_plan_backtest`` / ``_simulate_one``.
+    ``None`` se piano non idoneo o ingresso non triggerato. I costi sono già inclusi in R (``_cost_r``).
+    """
+    plan = build_trade_plan_v1_for_stored_pattern(pat, candle, ctx, pq_lookup)
+    if not _eligible_plan(plan):
+        return None
+    entry_ok, outcome, r_mult = _simulate_one(clist, idx, plan, cost_rate=cost_rate)
+    if not entry_ok or outcome is None or r_mult is None:
+        return None
+    return r_mult, outcome
 
 
 async def run_trade_plan_backtest(
@@ -243,6 +343,7 @@ async def run_trade_plan_backtest(
     timeframe: str | None,
     pattern_name: str | None,
     limit: int,
+    cost_rate: float = BACKTEST_TOTAL_COST_RATE_DEFAULT,
 ) -> TradePlanBacktestResponse:
     stmt = (
         select(CandlePattern, Candle, CandleContext)
@@ -276,6 +377,7 @@ async def run_trade_plan_backtest(
             trade_plan_engine_version="1.1",
             patterns_evaluated=0,
             eligible_trade_plans=0,
+            backtest_cost_rate_rt=cost_rate,
         )
 
     pq_lookup = await pattern_quality_lookup_by_name_tf(
@@ -340,48 +442,7 @@ async def run_trade_plan_backtest(
         if idx is None:
             continue
 
-        snap = SnapshotForScoring(
-            exchange=ctx.exchange,
-            symbol=ctx.symbol,
-            timeframe=ctx.timeframe,
-            timestamp=ctx.timestamp,
-            market_regime=ctx.market_regime,
-            volatility_regime=ctx.volatility_regime,
-            candle_expansion=ctx.candle_expansion,
-            direction_bias=ctx.direction_bias,
-        )
-        scored = score_snapshot(snap)
-        pq_score, pq_label = _pattern_quality_pair(pq_lookup, pat.pattern_name, pat.timeframe)
-        base_final = compute_final_opportunity_score(
-            screener_score=scored.screener_score,
-            score_direction=scored.score_direction,
-            latest_pattern_direction=pat.direction,
-            pattern_quality_score=pq_score,
-            pattern_quality_label=pq_label,
-            latest_pattern_strength=pat.pattern_strength,
-        )
-        final, _tf_ok, tf_gate, _tf_f = apply_pattern_timeframe_policy(
-            has_pattern=True,
-            pattern_quality_score=pq_score,
-            _pattern_quality_label=pq_label,
-            base_final_opportunity_score=base_final,
-        )
-        final_lbl = final_opportunity_label_from_score(final)
-
-        plan = build_trade_plan_v1(
-            final_opportunity_label=final_lbl,
-            final_opportunity_score=final,
-            score_direction=scored.score_direction,
-            latest_pattern_direction=pat.direction,
-            latest_pattern_name=pat.pattern_name,
-            candle_expansion=ctx.candle_expansion,
-            pattern_timeframe_gate_label=tf_gate,
-            volatility_regime=ctx.volatility_regime,
-            market_regime=ctx.market_regime,
-            candle_high=candle.high,
-            candle_low=candle.low,
-            candle_close=candle.close,
-        )
+        plan = build_trade_plan_v1_for_stored_pattern(pat, candle, ctx, pq_lookup)
 
         if not _eligible_plan(plan):
             continue
@@ -390,7 +451,7 @@ async def run_trade_plan_backtest(
         bkey = (pat.pattern_name, pat.timeframe, pat.provider, pat.asset_type)
         bucket[bkey]["sample"] += 1
 
-        entry_ok, outcome, r_mult = _simulate_one(clist, idx, plan)
+        entry_ok, outcome, r_mult = _simulate_one(clist, idx, plan, cost_rate=cost_rate)
         if not entry_ok:
             continue
         bucket[bkey]["entry_touch"] += 1
@@ -447,6 +508,7 @@ async def run_trade_plan_backtest(
         trade_plan_engine_version="1.1",
         patterns_evaluated=patterns_evaluated,
         eligible_trade_plans=eligible,
+        backtest_cost_rate_rt=cost_rate,
     )
 
 
@@ -462,6 +524,7 @@ async def trade_plan_backtest_lookup_by_bucket(
     provider: str | None = None,
     asset_type: str | None = None,
     timeframe: str | None,
+    cost_rate: float = BACKTEST_TOTAL_COST_RATE_DEFAULT,
 ) -> dict[tuple[str, str, str, str], TradePlanBacktestAggregateRow]:
     """
     Mappa (pattern_name, timeframe, provider, asset_type) → riga aggregata backtest trade plan.
@@ -476,6 +539,7 @@ async def trade_plan_backtest_lookup_by_bucket(
         timeframe=timeframe,
         pattern_name=None,
         limit=TRADE_PLAN_BACKTEST_LOOKUP_LIMIT,
+        cost_rate=cost_rate,
     )
     return {
         (a.pattern_name, a.timeframe, a.provider, a.asset_type): a

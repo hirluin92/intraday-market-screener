@@ -19,7 +19,7 @@ async def pipeline_refresh(
     session: AsyncSession = Depends(get_db_session),
 ) -> PipelineRefreshResponse:
     """
-    Synchronous MVP pipeline: ingest → features → context → patterns with shared filters.
+    Synchronous MVP pipeline: ingest → features → indicators → context → patterns with shared filters.
     """
     try:
         return await execute_pipeline_refresh(session, body)

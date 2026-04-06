@@ -215,15 +215,16 @@ export function tradePlanFallbackReasonIt(code: string | null | undefined): stri
   }
 }
 
-/** Codice API: operable | monitor | discard */
-export type OperationalDecisionCode = "operable" | "monitor" | "discard";
+/** Codice API: execute | monitor | discard (operable legacy) */
+export type OperationalDecisionCode = "execute" | "monitor" | "discard";
 
 export function displayOperationalDecisionListLabel(
   code: string | null | undefined,
 ): string {
   switch (code) {
+    case "execute":
     case "operable":
-      return "Operabile";
+      return "Esegui";
     case "monitor":
       return "Da monitorare";
     case "discard":
@@ -238,8 +239,9 @@ export function displayOperationalDecisionBadgeShort(
   code: string | null | undefined,
 ): string {
   switch (code) {
+    case "execute":
     case "operable":
-      return "OPERABILE";
+      return "ESEGUI";
     case "monitor":
       return "MONITORA";
     case "discard":
@@ -251,6 +253,7 @@ export function displayOperationalDecisionBadgeShort(
 
 export function operationalDecisionBadgeClass(code: string | null | undefined): string {
   switch (code) {
+    case "execute":
     case "operable":
       return "bg-emerald-600 text-white shadow-md shadow-emerald-900/20 dark:bg-emerald-700";
     case "monitor":
@@ -264,6 +267,7 @@ export function operationalDecisionBadgeClass(code: string | null | undefined): 
 
 export function operationalDecisionListCellClass(code: string | null | undefined): string {
   switch (code) {
+    case "execute":
     case "operable":
       return "font-medium text-emerald-800 dark:text-emerald-300";
     case "monitor":
@@ -278,6 +282,7 @@ export function operationalDecisionListCellClass(code: string | null | undefined
 /** Badge pill per colonna Decisione in tabella lista (più leggibile della sola tinta testo). */
 export function operationalDecisionBadgePillClass(code: string | null | undefined): string {
   switch (code) {
+    case "execute":
     case "operable":
       return "bg-emerald-100 text-emerald-900 ring-1 ring-emerald-300 dark:bg-emerald-950/60 dark:text-emerald-200 dark:ring-emerald-800";
     case "monitor":

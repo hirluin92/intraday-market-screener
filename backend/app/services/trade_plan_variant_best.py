@@ -11,6 +11,7 @@ from collections import defaultdict
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.trade_plan_variant_constants import (
+    BACKTEST_TOTAL_COST_RATE_DEFAULT,
     TRADE_PLAN_VARIANT_MIN_SAMPLE,
     TRADE_PLAN_VARIANT_PROMOTED_MIN_SAMPLE,
 )
@@ -206,6 +207,7 @@ async def run_trade_plan_variant_best(
     limit: int,
     status_scope: str = "promoted_watchlist",
     operational_status: str | None = None,
+    cost_rate: float = BACKTEST_TOTAL_COST_RATE_DEFAULT,
 ) -> TradePlanVariantBestResponse:
     """Esegue il backtest varianti completo e restituisce la migliore variante per bucket."""
     v = await run_trade_plan_variant_backtest(
@@ -217,6 +219,7 @@ async def run_trade_plan_variant_best(
         timeframe=timeframe,
         pattern_name=pattern_name,
         limit=limit,
+        cost_rate=cost_rate,
     )
     all_best = build_best_rows_from_variant_rows(v.rows)
     counts = count_by_operational_status(all_best)
@@ -235,4 +238,5 @@ async def run_trade_plan_variant_best(
         patterns_evaluated=v.patterns_evaluated,
         min_sample_for_reliable_rank=TRADE_PLAN_VARIANT_MIN_SAMPLE,
         trade_plan_engine_version=v.trade_plan_engine_version,
+        backtest_cost_rate_rt=cost_rate,
     )

@@ -73,9 +73,13 @@ export type OpportunityRow = {
   trade_plan_source?: "variant_backtest" | "default_fallback";
   /** Se default_fallback: codice motivo (no_pattern | no_variant_bucket | …). */
   trade_plan_fallback_reason?: string | null;
-  /** operable | monitor | discard */
-  operational_decision?: "operable" | "monitor" | "discard";
+  /** execute | monitor | discard (legacy: operable) */
+  operational_decision?: "execute" | "operable" | "monitor" | "discard";
   decision_rationale?: string[];
+  /** Regime SPY 1d (bullish | bearish | neutral | unknown) */
+  regime_spy?: string;
+  /** Direzione pattern coerente con filtro regime (Yahoo) */
+  regime_direction_ok?: boolean;
 };
 
 export type OpportunitiesResponse = {
@@ -113,7 +117,7 @@ export async function fetchOpportunities(params: {
   provider?: string;
   asset_type?: string;
   limit?: number;
-  /** operable | monitor | discard (o alias IT: operabile, da_monitorare, scartare) */
+  /** execute | monitor | discard (o alias IT / operable) */
   decision?: string;
 }): Promise<OpportunitiesResponse> {
   const url = new URL(`${base}/api/v1/screener/opportunities`);
@@ -173,6 +177,8 @@ export async function fetchBacktestPatterns(params: {
   symbol?: string;
   timeframe?: string;
   pattern_name?: string;
+  provider?: string;
+  asset_type?: string;
   limit?: number;
 }): Promise<BacktestPatternsResponse> {
   const url = new URL(`${base}/api/v1/backtest/patterns`);
@@ -185,8 +191,241 @@ export async function fetchBacktestPatterns(params: {
   if (params.pattern_name?.trim()) {
     url.searchParams.set("pattern_name", params.pattern_name.trim());
   }
+  if (params.provider?.trim()) {
+    url.searchParams.set("provider", params.provider.trim());
+  }
+  if (params.asset_type?.trim()) {
+    url.searchParams.set("asset_type", params.asset_type.trim());
+  }
   if (params.limit != null) {
     url.searchParams.set("limit", String(params.limit));
+  }
+  const res = await fetch(url.toString(), { cache: "no-store" });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(text || `${res.status} ${res.statusText}`);
+  }
+  return res.json();
+}
+
+export type SimulationEquityPoint = {
+  timestamp: string;
+  equity: number;
+};
+
+export type SimulationTradeRow = {
+  timestamp: string;
+  symbol: string;
+  pattern_name: string;
+  direction: string;
+  strength: number;
+  horizon_bars: number;
+  signed_return_pct: number;
+  pnl_r: number;
+  pnl_r_net: number;
+  outcome: "win" | "loss" | "flat";
+  capital_after: number;
+};
+
+export type BacktestSimulationResponse = {
+  initial_capital: number;
+  final_capital: number;
+  total_return_pct: number;
+  max_drawdown_pct: number;
+  total_trades: number;
+  skipped_trades: number;
+  win_rate: number;
+  sharpe_ratio: number | null;
+  /** Media R per trade (backend). */
+  expectancy_r?: number | null;
+  profit_factor?: number | null;
+  equity_curve: SimulationEquityPoint[];
+  pattern_names_used: string[];
+  forward_horizons_used: number[];
+  trades?: SimulationTradeRow[];
+  avg_simultaneous_trades?: number;
+  max_simultaneous_observed?: number;
+  bars_with_trades?: number;
+  trades_skipped_by_regime?: number;
+  regime_filter_active?: boolean;
+  note: string | null;
+};
+
+export type OOSSetMetrics = {
+  period: string;
+  total_trades: number;
+  total_return_pct: number;
+  win_rate: number;
+  expectancy_r: number | null;
+  max_drawdown_pct: number;
+  sharpe_ratio: number | null;
+  profit_factor: number | null;
+};
+
+export type OOSResult = {
+  cutoff_date: string;
+  train_set: OOSSetMetrics;
+  test_set: OOSSetMetrics & {
+    equity_curve: SimulationEquityPoint[];
+    trades: SimulationTradeRow[];
+  };
+  performance_degradation_pct: number;
+  oos_verdict:
+    | "robusto"
+    | "degradazione_moderata"
+    | "possibile_overfitting";
+  pattern_names_used: string[];
+};
+
+export type SimulationParams = {
+  provider: string;
+  timeframe: string;
+  pattern_names?: string[];
+  initial_capital?: number;
+  risk_per_trade_pct?: number;
+  cost_rate?: number;
+  max_simultaneous?: number;
+  include_trades?: boolean;
+  pattern_row_limit?: number;
+  /** Periodo relativo (1m, 3m, 6m, 1y, 2y, 3y); omesso o "all" = tutto lo storico. */
+  period?: string;
+  date_from?: string;
+  date_to?: string;
+  /** Filtro regime SPY 1d (default API: false se omesso). */
+  use_regime_filter?: boolean;
+  /** Ore UTC da escludere (solo Yahoo; Binance ignora). Ripetuto in query. */
+  exclude_hours?: number[];
+  include_hours?: number[];
+  exclude_symbols?: string[];
+  include_symbols?: string[];
+};
+
+export async function fetchBacktestSimulation(
+  params: SimulationParams,
+): Promise<BacktestSimulationResponse> {
+  const url = new URL(`${base}/api/v1/backtest/simulation`);
+  url.searchParams.set("provider", params.provider.trim());
+  url.searchParams.set("timeframe", params.timeframe.trim());
+  for (const p of params.pattern_names ?? []) {
+    const t = p.trim();
+    if (t) url.searchParams.append("pattern_names", t);
+  }
+  if (params.initial_capital != null) {
+    url.searchParams.set("initial_capital", String(params.initial_capital));
+  }
+  if (params.risk_per_trade_pct != null) {
+    url.searchParams.set("risk_per_trade_pct", String(params.risk_per_trade_pct));
+  }
+  if (params.cost_rate != null) {
+    url.searchParams.set("cost_rate", String(params.cost_rate));
+  }
+  if (params.max_simultaneous != null) {
+    url.searchParams.set("max_simultaneous", String(params.max_simultaneous));
+  }
+  if (params.include_trades != null) {
+    url.searchParams.set("include_trades", String(params.include_trades));
+  }
+  if (params.pattern_row_limit != null) {
+    url.searchParams.set("pattern_row_limit", String(params.pattern_row_limit));
+  }
+  if (params.period != null && params.period !== "" && params.period !== "all") {
+    url.searchParams.set("period", params.period.trim());
+  }
+  if (params.date_from?.trim()) {
+    url.searchParams.set("date_from", params.date_from.trim());
+  }
+  if (params.date_to?.trim()) {
+    url.searchParams.set("date_to", params.date_to.trim());
+  }
+  if (params.use_regime_filter !== undefined) {
+    url.searchParams.set(
+      "use_regime_filter",
+      String(params.use_regime_filter),
+    );
+  }
+  if (params.exclude_hours?.length) {
+    for (const h of params.exclude_hours) {
+      url.searchParams.append("exclude_hours", String(h));
+    }
+  }
+  if (params.include_hours?.length) {
+    for (const h of params.include_hours) {
+      url.searchParams.append("include_hours", String(h));
+    }
+  }
+  if (params.exclude_symbols?.length) {
+    for (const s of params.exclude_symbols) {
+      const t = s.trim();
+      if (t) url.searchParams.append("exclude_symbols", t);
+    }
+  }
+  if (params.include_symbols?.length) {
+    for (const s of params.include_symbols) {
+      const t = s.trim();
+      if (t) url.searchParams.append("include_symbols", t);
+    }
+  }
+  const res = await fetch(url.toString(), { cache: "no-store" });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(text || `${res.status} ${res.statusText}`);
+  }
+  return res.json();
+}
+
+/** Alias per la simulazione equity (stesso endpoint). */
+export async function runSimulation(
+  params: SimulationParams,
+): Promise<BacktestSimulationResponse> {
+  return fetchBacktestSimulation(params);
+}
+
+export type OutOfSampleParams = {
+  provider: string;
+  timeframe: string;
+  pattern_names?: string[];
+  cutoff_date?: string;
+  initial_capital?: number;
+  risk_per_trade_pct?: number;
+  cost_rate?: number;
+  max_simultaneous?: number;
+  include_trades?: boolean;
+  use_regime_filter?: boolean;
+};
+
+export async function fetchOutOfSample(
+  params: OutOfSampleParams,
+): Promise<OOSResult> {
+  const url = new URL(`${base}/api/v1/backtest/out-of-sample`);
+  url.searchParams.set("provider", params.provider.trim());
+  url.searchParams.set("timeframe", params.timeframe.trim());
+  for (const p of params.pattern_names ?? []) {
+    const t = p.trim();
+    if (t) url.searchParams.append("pattern_names", t);
+  }
+  if (params.cutoff_date?.trim()) {
+    url.searchParams.set("cutoff_date", params.cutoff_date.trim());
+  }
+  if (params.initial_capital != null) {
+    url.searchParams.set("initial_capital", String(params.initial_capital));
+  }
+  if (params.risk_per_trade_pct != null) {
+    url.searchParams.set("risk_per_trade_pct", String(params.risk_per_trade_pct));
+  }
+  if (params.cost_rate != null) {
+    url.searchParams.set("cost_rate", String(params.cost_rate));
+  }
+  if (params.max_simultaneous != null) {
+    url.searchParams.set("max_simultaneous", String(params.max_simultaneous));
+  }
+  if (params.include_trades != null) {
+    url.searchParams.set("include_trades", String(params.include_trades));
+  }
+  if (params.use_regime_filter !== undefined) {
+    url.searchParams.set(
+      "use_regime_filter",
+      String(params.use_regime_filter),
+    );
   }
   const res = await fetch(url.toString(), { cache: "no-store" });
   if (!res.ok) {
@@ -426,6 +665,8 @@ export type TradePlanVariantBestResponse = {
   patterns_evaluated: number;
   min_sample_for_reliable_rank: number;
   trade_plan_engine_version: string;
+  /** Tasso costo round-trip usato nel backtest (frazione notional). */
+  backtest_cost_rate_rt?: number;
 };
 
 export type TradePlanVariantStatusScope =

@@ -1,6 +1,5 @@
 "use client";
 
-import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -24,9 +23,7 @@ import {
   fontePianoListLabel,
   fontePianoListTitle,
   decisionRationaleTitleAttr,
-  displayOperationalDecisionListLabel,
   displayPatternAgeListLabel,
-  operationalDecisionBadgePillClass,
   patternAgeListCellClass,
   patternAgeListTooltip,
   signalAlignmentBadgeClass,
@@ -60,7 +57,7 @@ const PROVIDER_FILTER_OPTIONS = ["", "binance", "yahoo_finance"] as const;
 const ASSET_TYPE_FILTER_OPTIONS = ["", "crypto", "etf", "stock", "index"] as const;
 
 /** Filtro semaforo (valori API). */
-const DECISION_FILTER_OPTIONS = ["", "operable", "monitor", "discard"] as const;
+const DECISION_FILTER_OPTIONS = ["", "execute", "monitor", "discard"] as const;
 
 function formatTs(iso: string | null | undefined): string {
   if (!iso) return "—";
@@ -151,9 +148,9 @@ export default function OpportunitiesPage() {
   const [pipeExchangeOverride, setPipeExchangeOverride] = useState("");
   const [pipeSymbol, setPipeSymbol] = useState("");
   const [pipeTimeframe, setPipeTimeframe] = useState("");
-  const [pipeIngestLimit, setPipeIngestLimit] = useState(100);
-  const [pipeExtractLimit, setPipeExtractLimit] = useState(500);
-  const [pipeLookback, setPipeLookback] = useState(20);
+  const [pipeIngestLimit, setPipeIngestLimit] = useState(2500);
+  const [pipeExtractLimit, setPipeExtractLimit] = useState(5000);
+  const [pipeLookback, setPipeLookback] = useState(50);
   const [pipeLoading, setPipeLoading] = useState(false);
   const [pipeMessage, setPipeMessage] = useState<string | null>(null);
   const [pipeError, setPipeError] = useState<string | null>(null);
@@ -163,6 +160,10 @@ export default function OpportunitiesPage() {
     filterMode: "all",
     economicRankingEnabled: false,
   });
+  /** Filtro rapido semaforo (client-side, oltre al select «Decisione» che chiama l'API). */
+  const [decisionQuickFilter, setDecisionQuickFilter] = useState<
+    "all" | "execute" | "monitor"
+  >("all");
 
   useEffect(() => {
     setSizingInput(loadPositionSizingInput());
@@ -174,9 +175,18 @@ export default function OpportunitiesPage() {
   }, [econPrefs]);
 
   const displayRows = useMemo(() => {
-    const enriched = rows.map((row) => ({
+    const byDecision =
+      decisionQuickFilter === "all"
+        ? rows
+        : rows.filter((r) => r.operational_decision === decisionQuickFilter);
+    const enriched = byDecision.map((row) => ({
       row,
-      snap: computeOpportunityEconomicSnapshot(row.trade_plan, sizingInput),
+      snap: computeOpportunityEconomicSnapshot(
+        row.trade_plan,
+        sizingInput,
+        row.final_opportunity_score,
+        row.selected_trade_plan_variant_status,
+      ),
     }));
     const filtered = enriched.filter((e) => rowMatchesEconomicFilter(e.snap, econPrefs.filterMode));
     const sorted = [...filtered];
@@ -242,7 +252,7 @@ export default function OpportunitiesPage() {
 
   return (
     <div className="mx-auto flex min-h-full max-w-[120rem] flex-col gap-6 p-6">
-      <header className="flex flex-wrap items-baseline justify-between gap-4 border-b border-zinc-200 pb-4 dark:border-zinc-800">
+      <header className="border-b border-zinc-200 pb-4 dark:border-zinc-800">
         <div>
           <h1 className="text-xl font-semibold tracking-tight">
             Opportunità
@@ -252,32 +262,6 @@ export default function OpportunitiesPage() {
             La colonna Alert indica i candidati alert MVP (regole lato server). Clicca una riga per
             aprire il dettaglio della serie.
           </p>
-        </div>
-        <div className="flex gap-4 text-sm">
-          <Link
-            href="/"
-            className="text-zinc-600 underline underline-offset-4 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
-          >
-            Home
-          </Link>
-          <Link
-            href="/backtest"
-            className="text-zinc-600 underline underline-offset-4 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
-          >
-            Backtest
-          </Link>
-          <Link
-            href="/trade-plan-lab"
-            className="text-zinc-600 underline underline-offset-4 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
-          >
-            Trade plan lab
-          </Link>
-          <Link
-            href="/diagnostica"
-            className="text-zinc-600 underline underline-offset-4 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
-          >
-            Diagnostica
-          </Link>
         </div>
       </header>
 
@@ -347,7 +331,7 @@ export default function OpportunitiesPage() {
             <input
               type="number"
               min={1}
-              max={1500}
+              max={5000}
               className="w-24 rounded border border-zinc-300 bg-white px-2 py-1.5 text-sm dark:border-zinc-600 dark:bg-zinc-900"
               value={pipeIngestLimit}
               onChange={(e) => setPipeIngestLimit(Number(e.target.value))}
@@ -447,6 +431,48 @@ export default function OpportunitiesPage() {
         </div>
       </section>
 
+      <section
+        className="flex flex-wrap items-center gap-2 rounded-lg border border-zinc-200 bg-zinc-50/90 px-3 py-2 dark:border-zinc-800 dark:bg-zinc-950/40"
+        aria-label="Filtro rapido decisione"
+      >
+        <span className="text-xs font-medium text-zinc-600 dark:text-zinc-400">
+          Semaforo:
+        </span>
+        <button
+          type="button"
+          onClick={() => setDecisionQuickFilter("all")}
+          className={`rounded px-2.5 py-1 text-xs font-medium ${
+            decisionQuickFilter === "all"
+              ? "bg-sky-600 text-white"
+              : "bg-zinc-200 text-zinc-800 dark:bg-zinc-800 dark:text-zinc-200"
+          }`}
+        >
+          Tutti
+        </button>
+        <button
+          type="button"
+          onClick={() => setDecisionQuickFilter("execute")}
+          className={`rounded px-2.5 py-1 text-xs font-medium ${
+            decisionQuickFilter === "execute"
+              ? "bg-emerald-600 text-white"
+              : "bg-zinc-200 text-zinc-800 dark:bg-zinc-800 dark:text-zinc-200"
+          }`}
+        >
+          Solo Esegui
+        </button>
+        <button
+          type="button"
+          onClick={() => setDecisionQuickFilter("monitor")}
+          className={`rounded px-2.5 py-1 text-xs font-medium ${
+            decisionQuickFilter === "monitor"
+              ? "bg-amber-500 text-white"
+              : "bg-zinc-200 text-zinc-800 dark:bg-zinc-800 dark:text-zinc-200"
+          }`}
+        >
+          Solo monitor
+        </button>
+      </section>
+
       <section className="flex flex-wrap items-end gap-3" aria-label="Filtri">
         <label className="flex flex-col gap-1 text-xs">
           <span className="font-medium text-zinc-700 dark:text-zinc-300">
@@ -524,8 +550,8 @@ export default function OpportunitiesPage() {
               <option key={d || "all"} value={d}>
                 {d === ""
                   ? "Tutte"
-                  : d === "operable"
-                    ? "Operabili"
+                  : d === "execute"
+                    ? "Esegui"
                     : d === "monitor"
                       ? "Da monitorare"
                       : "Scartare"}
@@ -610,7 +636,7 @@ export default function OpportunitiesPage() {
             </span>{" "}
             passa il mouse sul badge per una sintesi della motivazione.
           </p>
-          <table className="w-full min-w-[168rem] border-collapse text-left text-sm">
+          <table className="w-full min-w-[176rem] border-collapse text-left text-sm">
             <thead>
               <tr className="border-b border-zinc-200 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900/60">
                 <th className="sticky left-0 z-20 min-w-[8rem] border-r border-zinc-200 bg-zinc-50 px-3 py-2 font-medium shadow-[4px_0_12px_-6px_rgba(0,0,0,0.12)] dark:border-zinc-700 dark:bg-zinc-950">
@@ -697,8 +723,14 @@ export default function OpportunitiesPage() {
                 <th className="px-3 py-2 font-medium">Orario ctx</th>
                 <th className="px-3 py-2 font-medium">Orario pattern</th>
                 <th
-                  className="sticky right-0 z-20 min-w-[9rem] border-l border-zinc-200 bg-zinc-50 px-3 py-2 font-medium shadow-[-8px_0_12px_-6px_rgba(0,0,0,0.06)] dark:border-zinc-700 dark:bg-zinc-950"
-                  title="Semaforo operativo. Hover sul badge per la motivazione (prime righe)."
+                  className="sticky right-[11rem] z-20 min-w-[8rem] border-l border-zinc-200 bg-zinc-50 px-3 py-2 font-medium shadow-[-8px_0_12px_-6px_rgba(0,0,0,0.06)] dark:border-zinc-700 dark:bg-zinc-950"
+                  title="Regime SPY 1d (EMA50) alla data di riferimento."
+                >
+                  Regime SPY
+                </th>
+                <th
+                  className="sticky right-0 z-20 min-w-[11rem] border-l border-zinc-200 bg-zinc-50 px-3 py-2 font-medium shadow-[-8px_0_12px_-6px_rgba(0,0,0,0.06)] dark:border-zinc-700 dark:bg-zinc-950"
+                  title="Semaforo operativo validato (pattern/universo/regime). Sotto: motivazione."
                 >
                   Decisione
                 </th>
@@ -845,14 +877,60 @@ export default function OpportunitiesPage() {
                     {formatTs(r.pattern_timestamp ?? undefined)}
                   </td>
                   <td
-                    className="sticky right-0 z-10 min-w-[9rem] border-l border-zinc-200 bg-[var(--background)] px-3 py-2 text-xs shadow-[-8px_0_12px_-6px_rgba(0,0,0,0.06)] dark:border-zinc-700 dark:bg-zinc-950"
-                    title={decisionRationaleTitleAttr(r)}
+                    className="sticky right-[11rem] z-10 min-w-[8rem] border-l border-zinc-200 bg-[var(--background)] px-3 py-2 text-xs shadow-[-8px_0_12px_-6px_rgba(0,0,0,0.06)] dark:border-zinc-700 dark:bg-zinc-950"
+                    title={
+                      r.regime_direction_ok === false
+                        ? "Direzione pattern non allineata al regime SPY"
+                        : "Regime macro SPY (informativo)"
+                    }
                   >
                     <span
-                      className={`inline-flex items-center rounded-md px-2 py-0.5 text-xs font-medium ${operationalDecisionBadgePillClass(r.operational_decision)}`}
+                      className={`inline-block rounded px-2 py-0.5 text-xs font-medium ${
+                        (r.regime_spy ?? "unknown") === "bullish"
+                          ? "bg-emerald-900/90 text-emerald-200"
+                          : (r.regime_spy ?? "unknown") === "bearish"
+                            ? "bg-red-900/90 text-red-200"
+                            : (r.regime_spy ?? "unknown") === "neutral"
+                              ? "bg-zinc-600 text-zinc-100"
+                              : (r.regime_spy ?? "unknown") === "n/a"
+                                ? "bg-slate-600 text-slate-100"
+                                : "bg-zinc-500/80 text-zinc-100"
+                      }`}
                     >
-                      {displayOperationalDecisionListLabel(r.operational_decision)}
+                      {(r.regime_spy ?? "unknown").replace("_", " ")}
                     </span>
+                  </td>
+                  <td
+                    className="sticky right-0 z-10 min-w-[11rem] max-w-[14rem] border-l border-zinc-200 bg-[var(--background)] px-3 py-2 text-xs shadow-[-8px_0_12px_-6px_rgba(0,0,0,0.06)] dark:border-zinc-700 dark:bg-zinc-950"
+                    title={decisionRationaleTitleAttr(r)}
+                  >
+                    <div className="flex flex-col gap-1.5">
+                      <div className="flex flex-wrap items-center gap-1">
+                        <span
+                          className={`inline-flex items-center rounded-md px-2 py-0.5 text-xs font-bold ${
+                            r.operational_decision === "execute"
+                              ? "bg-emerald-600 text-white dark:bg-emerald-700"
+                              : r.operational_decision === "monitor"
+                                ? "bg-amber-500 text-white"
+                                : "bg-red-950 text-red-200"
+                          }`}
+                        >
+                          {r.operational_decision === "execute"
+                            ? "Esegui"
+                            : r.operational_decision === "monitor"
+                              ? "Monitor"
+                              : "Scarta"}
+                        </span>
+                      </div>
+                      {(r.decision_rationale ?? []).map((line, i) => (
+                        <p
+                          key={i}
+                          className="text-[0.7rem] leading-snug text-zinc-500 dark:text-zinc-400"
+                        >
+                          {line}
+                        </p>
+                      ))}
+                    </div>
                   </td>
                 </tr>
               ))}

@@ -58,7 +58,7 @@ class PatternExtractRequest(BaseModel):
         ),
     )
     limit: int = Field(
-        default=500,
+        default=5000,
         ge=1,
         le=10_000,
         description="Max joined (feature, context) rows processed per series, oldest-first.",

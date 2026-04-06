@@ -7,22 +7,23 @@ import {
 } from "@/lib/displayLabels";
 
 type DecisionCounts = {
-  operable: number;
+  execute: number;
   monitor: number;
   discard: number;
   total: number;
 };
 
 function countDecisions(rows: OpportunityRow[]): DecisionCounts {
-  let operable = 0;
+  let execute = 0;
   let monitor = 0;
   let discard = 0;
   for (const r of rows) {
-    if (r.operational_decision === "operable") operable++;
+    if (r.operational_decision === "execute" || r.operational_decision === "operable")
+      execute++;
     else if (r.operational_decision === "monitor") monitor++;
     else discard++;
   }
-  return { operable, monitor, discard, total: rows.length };
+  return { execute, monitor, discard, total: rows.length };
 }
 
 export function OpportunitySummaryBar({ rows }: { rows: OpportunityRow[] }) {
@@ -30,7 +31,7 @@ export function OpportunitySummaryBar({ rows }: { rows: OpportunityRow[] }) {
   if (counts.total === 0) return null;
 
   const segments: [string, number][] = [
-    ["operable", counts.operable],
+    ["execute", counts.execute],
     ["monitor", counts.monitor],
     ["discard", counts.discard],
   ];

@@ -1,6 +1,5 @@
 "use client";
 
-import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   fetchTradePlanVariantBest,
@@ -161,7 +160,7 @@ export default function TradePlanLabPage() {
 
   return (
     <div className="mx-auto flex min-h-full max-w-[120rem] flex-col gap-6 p-6">
-      <header className="flex flex-wrap items-baseline justify-between gap-4 border-b border-zinc-200 pb-4 dark:border-zinc-800">
+      <header className="border-b border-zinc-200 pb-4 dark:border-zinc-800">
         <div>
           <p className="text-xs font-medium uppercase tracking-wide text-zinc-500">
             Backtest
@@ -174,32 +173,11 @@ export default function TradePlanLabPage() {
             operativo (promossa → watchlist → respinta), poi sample decrescente, poi expectancy R.
             Di default sono nascoste le righe respinte; usa il filtro stato per includerle.
           </p>
-        </div>
-        <div className="flex flex-wrap gap-4 text-sm">
-          <Link
-            href="/"
-            className="text-zinc-600 underline underline-offset-4 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
-          >
-            Home
-          </Link>
-          <Link
-            href="/opportunities"
-            className="text-zinc-600 underline underline-offset-4 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
-          >
-            Opportunità
-          </Link>
-          <Link
-            href="/backtest"
-            className="text-zinc-600 underline underline-offset-4 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
-          >
-            Backtest pattern
-          </Link>
-          <Link
-            href="/diagnostica"
-            className="text-zinc-600 underline underline-offset-4 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
-          >
-            Diagnostica
-          </Link>
+          <p className="mt-1 max-w-3xl text-xs text-amber-800 dark:text-amber-300 bg-amber-50/60 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-900/50 rounded px-3 py-2">
+            Simulazione con costi stimati round-trip inclusi: fee 0.10% + slippage 0.05% = 0.15% del
+            notional per trade. L&apos;expectancy R e il ranking delle varianti riflettono i costi reali
+            stimati. Parametro configurabile via API (<code className="font-mono">cost_rate</code>).
+          </p>
         </div>
       </header>
 

@@ -34,11 +34,8 @@ export type SimpleEconomicVerdict = {
   economicReason: string[];
 };
 
-const CAP_HINT =
-  "Il limite «Max % conto per trade» blocca la size: alzare il rischio % non aumenta la puntata finché resti al tetto notional.";
-
-const LEVERAGE_HINT =
-  "La puntata è limitata dal tetto di leva (notional vs conto): alzare solo il rischio % non aumenta la size finché la leva resta vincolante.";
+const MARGIN_CAP_HINT =
+  "Il «Max margine % conto» ha ridotto la size: il rischio effettivo a stop può restare sotto l'obiettivo % — aumenta il tetto margine o riduci il rischio % per riallineare.";
 
 /**
  * Valutazione economica «semplice» per la UI principale: riusa `computeEconomicViability` e aggiunge
@@ -51,12 +48,8 @@ export function computeSimpleEconomicVerdict(
 ): SimpleEconomicVerdict {
   const economicReason = [...viability.reasons];
 
-  if (preview.positionSizingCappedByNotional && !economicReason.some((r) => r.includes("Max % conto"))) {
-    economicReason.push(CAP_HINT);
-  }
-
-  if (preview.positionSizingCappedByLeverage && !economicReason.some((r) => r.toLowerCase().includes("leva"))) {
-    economicReason.push(LEVERAGE_HINT);
+  if (preview.cappedByMargin && !economicReason.some((r) => r.toLowerCase().includes("margine"))) {
+    economicReason.push(MARGIN_CAP_HINT);
   }
 
   const verdictLabel: SimpleEconomicVerdictLabel =
@@ -135,12 +128,6 @@ export function computeEconomicViability(
   const gross1 = preview.estimatedGrossProfitAtTp1;
   const costs = preview.estimatedTotalCosts;
 
-  if (user.maxLeverage != null && user.maxLeverage > 0 && preview.impliedLeverage > user.maxLeverage + 1e-6) {
-    poor.push(
-      "Conviene solo con leva superiore a quella consentita: il trade non è compatibile con il limite impostato.",
-    );
-  }
-
   if (net1 == null) {
     marginal.push(
       "TP1 non disponibile o non favorevole: non si può stimare un utile netto sul primo target.",
@@ -168,18 +155,18 @@ export function computeEconomicViability(
     }
   }
 
-  if (preview.rrTp1Money != null && preview.estimatedLossAtStopWithCosts > 0) {
-    if (preview.rrTp1Money < cfg.poorNetRiskReward) {
+  if (preview.rrNetTp1 != null && preview.estimatedLossAtStopWithCosts > 0) {
+    if (preview.rrNetTp1 < cfg.poorNetRiskReward) {
       poor.push(
-        `Rapporto rischio/rendimento netto a TP1 debole (${preview.rrTp1Money.toFixed(2)}:1).`,
+        `Rapporto rischio/rendimento netto a TP1 debole (${preview.rrNetTp1.toFixed(2)}:1).`,
       );
-    } else if (preview.rrTp1Money < cfg.marginalNetRiskReward) {
-      marginal.push(`R:R netto a TP1 nella fascia bassa (${preview.rrTp1Money.toFixed(2)}:1).`);
+    } else if (preview.rrNetTp1 < cfg.marginalNetRiskReward) {
+      marginal.push(`R:R netto a TP1 nella fascia bassa (${preview.rrNetTp1.toFixed(2)}:1).`);
     }
   }
 
   if (
-    preview.accountCapitalPctAllocated > cfg.highAllocationPct &&
+    preview.marginPctOfAccount > cfg.highAllocationPct &&
     net1 != null &&
     net1 < cfg.tightNetTp1Eur &&
     net1 >= 0

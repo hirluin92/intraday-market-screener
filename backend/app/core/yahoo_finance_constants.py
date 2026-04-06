@@ -19,25 +19,37 @@ DEFAULT_YAHOO_SYMBOLS: tuple[str, ...] = (
     "SPY",
     "QQQ",
     "IWM",
-    "DIA",
     "AAPL",
     "NVDA",
     "MSFT",
     "AMZN",
+    "AMD",
+    "GOOGL",
+    "GS",
+    "JPM",
+    "META",
+    "NFLX",
+    "TSLA",
 )
 
 YahooAssetKind = Literal["stock", "etf"]
 
-# Classificazione strumento per ``asset_type`` su DB (SPY/QQQ/IWM/DIA = etf; resto stock).
+# Classificazione strumento per ``asset_type`` su DB (SPY/QQQ/IWM = etf; resto stock).
 YAHOO_SYMBOL_ASSET_TYPE: dict[str, YahooAssetKind] = {
     "SPY": "etf",
     "QQQ": "etf",
     "IWM": "etf",
-    "DIA": "etf",
     "AAPL": "stock",
     "NVDA": "stock",
     "MSFT": "stock",
     "AMZN": "stock",
+    "AMD": "stock",
+    "GOOGL": "stock",
+    "GS": "stock",
+    "JPM": "stock",
+    "META": "stock",
+    "NFLX": "stock",
+    "TSLA": "stock",
 }
 
 ALLOWED_YAHOO_SYMBOLS: frozenset[str] = frozenset(YAHOO_SYMBOL_ASSET_TYPE.keys())
