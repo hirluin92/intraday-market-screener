@@ -2,6 +2,7 @@
 
 import { useMemo } from "react";
 import type { CandleRow, PatternRow } from "@/lib/api";
+import { isPatternValidatedForTimeframe } from "@/lib/constants";
 import { displayTechnicalLabel } from "@/lib/displayLabels";
 
 const VIEW_W = 800;
@@ -43,6 +44,8 @@ function findNearestCandleIndex(
 type Props = {
   candles: CandleRow[];
   patterns: PatternRow[];
+  /** Timeframe serie (per colori marker validato vs in sviluppo). */
+  timeframe: string;
   /** Orario barra contesto opportunità (es. context_timestamp). */
   opportunityContextTimestamp: string | null | undefined;
   maxCandles?: number;
@@ -54,6 +57,7 @@ type Props = {
 export function SeriesCandleChart({
   candles,
   patterns,
+  timeframe,
   opportunityContextTimestamp,
   maxCandles = 50,
 }: Props) {
@@ -215,21 +219,35 @@ export function SeriesCandleChart({
           />
         )}
 
-        {/* Marker pattern */}
+        {/* Marker pattern: verde = validato su questo TF, viola = in sviluppo */}
         {Array.from(patternByIndex.entries()).map(([idx, plist]) => {
           const xCenter = PAD_L + (idx + 0.5) * slotW;
           const y = PAD_T + 6;
+          const n = plist.length;
+          const spread = n > 1 ? Math.min(10, slotW / (n + 1)) : 0;
           return (
             <g key={`pat-${idx}`}>
-              <circle cx={xCenter} cy={y} r={5} fill="#7c3aed" stroke="#5b21b6" strokeWidth={1} />
-              <title>
-                {plist
-                  .map(
-                    (p) =>
-                      `${displayTechnicalLabel(p.pattern_name)} (${p.direction})`,
-                  )
-                  .join("; ")}
-              </title>
+              {plist.map((p, pi) => {
+                const ok = isPatternValidatedForTimeframe(p.pattern_name, timeframe);
+                const cx = xCenter + (pi - (n - 1) / 2) * spread;
+                return (
+                  <g key={`${p.id}-${pi}`}>
+                    <circle
+                      cx={cx}
+                      cy={y}
+                      r={5}
+                      fill={ok ? "#22c55e" : "#8b5cf6"}
+                      stroke={ok ? "#15803d" : "#5b21b6"}
+                      strokeWidth={1}
+                    />
+                    <title>
+                      {ok ? "✅ " : "🔬 "}
+                      {displayTechnicalLabel(p.pattern_name)} ({p.direction}) —{" "}
+                      {ok ? "operativo" : "in sviluppo"}
+                    </title>
+                  </g>
+                );
+              })}
             </g>
           );
         })}
@@ -248,8 +266,12 @@ export function SeriesCandleChart({
           Fascia = candela contesto opportunità
         </span>
         <span className="flex items-center gap-1.5">
+          <span className="inline-block h-2 w-2 rounded-full bg-emerald-500" aria-hidden />
+          Pattern validato (TF)
+        </span>
+        <span className="flex items-center gap-1.5">
           <span className="inline-block h-2 w-2 rounded-full bg-violet-600" aria-hidden />
-          Pattern rilevato
+          Pattern in sviluppo
         </span>
       </div>
     </div>

@@ -8,6 +8,14 @@ import logging
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.cache import (
+    opportunity_lookup_key,
+    pattern_quality_cache,
+    trade_plan_backtest_cache,
+    variant_best_cache,
+)
+from app.core.config import settings
+from app.core.trade_plan_variant_constants import BACKTEST_TOTAL_COST_RATE_DEFAULT
 from app.models.candle_context import CandleContext
 from app.models.candle_pattern import CandlePattern
 from app.schemas.backtest import PatternBacktestAggregateRow
@@ -22,24 +30,75 @@ from app.services.opportunity_final_score import (
 )
 from app.services.alert_candidates import compute_alert_candidate_fields
 from app.services.pattern_timeframe_policy import apply_pattern_timeframe_policy
+from app.services.pattern_operational_ui import (
+    pattern_is_validated_for_ui,
+    pattern_operational_status_for_ui,
+)
 from app.services.pattern_quality import pattern_quality_label_from_score
 from app.services.screener_scoring import SnapshotForScoring, score_snapshot
 from app.services.candle_query import fetch_latest_candles_by_series_keys
 from app.services.trade_plan_backtest import trade_plan_backtest_lookup_by_bucket
 from app.services.trade_plan_live_adjustment import adjust_final_score_for_trade_plan_backtest
 from app.services.trade_plan_live_variant import (
+    LIVE_VARIANT_BACKTEST_PATTERN_LIMIT,
     build_live_trade_plan_for_opportunity,
     load_best_variant_lookup_for_live,
 )
 from app.services.operational_decision import map_decision_filter_param
 from app.services.opportunity_validator import validate_opportunity
-from app.services.regime_filter_service import load_regime_filter
+from app.services.regime_filter_service import RegimeFilter, load_regime_filter
 from app.services.pattern_staleness import (
     compute_pattern_staleness_fields,
     stale_threshold_bars,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _trade_plan_price_float(value: object | None) -> float | None:
+    if value is None:
+        return None
+    return float(value)
+
+
+def _price_stale_fields(
+    current_price: float,
+    entry_price: float,
+    direction: str,
+    threshold_pct: float,
+    stop_loss: float | None,
+) -> tuple[bool, float, str | None]:
+    """
+    Ritorna (is_stale, distance_pct, motivo IT).
+    Long: scaduto se prezzo > soglia % sopra entry o <= stop.
+    Short: scaduto se prezzo > soglia % sotto entry (move già avvenuto) o >= stop.
+    """
+    if entry_price <= 0:
+        return False, 0.0, None
+    distance_pct = (current_price - entry_price) / entry_price * 100.0
+    dist_round = round(distance_pct, 2)
+    d = direction.lower()
+    if d in ("bullish", "long"):
+        if stop_loss is not None and current_price <= stop_loss:
+            return True, dist_round, "Prezzo a o sotto lo stop — segnale invalidato"
+        if distance_pct > threshold_pct:
+            return (
+                True,
+                dist_round,
+                f"Prezzo salito {distance_pct:.1f}% sopra entry — momento ottimale passato",
+            )
+        return False, dist_round, None
+    if d in ("bearish", "short"):
+        if stop_loss is not None and current_price >= stop_loss:
+            return True, dist_round, "Prezzo a o sopra lo stop — segnale invalidato"
+        if distance_pct < -threshold_pct:
+            return (
+                True,
+                dist_round,
+                f"Prezzo sceso {abs(distance_pct):.1f}% sotto entry — momento ottimale passato",
+            )
+        return False, dist_round, None
+    return False, dist_round, None
 
 
 def _pattern_key(p: CandlePattern) -> tuple[str, str, str]:
@@ -152,22 +211,49 @@ async def list_opportunities(
         _pattern_key(p): p for p in latest_patterns
     }
 
-    pq_lookup = await pattern_quality_lookup_by_name_tf(
-        session,
+    pq_key = opportunity_lookup_key(
+        "pq",
         symbol=symbol,
         exchange=exchange,
         provider=provider,
         asset_type=asset_type,
         timeframe=timeframe,
     )
-    tpb_lookup = await trade_plan_backtest_lookup_by_bucket(
-        session,
+
+    async def _compute_pq() -> dict[tuple[str, str], PatternBacktestAggregateRow]:
+        return await pattern_quality_lookup_by_name_tf(
+            session,
+            symbol=symbol,
+            exchange=exchange,
+            provider=provider,
+            asset_type=asset_type,
+            timeframe=timeframe,
+        )
+
+    pq_lookup = await pattern_quality_cache.get_or_compute(key=pq_key, compute=_compute_pq)
+
+    tpb_key = opportunity_lookup_key(
+        "tpb",
         symbol=symbol,
         exchange=exchange,
         provider=provider,
         asset_type=asset_type,
         timeframe=timeframe,
+        cost_rate=BACKTEST_TOTAL_COST_RATE_DEFAULT,
     )
+
+    async def _compute_tpb():
+        return await trade_plan_backtest_lookup_by_bucket(
+            session,
+            symbol=symbol,
+            exchange=exchange,
+            provider=provider,
+            asset_type=asset_type,
+            timeframe=timeframe,
+            cost_rate=BACKTEST_TOTAL_COST_RATE_DEFAULT,
+        )
+
+    tpb_lookup = await trade_plan_backtest_cache.get_or_compute(key=tpb_key, compute=_compute_tpb)
 
     out: list[OpportunityRow] = []
     for ctx in contexts:
@@ -233,6 +319,8 @@ async def list_opportunities(
             ctx.timeframe,
         )
         pat_stale_thresh = stale_threshold_bars(ctx.timeframe)
+        pat_val = pattern_is_validated_for_ui(pn, ctx.timeframe)
+        pat_op = pattern_operational_status_for_ui(pn, ctx.timeframe, pq_label)
         out.append(
             OpportunityRow(
                 asset_type=ctx.asset_type,
@@ -279,6 +367,8 @@ async def list_opportunities(
                 selected_trade_plan_variant_expectancy_r=None,
                 trade_plan_source="default_fallback",
                 trade_plan_fallback_reason=None,
+                pattern_is_validated=pat_val,
+                pattern_operational_status=pat_op,
             )
         )
 
@@ -288,15 +378,33 @@ async def list_opportunities(
     ]
     candle_map = await fetch_latest_candles_by_series_keys(session, keys=candle_keys)
 
-    try:
-        variant_lookup = await load_best_variant_lookup_for_live(
+    var_key = opportunity_lookup_key(
+        "var",
+        symbol=symbol,
+        exchange=exchange,
+        provider=provider,
+        asset_type=asset_type,
+        timeframe=timeframe,
+        cost_rate=BACKTEST_TOTAL_COST_RATE_DEFAULT,
+        limit=LIVE_VARIANT_BACKTEST_PATTERN_LIMIT,
+    )
+
+    async def _compute_var():
+        return await load_best_variant_lookup_for_live(
             session,
             symbol=symbol,
             exchange=exchange,
             provider=provider,
             asset_type=asset_type,
             timeframe=timeframe,
-            limit=300,
+            limit=LIVE_VARIANT_BACKTEST_PATTERN_LIMIT,
+            cost_rate=BACKTEST_TOTAL_COST_RATE_DEFAULT,
+        )
+
+    try:
+        variant_lookup = await variant_best_cache.get_or_compute(
+            key=var_key,
+            compute=_compute_var,
         )
     except Exception:
         logger.exception(
@@ -304,11 +412,11 @@ async def list_opportunities(
         )
         variant_lookup = {}
 
+    regime_filter_yahoo: RegimeFilter | None = None
     try:
-        regime_filter = await load_regime_filter(session)
+        regime_filter_yahoo = await load_regime_filter(session, provider="yahoo_finance")
     except Exception:
-        logger.exception("list_opportunities: load_regime_filter failed; regime fields degraded")
-        regime_filter = None
+        logger.exception("list_opportunities: load_regime_filter (yahoo) failed; regime fields degraded")
 
     enriched: list[OpportunityRow] = []
     for r in ranked:
@@ -348,10 +456,10 @@ async def list_opportunities(
         if row_with_plan.provider == "binance":
             regime_spy = "n/a"
             regime_direction_ok = True
-        elif regime_filter is not None:
-            regime_spy = regime_filter.get_regime_label(ts_ref)
+        elif regime_filter_yahoo is not None:
+            regime_spy = regime_filter_yahoo.get_regime_label(ts_ref)
             if row_with_plan.provider == "yahoo_finance":
-                allowed = regime_filter.get_allowed_directions(ts_ref)
+                allowed = regime_filter_yahoo.get_allowed_directions(ts_ref)
                 d = (row_with_plan.latest_pattern_direction or "").strip().lower()
                 regime_direction_ok = d in allowed if d in ("bullish", "bearish") else False
             else:
@@ -360,15 +468,59 @@ async def list_opportunities(
             regime_spy = "unknown"
             regime_direction_ok = True
 
+        pat_str = row_with_plan.latest_pattern_strength
+        pat_str_f = float(pat_str) if pat_str is not None else None
+        _rf_val = (
+            None
+            if row_with_plan.provider == "binance"
+            else regime_filter_yahoo
+        )
         v_dec, v_rationale = validate_opportunity(
             symbol=row_with_plan.symbol,
             timeframe=row_with_plan.timeframe,
             provider=row_with_plan.provider,
             pattern_name=row_with_plan.latest_pattern_name,
             direction=row_with_plan.latest_pattern_direction,
-            regime_filter=regime_filter,
+            regime_filter=_rf_val,
             timestamp=ts_ref,
+            pattern_strength=pat_str_f,
         )
+
+        threshold_pct = settings.opportunity_price_staleness_pct
+        current_price: float | None = None
+        price_distance_pct: float | None = None
+        price_stale = False
+        price_stale_reason: str | None = None
+
+        if c is not None:
+            current_price = float(c.close)
+
+        tp = row_with_plan.trade_plan
+        entry_f = _trade_plan_price_float(tp.entry_price) if tp else None
+        stop_f = _trade_plan_price_float(tp.stop_loss) if tp else None
+        direction = (row_with_plan.latest_pattern_direction or "bullish").strip().lower()
+
+        if current_price is not None and entry_f is not None and entry_f > 0:
+            is_stale, dist_pct, stale_reason = _price_stale_fields(
+                current_price,
+                entry_f,
+                direction,
+                threshold_pct,
+                stop_f,
+            )
+            price_distance_pct = dist_pct
+            if is_stale:
+                price_stale = True
+                price_stale_reason = stale_reason
+            if v_dec == "execute" and is_stale:
+                reason_line = stale_reason or "Prezzo lontano dall'entry."
+                v_dec = "monitor"
+                v_rationale = [
+                    reason_line,
+                    "Attendere retest dell'entry o nuovo segnale.",
+                    *list(v_rationale),
+                ]
+
         enriched.append(
             row_with_plan.model_copy(
                 update={
@@ -376,6 +528,10 @@ async def list_opportunities(
                     "decision_rationale": v_rationale,
                     "regime_spy": regime_spy,
                     "regime_direction_ok": regime_direction_ok,
+                    "current_price": current_price,
+                    "price_distance_pct": price_distance_pct,
+                    "price_stale": price_stale,
+                    "price_stale_reason": price_stale_reason,
                 },
             ),
         )
@@ -415,12 +571,28 @@ async def list_ranked_screener(
     by_series: dict[tuple[str, str, str], CandlePattern] = {
         _pattern_key(p): p for p in latest_patterns
     }
-    pq_lookup = await pattern_quality_lookup_by_name_tf(
-        session,
+    pq_key_ranked = opportunity_lookup_key(
+        "pq",
         symbol=symbol,
         exchange=exchange,
         provider=provider,
+        asset_type=None,
         timeframe=timeframe,
+    )
+
+    async def _compute_pq_ranked() -> dict[tuple[str, str], PatternBacktestAggregateRow]:
+        return await pattern_quality_lookup_by_name_tf(
+            session,
+            symbol=symbol,
+            exchange=exchange,
+            provider=provider,
+            asset_type=None,
+            timeframe=timeframe,
+        )
+
+    pq_lookup = await pattern_quality_cache.get_or_compute(
+        key=pq_key_ranked,
+        compute=_compute_pq_ranked,
     )
 
     out: list[RankedScreenerRow] = []

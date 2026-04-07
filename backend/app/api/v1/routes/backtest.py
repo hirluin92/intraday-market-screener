@@ -1,6 +1,8 @@
 from datetime import date, datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, Query
+from dataclasses import asdict
+
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_db_session
@@ -15,6 +17,8 @@ from app.schemas.backtest import (
     TradePlanBacktestResponse,
     TradePlanVariantBacktestResponse,
     TradePlanVariantBestResponse,
+    WalkForwardFoldResponse,
+    WalkForwardResponse,
 )
 from app.schemas.timeframe_fields import OptionalAllMarketsTimeframe
 from app.services.backtest_simulation import run_backtest_simulation
@@ -23,6 +27,7 @@ from app.services.trade_plan_backtest import run_trade_plan_backtest
 from app.services.trade_plan_variant_backtest import run_trade_plan_variant_backtest
 from app.services.trade_plan_variant_best import run_trade_plan_variant_best
 from app.services.oos_validation_service import run_oos_validation
+from app.services.walk_forward_service import run_walk_forward
 
 router = APIRouter(prefix="/backtest", tags=["backtest"])
 
@@ -146,8 +151,8 @@ async def get_backtest_simulation(
     use_regime_filter: bool = Query(
         default=False,
         description=(
-            "Se true, applica moltiplicatore di rischio per barra da regime SPY 1d (EMA50/RSI). "
-            "Senza dati SPY nel DB il filtro è disattivato silenziosamente."
+            "Se true, filtra le direzioni vs SPY 1d (EMA50 ±2%) solo per provider Yahoo Finance. "
+            "Per Binance il parametro è ignorato (filtro regime non applicato alle crypto)."
         ),
     ),
     exclude_hours: list[int] = Query(
@@ -171,6 +176,25 @@ async def get_backtest_simulation(
     include_symbols: list[str] = Query(
         default=[],
         description="Solo questi simboli",
+    ),
+    cooldown_bars: int = Query(
+        default=0,
+        ge=0,
+        le=20,
+        description=(
+            "Barre di cooldown per serie dopo un trade. "
+            "0 = nessun cooldown (comportamento storico). "
+            "3 = skip segnali nella stessa serie per 3 barre dopo un trade."
+        ),
+    ),
+    min_strength: float | None = Query(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Opzionale: esclude pattern con pattern_strength sotto questa soglia (0–1). "
+            "Utile per testare filtri tipo RS (strength penalizzata)."
+        ),
     ),
     session: AsyncSession = Depends(get_db_session),
 ) -> BacktestSimulationResponse:
@@ -197,10 +221,12 @@ async def get_backtest_simulation(
         dt_from=dt_from,
         dt_to=dt_to,
         use_regime_filter=use_regime_filter,
+        cooldown_bars=cooldown_bars,
         exclude_hours=exclude_hours if exclude_hours else None,
         include_hours=include_hours if include_hours else None,
         exclude_symbols=exclude_symbols if exclude_symbols else None,
         include_symbols=include_symbols if include_symbols else None,
+        min_strength=min_strength,
     )
 
 
@@ -251,7 +277,9 @@ async def get_out_of_sample(
     ),
     use_regime_filter: bool = Query(
         default=False,
-        description="Se true, filtra le direzioni in base al regime SPY 1d (EMA50).",
+        description=(
+            "Se true, filtra vs SPY 1d solo per Yahoo Finance; ignorato per Binance."
+        ),
     ),
     exclude_hours: list[int] = Query(
         default=[],
@@ -284,6 +312,113 @@ async def get_out_of_sample(
         use_regime_filter=use_regime_filter,
         exclude_hours=exclude_hours if exclude_hours else None,
         include_hours=include_hours if include_hours else None,
+    )
+
+
+@router.get("/walk-forward", response_model=WalkForwardResponse)
+async def get_walk_forward(
+    provider: str = Query(
+        ...,
+        description="Provider dati (es. yahoo_finance, binance).",
+    ),
+    timeframe: str = Query(
+        ...,
+        description="Timeframe (es. 1h, 5m).",
+    ),
+    pattern_names: list[str] = Query(
+        default=[],
+        description="Nomi pattern (ripetere parametro). Vuoto = tutti i pattern promoted per provider×TF.",
+    ),
+    n_folds: int = Query(
+        default=3,
+        ge=2,
+        le=6,
+        description="Numero di fold: timeline divisa in n_folds+1 segmenti uguali.",
+    ),
+    initial_capital: float = Query(
+        default=10_000.0,
+        gt=0,
+        description="Capitale iniziale per ogni simulazione.",
+    ),
+    risk_per_trade_pct: float = Query(
+        default=1.0,
+        gt=0,
+        le=100,
+        description="Percentuale di equity allocata per trade.",
+    ),
+    cost_rate: float = Query(
+        default=BACKTEST_TOTAL_COST_RATE_DEFAULT,
+        ge=0.0,
+        le=0.05,
+        description="Costo round-trip sul notional.",
+    ),
+    max_simultaneous: int = Query(
+        default=MAX_SIMULTANEOUS_TRADES,
+        ge=1,
+        le=10,
+        description="Massimo trade simultanei per barra.",
+    ),
+    use_regime_filter: bool = Query(
+        default=False,
+        description=(
+            "Se true, filtra vs SPY 1d solo per Yahoo Finance; ignorato per Binance."
+        ),
+    ),
+    exclude_hours: list[int] = Query(
+        default=[],
+        description=(
+            "Ore UTC da escludere (stessa semantica di GET /backtest/simulation). "
+            "Vuoto = nessun filtro."
+        ),
+    ),
+    include_hours: list[int] = Query(
+        default=[],
+        description="Solo queste ore UTC (stessa semantica di GET /backtest/simulation).",
+    ),
+    exclude_symbols: list[str] = Query(
+        default=[],
+        description="Simboli da escludere (stessa semantica di GET /backtest/simulation).",
+    ),
+    include_symbols: list[str] = Query(
+        default=[],
+        description="Solo questi simboli (stessa semantica di GET /backtest/simulation).",
+    ),
+    session: AsyncSession = Depends(get_db_session),
+) -> WalkForwardResponse:
+    """
+    Walk-forward: per ogni fold il quality lookup è calcolato solo sul train e riusato sul test (no leakage).
+    """
+    names = [n.strip() for n in pattern_names if n and n.strip()]
+    try:
+        result = await run_walk_forward(
+            session,
+            provider=provider.strip(),
+            timeframe=timeframe.strip(),
+            pattern_names=names,
+            n_folds=n_folds,
+            initial_capital=initial_capital,
+            risk_per_trade_pct=risk_per_trade_pct,
+            cost_rate=cost_rate,
+            max_simultaneous=max_simultaneous,
+            use_regime_filter=use_regime_filter,
+            exclude_hours=exclude_hours if exclude_hours else None,
+            include_hours=include_hours if include_hours else None,
+            exclude_symbols=exclude_symbols if exclude_symbols else None,
+            include_symbols=include_symbols if include_symbols else None,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+    return WalkForwardResponse(
+        n_folds=result.n_folds,
+        folds=[WalkForwardFoldResponse(**asdict(f)) for f in result.folds],
+        avg_test_return_pct=result.avg_test_return_pct,
+        avg_test_win_rate=result.avg_test_win_rate,
+        avg_degradation_pct=result.avg_degradation_pct,
+        pct_folds_positive=result.pct_folds_positive,
+        overall_verdict=result.overall_verdict,
+        date_range_start=result.date_range_start,
+        date_range_end=result.date_range_end,
     )
 
 

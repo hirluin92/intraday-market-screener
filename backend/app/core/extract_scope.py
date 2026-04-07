@@ -2,7 +2,7 @@
 Validazione timeframe per estrazioni (features / context / patterns) in base a provider e venue.
 
 - Binance (crypto): 1m, 5m, 15m, 1h
-- Yahoo Finance (azioni/ETF US): 5m, 1h, 1d
+- Yahoo Finance (azioni/ETF US): 5m, 15m, 1h, 1d
 
 Se ``provider`` e ``exchange`` sono assenti, un ``timeframe`` esplicito deve appartenere all'unione
 (così le richieste “solo TF” restano possibili). In caso di conflitto esplicito tra ``provider`` e

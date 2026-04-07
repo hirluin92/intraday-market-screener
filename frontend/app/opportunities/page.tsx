@@ -1,150 +1,121 @@
 "use client";
 
-import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useSearchParams } from "next/navigation";
+
 import {
+  fetchIbkrStatus,
   fetchOpportunities,
   postPipelineRefresh,
-  seriesDetailHref,
+  type IbkrStatus,
   type OpportunityRow,
   type PipelineRefreshRequest,
 } from "@/lib/api";
+import { isDiscardedOutOfUniverse } from "@/lib/opportunityDiscardFilter";
+import { opportunityCardId } from "@/lib/opportunityCardId";
 import {
-  alertLevelBadgeClass,
-  computeSignalAlignment,
-  displayAlertLevelLabel,
-  displayEnumLabel,
-  displayFinalOpportunityLabel,
-  displayPatternTimeframeGateLabel,
-  displayPatternQualityLabel,
-  displaySignalAlignmentLabel,
-  displayTechnicalLabel,
-  FONTE_PIANO_LEGENDA,
-  fontePianoListLabel,
-  fontePianoListTitle,
-  decisionRationaleTitleAttr,
-  displayPatternAgeListLabel,
-  patternAgeListCellClass,
-  patternAgeListTooltip,
-  signalAlignmentBadgeClass,
-  timeframeFilterLabel,
-  TOOLTIP_ALLINEAMENTO_SEGNALE_IT,
-  TOOLTIP_DIR_PATTERN_IT,
-  TOOLTIP_DIR_SCORE_IT,
-} from "@/lib/displayLabels";
-import { OpportunitySummaryBar } from "@/components/OpportunitySummaryBar";
-import {
-  computeOpportunityEconomicSnapshot,
-  economicTierSortRank,
-  rowMatchesEconomicFilter,
-} from "@/lib/opportunityEconomicSnapshot";
-import {
-  loadOpportunitiesEconomicPrefs,
-  saveOpportunitiesEconomicPrefs,
-  type OpportunitiesEconomicPrefs,
-} from "@/lib/opportunitiesEconomicPrefs";
+  sortOpportunityGroup,
+  type OpportunitySortBy,
+} from "@/lib/opportunitySort";
 import {
   DEFAULT_POSITION_SIZING_INPUT,
   loadPositionSizingInput,
+  savePositionSizingInput,
   type PositionSizingUserInput,
 } from "@/lib/positionSizing";
+import { recordExecuteListMax, getTodayMaxExecute, getWeekSumLast7Days } from "@/lib/traderExecuteStats";
+import {
+  loadTraderBroker,
+  saveTraderBroker,
+  syncLegacyPrefKeys,
+  type TraderBrokerId,
+} from "@/lib/traderPrefs";
 
-/** Filtri lista opportunità (multi-mercato: include 1d / 5m Yahoo). */
-const TIMEFRAME_FILTER_OPTIONS = ["", "1m", "5m", "15m", "1h", "1d"] as const;
+import { DiscardedCard } from "./components/DiscardedCard";
+import { OpportunityPreferencesBar } from "./components/OpportunityPreferencesBar";
+import { RegimeBadge } from "./components/RegimeBadge";
+import { SignalCard } from "./components/SignalCard";
 
-const PROVIDER_FILTER_OPTIONS = ["", "binance", "yahoo_finance"] as const;
+const FETCH_LIMIT = 500;
+const REFRESH_SEC = 60;
+const CURRENCY = "€";
 
-const ASSET_TYPE_FILTER_OPTIONS = ["", "crypto", "etf", "stock", "index"] as const;
+const TIMEFRAME_PIPELINE = ["", "1m", "5m", "15m", "1h", "1d"] as const;
 
-/** Filtro semaforo (valori API). */
-const DECISION_FILTER_OPTIONS = ["", "execute", "monitor", "discard"] as const;
+type DecisionFilter = "all" | "execute" | "monitor" | "discard";
+type TfFilter = "all" | "1h" | "5m";
+type DirFilter = "all" | "bullish" | "bearish";
 
-function formatTs(iso: string | null | undefined): string {
-  if (!iso) return "—";
-  try {
-    return new Date(iso).toLocaleString(undefined, {
-      dateStyle: "short",
-      timeStyle: "medium",
-    });
-  } catch {
-    return iso;
-  }
+function pickRegimeSpy(rows: OpportunityRow[]): string | undefined {
+  const withRegime = rows.filter((r) => r.regime_spy && r.regime_spy !== "n/a");
+  if (withRegime.length === 0) return undefined;
+  const spy = withRegime.find((r) => String(r.symbol).toUpperCase().includes("SPY"));
+  return (spy ?? withRegime[0]).regime_spy;
 }
 
-function formatStrength(v: string | number | null | undefined): string {
-  if (v === null || v === undefined) return "—";
-  if (typeof v === "number") return String(v);
-  return v;
-}
-
-function formatEur(n: number | null | undefined): string {
-  if (n == null || !Number.isFinite(n)) return "—";
-  return n.toLocaleString("it-IT", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-}
-
-function economicVerdictCellClass(label: string): string {
-  if (label === "Conveniente") return "font-medium text-emerald-800 dark:text-emerald-300";
-  if (label === "Borderline") return "font-medium text-amber-800 dark:text-amber-300";
-  if (label === "Non conveniente") return "font-medium text-red-800 dark:text-red-300";
-  return "text-zinc-500";
-}
-
-/** Righe fallback meno enfatiche delle varianti promosse (UI). */
-function opportunityRowClass(r: OpportunityRow): string {
+function pillClass(active: boolean, accent?: "execute" | "monitor" | "warn"): string {
   const base =
-    "cursor-pointer border-b border-zinc-100 dark:border-zinc-800/80";
-  const src = r.trade_plan_source ?? "default_fallback";
-  if (src === "default_fallback") {
-    return `${base} bg-zinc-50/60 text-zinc-600 hover:bg-zinc-100/80 dark:bg-zinc-950/40 dark:text-zinc-400 dark:hover:bg-zinc-900/50`;
+    "rounded-full border px-3 py-1.5 text-xs font-semibold transition focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent-neutral)]";
+  if (!active) {
+    return `${base} border-[var(--border)] bg-[var(--bg-surface-2)] text-[var(--text-secondary)] hover:border-[var(--border-active)]`;
   }
-  if (r.selected_trade_plan_variant_status === "promoted") {
-    return `${base} hover:bg-zinc-50 dark:hover:bg-zinc-900/50`;
+  if (accent === "execute") {
+    return `${base} border-[var(--accent-bull)] bg-[var(--accent-bull)]/15 text-[var(--accent-bull)] shadow-[var(--glow-bull)]`;
   }
-  return `${base} bg-sky-50/25 hover:bg-sky-50/40 dark:bg-sky-950/20 dark:hover:bg-sky-950/35`;
+  if (accent === "monitor") {
+    return `${base} border-amber-400/80 bg-amber-500/15 text-amber-200`;
+  }
+  if (accent === "warn") {
+    return `${base} border-[var(--accent-bear)]/60 bg-[var(--accent-bear)]/10 text-[var(--accent-bear)]`;
+  }
+  return `${base} border-[var(--accent-neutral)] bg-[var(--accent-neutral)]/15 text-[var(--text-primary)]`;
 }
 
-function AllineamentoSegnaleBadge({ row }: { row: OpportunityRow }) {
-  const a = computeSignalAlignment(
-    row.score_direction,
-    row.latest_pattern_direction,
-  );
-  return (
-    <span
-      className={`inline-block rounded px-2 py-0.5 text-xs font-medium ${signalAlignmentBadgeClass(a)}`}
-      title={`Valori: score ${displayEnumLabel(row.score_direction)}, pattern ${displayEnumLabel(row.latest_pattern_direction)}. ${TOOLTIP_ALLINEAMENTO_SEGNALE_IT}`}
-    >
-      {displaySignalAlignmentLabel(a)}
-    </span>
-  );
+function applyClientFilters(
+  rows: OpportunityRow[],
+  decision: DecisionFilter,
+  tf: TfFilter,
+  dir: DirFilter,
+): OpportunityRow[] {
+  return rows.filter((r) => {
+    const d = (r.operational_decision ?? "monitor") as DecisionFilter;
+    if (decision !== "all" && d !== decision) return false;
+    if (tf !== "all" && r.timeframe !== tf) return false;
+    if (dir !== "all") {
+      const pat = (r.latest_pattern_direction ?? "").toLowerCase();
+      if (dir === "bullish" && pat !== "bullish") return false;
+      if (dir === "bearish" && pat !== "bearish") return false;
+    }
+    return true;
+  });
 }
 
-export default function OpportunitiesPage() {
-  const router = useRouter();
+function OpportunitiesPageInner() {
+  const searchParams = useSearchParams();
   const [rows, setRows] = useState<OpportunityRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const [filterSymbol, setFilterSymbol] = useState("");
-  const [filterTimeframe, setFilterTimeframe] = useState<string>("");
-  const [filterProvider, setFilterProvider] = useState<string>("");
-  const [filterAssetType, setFilterAssetType] = useState<string>("");
-  const [filterDecision, setFilterDecision] = useState<string>("");
-  const filterSymbolRef = useRef(filterSymbol);
-  const filterTimeframeRef = useRef(filterTimeframe);
-  const filterProviderRef = useRef(filterProvider);
-  const filterAssetTypeRef = useRef(filterAssetType);
-  const filterDecisionRef = useRef(filterDecision);
-  filterSymbolRef.current = filterSymbol;
-  filterTimeframeRef.current = filterTimeframe;
-  filterProviderRef.current = filterProvider;
-  filterAssetTypeRef.current = filterAssetType;
-  filterDecisionRef.current = filterDecision;
+  const [decisionFilter, setDecisionFilter] = useState<DecisionFilter>("all");
+  const [tfFilter, setTfFilter] = useState<TfFilter>("all");
+  const [dirFilter, setDirFilter] = useState<DirFilter>("all");
+  const [sortBy, setSortBy] = useState<OpportunitySortBy>("default");
 
-  /** Provider esplicito per la pipeline (nessun default nascosto sul venue). */
-  const [pipeProvider, setPipeProvider] = useState<"binance" | "yahoo_finance">(
-    "binance",
-  );
-  /** Override opzionale del venue (es. YAHOO_US); se vuoto il backend usa il default per provider. */
+  const [expandedCardId, setExpandedCardId] = useState<string | null>(null);
+  const [showDiscarded, setShowDiscarded] = useState(false);
+  const skipFilterClearRef = useRef(false);
+  const [deepLinkHandled, setDeepLinkHandled] = useState(false);
+
+  const [sizingInput, setSizingInput] = useState<PositionSizingUserInput>(DEFAULT_POSITION_SIZING_INPUT);
+  const [broker, setBroker] = useState<TraderBrokerId>("ibkr");
+
+  const [lastUpdate, setLastUpdate] = useState<Date | null>(null);
+  const [ibkrStatus, setIbkrStatus] = useState<IbkrStatus | null>(null);
+  const [autoRefresh, setAutoRefresh] = useState(true);
+  const [timeLabelReady, setTimeLabelReady] = useState(false);
+  const [secondsToRefresh, setSecondsToRefresh] = useState(REFRESH_SEC);
+
+  const [pipeProvider, setPipeProvider] = useState<"binance" | "yahoo_finance">("binance");
   const [pipeExchangeOverride, setPipeExchangeOverride] = useState("");
   const [pipeSymbol, setPipeSymbol] = useState("");
   const [pipeTimeframe, setPipeTimeframe] = useState("");
@@ -155,65 +126,126 @@ export default function OpportunitiesPage() {
   const [pipeMessage, setPipeMessage] = useState<string | null>(null);
   const [pipeError, setPipeError] = useState<string | null>(null);
 
-  const [sizingInput, setSizingInput] = useState<PositionSizingUserInput>(DEFAULT_POSITION_SIZING_INPUT);
-  const [econPrefs, setEconPrefs] = useState<OpportunitiesEconomicPrefs>({
-    filterMode: "all",
-    economicRankingEnabled: false,
-  });
-  /** Filtro rapido semaforo (client-side, oltre al select «Decisione» che chiama l'API). */
-  const [decisionQuickFilter, setDecisionQuickFilter] = useState<
-    "all" | "execute" | "monitor"
-  >("all");
-
   useEffect(() => {
     setSizingInput(loadPositionSizingInput());
-    setEconPrefs(loadOpportunitiesEconomicPrefs());
+    setBroker(loadTraderBroker());
+    setTimeLabelReady(true);
   }, []);
 
   useEffect(() => {
-    saveOpportunitiesEconomicPrefs(econPrefs);
-  }, [econPrefs]);
-
-  const displayRows = useMemo(() => {
-    const byDecision =
-      decisionQuickFilter === "all"
-        ? rows
-        : rows.filter((r) => r.operational_decision === decisionQuickFilter);
-    const enriched = byDecision.map((row) => ({
-      row,
-      snap: computeOpportunityEconomicSnapshot(
-        row.trade_plan,
-        sizingInput,
-        row.final_opportunity_score,
-        row.selected_trade_plan_variant_status,
-      ),
-    }));
-    const filtered = enriched.filter((e) => rowMatchesEconomicFilter(e.snap, econPrefs.filterMode));
-    const sorted = [...filtered];
-    if (econPrefs.economicRankingEnabled) {
-      sorted.sort((a, b) => {
-        const ra = a.snap ? economicTierSortRank(a.snap.simple.verdictTier) : 99;
-        const rb = b.snap ? economicTierSortRank(b.snap.simple.verdictTier) : 99;
-        if (ra !== rb) return ra - rb;
-        return b.row.final_opportunity_score - a.row.final_opportunity_score;
-      });
+    if (skipFilterClearRef.current) {
+      skipFilterClearRef.current = false;
+      return;
     }
-    return sorted;
-  }, [rows, sizingInput, econPrefs.filterMode, econPrefs.economicRankingEnabled]);
+    setExpandedCardId(null);
+  }, [decisionFilter, tfFilter, dirFilter]);
+
+  const focusSymbol = searchParams.get("symbol");
+  const focusTimeframe = searchParams.get("timeframe");
+  const focusProvider = searchParams.get("provider");
+  const focusExchange = searchParams.get("exchange");
+  const shouldExpandFromUrl = searchParams.get("expand") === "true";
+
+  useEffect(() => {
+    if (!shouldExpandFromUrl || !focusSymbol?.trim() || loading || deepLinkHandled) {
+      return;
+    }
+    if (rows.length === 0) {
+      return;
+    }
+
+    const sym = focusSymbol.trim().toUpperCase();
+    const target = rows.find((o) => {
+      const os = String(o.symbol).toUpperCase();
+      if (os !== sym) return false;
+      if (focusTimeframe && o.timeframe !== focusTimeframe) return false;
+      if (focusProvider && (o.provider ?? "") !== focusProvider) return false;
+      if (focusExchange != null && focusExchange !== "" && (o.exchange ?? "") !== focusExchange) {
+        return false;
+      }
+      return true;
+    });
+
+    if (!target) {
+      setDeepLinkHandled(true);
+      return;
+    }
+
+    skipFilterClearRef.current = true;
+    setDecisionFilter("all");
+    if (focusTimeframe === "1h" || focusTimeframe === "5m") {
+      setTfFilter(focusTimeframe);
+    } else {
+      setTfFilter("all");
+    }
+    setDirFilter("all");
+
+    const cid = opportunityCardId(target);
+    if (target.operational_decision === "discard") {
+      setShowDiscarded(true);
+    }
+
+    let t1: number | undefined;
+    let t2: number | undefined;
+    let t3: number | undefined;
+
+    t1 = window.setTimeout(() => {
+      if (target.operational_decision !== "discard") {
+        setExpandedCardId(cid);
+      }
+      setDeepLinkHandled(true);
+      t2 = window.setTimeout(() => {
+        const el = document.getElementById(`card-${cid}`);
+        if (el) {
+          el.scrollIntoView({ behavior: "smooth", block: "center" });
+          el.classList.add(
+            "ring-2",
+            "ring-yellow-400",
+            "ring-offset-2",
+            "ring-offset-[var(--bg-base)]",
+          );
+          t3 = window.setTimeout(() => {
+            el.classList.remove(
+              "ring-2",
+              "ring-yellow-400",
+              "ring-offset-2",
+              "ring-offset-[var(--bg-base)]",
+            );
+          }, 3000);
+        }
+      }, 400);
+    }, 0);
+
+    return () => {
+      if (t1) window.clearTimeout(t1);
+      if (t2) window.clearTimeout(t2);
+      if (t3) window.clearTimeout(t3);
+    };
+  }, [
+    shouldExpandFromUrl,
+    focusSymbol,
+    focusTimeframe,
+    focusProvider,
+    focusExchange,
+    loading,
+    rows,
+    deepLinkHandled,
+  ]);
 
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const data = await fetchOpportunities({
-        symbol: filterSymbolRef.current.trim() || undefined,
-        timeframe: filterTimeframeRef.current || undefined,
-        provider: filterProviderRef.current.trim() || undefined,
-        asset_type: filterAssetTypeRef.current.trim() || undefined,
-        decision: filterDecisionRef.current.trim() || undefined,
-      });
+      const [data, ibkr] = await Promise.all([
+        fetchOpportunities({ limit: FETCH_LIMIT }),
+        fetchIbkrStatus(),
+      ]);
       setRows(data.opportunities);
+      setIbkrStatus(ibkr);
       setSizingInput(loadPositionSizingInput());
+      const execN = data.opportunities.filter((r) => r.operational_decision === "execute").length;
+      recordExecuteListMax(execN);
+      setLastUpdate(new Date());
     } catch (e) {
       setRows([]);
       setError(e instanceof Error ? e.message : String(e));
@@ -225,6 +257,83 @@ export default function OpportunitiesPage() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    if (!autoRefresh) return;
+    const tick = () => {
+      if (typeof document !== "undefined" && document.hidden) return;
+      void load();
+    };
+    const interval = setInterval(tick, REFRESH_SEC * 1000);
+    return () => clearInterval(interval);
+  }, [autoRefresh, load]);
+
+  useEffect(() => {
+    if (!lastUpdate) return;
+    const t = () => {
+      const elapsed = (Date.now() - lastUpdate.getTime()) / 1000;
+      setSecondsToRefresh(Math.max(0, REFRESH_SEC - Math.floor(elapsed)));
+    };
+    t();
+    const id = setInterval(t, 1000);
+    return () => clearInterval(id);
+  }, [lastUpdate]);
+
+  const regimeSpy = useMemo(() => pickRegimeSpy(rows), [rows]);
+
+  const filtered = useMemo(
+    () => applyClientFilters(rows, decisionFilter, tfFilter, dirFilter),
+    [rows, decisionFilter, tfFilter, dirFilter],
+  );
+
+  const executeRows = useMemo(
+    () => filtered.filter((r) => r.operational_decision === "execute"),
+    [filtered],
+  );
+  const monitorRows = useMemo(
+    () => filtered.filter((r) => r.operational_decision === "monitor"),
+    [filtered],
+  );
+  const discardRows = useMemo(
+    () => filtered.filter((r) => r.operational_decision === "discard"),
+    [filtered],
+  );
+
+  /** Scarti fuori universo (DB/scheduler): non mostrati in lista. */
+  const discardRowsInUniverse = useMemo(
+    () => discardRows.filter((r) => !isDiscardedOutOfUniverse(r)),
+    [discardRows],
+  );
+
+  const executeRowsSorted = useMemo(
+    () => sortOpportunityGroup(executeRows, sortBy),
+    [executeRows, sortBy],
+  );
+  const monitorRowsSorted = useMemo(
+    () => sortOpportunityGroup(monitorRows, sortBy),
+    [monitorRows, sortBy],
+  );
+  const discardRowsSorted = useMemo(
+    () => sortOpportunityGroup(discardRowsInUniverse, sortBy),
+    [discardRowsInUniverse, sortBy],
+  );
+
+  const totalExecute = useMemo(
+    () => rows.filter((r) => r.operational_decision === "execute").length,
+    [rows],
+  );
+
+  const persistSizing = (s: PositionSizingUserInput) => {
+    setSizingInput(s);
+    savePositionSizingInput(s);
+    syncLegacyPrefKeys(s, broker);
+  };
+
+  const persistBroker = (b: TraderBrokerId) => {
+    setBroker(b);
+    saveTraderBroker(b);
+    syncLegacyPrefKeys(sizingInput, b);
+  };
 
   async function runPipelineRefresh() {
     setPipeLoading(true);
@@ -250,332 +359,176 @@ export default function OpportunitiesPage() {
     }
   }
 
+  const showExecuteBlock = decisionFilter === "all" || decisionFilter === "execute";
+  const showMonitorBlock = decisionFilter === "all" || decisionFilter === "monitor";
+  const showDiscardBlock = decisionFilter === "all" || decisionFilter === "discard";
+
+  const emptyExecute =
+    showExecuteBlock &&
+    executeRows.length === 0 &&
+    !loading &&
+    !error &&
+    rows.length > 0;
+
   return (
-    <div className="mx-auto flex min-h-full max-w-[120rem] flex-col gap-6 p-6">
-      <header className="border-b border-zinc-200 pb-4 dark:border-zinc-800">
-        <div>
-          <h1 className="text-xl font-semibold tracking-tight">
-            Opportunità
-          </h1>
-          <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
-            Ultimi snapshot dello screener con eventuali suggerimenti sui pattern (dall’API).
-            La colonna Alert indica i candidati alert MVP (regole lato server). Clicca una riga per
-            aprire il dettaglio della serie.
-          </p>
+    <div className="mx-auto flex min-h-full max-w-6xl flex-col gap-4 px-4 pb-10 pt-4 sm:px-6">
+      <header className="sticky top-0 z-30 -mx-4 border-b border-[var(--border)] bg-[var(--bg-base)]/95 px-4 py-3 backdrop-blur-md sm:-mx-6 sm:px-6">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex flex-wrap items-center gap-2 text-sm">
+            <span className="inline-flex items-center gap-2 font-[family-name:var(--font-trader-sans)] font-semibold text-[var(--text-primary)]">
+              <span
+                className="relative flex h-2.5 w-2.5 items-center justify-center"
+                aria-hidden
+              >
+                <span className="absolute h-2.5 w-2.5 animate-pulse-live rounded-full bg-[var(--accent-bull)]" />
+              </span>
+              LIVE
+            </span>
+            <span className="text-[var(--text-muted)]">•</span>
+            <span className="text-[var(--text-secondary)]" suppressHydrationWarning>
+              Ultimo refresh:{" "}
+              {timeLabelReady && lastUpdate != null
+                ? lastUpdate.toLocaleTimeString("it-IT")
+                : "—"}
+            </span>
+            <span className="text-[var(--text-muted)]">•</span>
+            <button
+              type="button"
+              onClick={() => void load()}
+              className="rounded-lg border border-[var(--border)] bg-[var(--bg-surface-2)] px-2 py-1 text-xs font-semibold text-[var(--text-primary)] hover:border-[var(--border-active)]"
+            >
+              ↻ Aggiorna
+            </button>
+            <label className="ml-1 flex cursor-pointer items-center gap-1.5 text-xs text-[var(--text-secondary)]">
+              <input
+                type="checkbox"
+                checked={autoRefresh}
+                onChange={(e) => setAutoRefresh(e.target.checked)}
+                className="rounded border-[var(--border)] bg-[var(--bg-surface-2)]"
+              />
+              Auto 60s
+            </label>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            {ibkrStatus?.enabled === true && (
+              <>
+                <div
+                  className={`flex items-center gap-2 rounded-full border px-3 py-1 text-xs ${
+                    ibkrStatus.authenticated
+                      ? "border-emerald-700/80 bg-emerald-950/40 text-emerald-200"
+                      : "border-red-800/80 bg-red-950/40 text-red-200"
+                  }`}
+                >
+                  <span
+                    className={`h-2 w-2 rounded-full ${
+                      ibkrStatus.authenticated ? "animate-pulse bg-emerald-400" : "bg-red-400"
+                    }`}
+                  />
+                  IBKR {ibkrStatus.paper_trading ? "PAPER" : "LIVE"} ·{" "}
+                  {ibkrStatus.authenticated ? "connesso" : "disconnesso"}
+                </div>
+                {ibkrStatus.authenticated && (
+                  <span className="text-xs text-[var(--text-muted)]">
+                    Auto-exec:{" "}
+                    <span
+                      className={
+                        ibkrStatus.auto_execute ? "font-semibold text-emerald-300" : "text-[var(--text-secondary)]"
+                      }
+                    >
+                      {ibkrStatus.auto_execute ? "ON" : "OFF"}
+                    </span>
+                  </span>
+                )}
+              </>
+            )}
+            <RegimeBadge regime={regimeSpy} />
+            <span
+              className={`inline-flex items-center rounded-lg border px-3 py-1.5 font-[family-name:var(--font-trader-mono)] text-xs font-bold ${
+                totalExecute > 0
+                  ? "border-[var(--accent-bull)] bg-[var(--accent-bull)]/10 text-[var(--accent-bull)] shadow-[var(--glow-bull)]"
+                  : "border-[var(--border)] bg-[var(--bg-surface-2)] text-[var(--text-secondary)]"
+              }`}
+              aria-label={`Segnali esegui: ${totalExecute}`}
+            >
+              {totalExecute} segnali ESEGUI
+            </span>
+          </div>
         </div>
+        <p className="mt-2 font-[family-name:var(--font-trader-mono)] text-xs text-[var(--text-muted)]">
+          Prossimo refresh tra{" "}
+          <span suppressHydrationWarning>
+            {autoRefresh ? `${secondsToRefresh}s` : "—"}
+          </span>
+        </p>
       </header>
 
-      <section
-        className="rounded-lg border border-zinc-200 bg-zinc-50/80 p-4 dark:border-zinc-800 dark:bg-zinc-950/50"
-        aria-label="Aggiornamento pipeline"
-      >
-        <h2 className="text-sm font-medium text-zinc-800 dark:text-zinc-200">
-          Aggiornamento pipeline
-        </h2>
-        <p className="mt-1 text-xs text-zinc-600 dark:text-zinc-400">
-          Esegue ingest → features → context → patterns (come POST /pipeline/refresh).
-        </p>
-        <div className="mt-3 flex flex-wrap items-end gap-3">
-          <label className="flex flex-col gap-1 text-xs">
-            <span className="text-zinc-600 dark:text-zinc-400">Provider</span>
-            <select
-              className="min-w-[10rem] rounded border border-zinc-300 bg-white px-2 py-1.5 text-sm dark:border-zinc-600 dark:bg-zinc-900"
-              value={pipeProvider}
-              onChange={(e) =>
-                setPipeProvider(e.target.value as "binance" | "yahoo_finance")
-              }
-            >
-              <option value="binance">Binance (crypto)</option>
-              <option value="yahoo_finance">Yahoo Finance (US)</option>
-            </select>
-          </label>
-          <label className="flex flex-col gap-1 text-xs">
-            <span
-              className="text-zinc-600 dark:text-zinc-400"
-              title="Opzionale: sovrascrive il venue (es. YAHOO_US). Vuoto = default per provider."
-            >
-              Venue (opz.)
-            </span>
-            <input
-              className="min-w-[8rem] rounded border border-zinc-300 bg-white px-2 py-1.5 text-sm dark:border-zinc-600 dark:bg-zinc-900"
-              value={pipeExchangeOverride}
-              onChange={(e) => setPipeExchangeOverride(e.target.value)}
-              placeholder="default automatico"
-            />
-          </label>
-          <label className="flex flex-col gap-1 text-xs">
-            <span className="text-zinc-600 dark:text-zinc-400">Simbolo</span>
-            <input
-              className="rounded border border-zinc-300 bg-white px-2 py-1.5 text-sm dark:border-zinc-600 dark:bg-zinc-900"
-              value={pipeSymbol}
-              onChange={(e) => setPipeSymbol(e.target.value)}
-              placeholder="opzionale, es. BTC/USDT"
-            />
-          </label>
-          <label className="flex flex-col gap-1 text-xs">
-            <span className="text-zinc-600 dark:text-zinc-400">Timeframe</span>
-            <select
-              className="rounded border border-zinc-300 bg-white px-2 py-1.5 text-sm dark:border-zinc-600 dark:bg-zinc-900"
-              value={pipeTimeframe}
-              onChange={(e) => setPipeTimeframe(e.target.value)}
-            >
-              {TIMEFRAME_FILTER_OPTIONS.map((tf) => (
-                <option key={tf || "all"} value={tf}>
-                  {timeframeFilterLabel(tf)}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="flex flex-col gap-1 text-xs">
-            <span className="text-zinc-600 dark:text-zinc-400">Limite ingest</span>
-            <input
-              type="number"
-              min={1}
-              max={5000}
-              className="w-24 rounded border border-zinc-300 bg-white px-2 py-1.5 text-sm dark:border-zinc-600 dark:bg-zinc-900"
-              value={pipeIngestLimit}
-              onChange={(e) => setPipeIngestLimit(Number(e.target.value))}
-            />
-          </label>
-          <label className="flex flex-col gap-1 text-xs">
-            <span className="text-zinc-600 dark:text-zinc-400">Limite extract</span>
-            <input
-              type="number"
-              min={1}
-              max={10000}
-              className="w-24 rounded border border-zinc-300 bg-white px-2 py-1.5 text-sm dark:border-zinc-600 dark:bg-zinc-900"
-              value={pipeExtractLimit}
-              onChange={(e) => setPipeExtractLimit(Number(e.target.value))}
-            />
-          </label>
-          <label className="flex flex-col gap-1 text-xs">
-            <span className="text-zinc-600 dark:text-zinc-400">Lookback</span>
-            <input
-              type="number"
-              min={3}
-              max={200}
-              className="w-20 rounded border border-zinc-300 bg-white px-2 py-1.5 text-sm dark:border-zinc-600 dark:bg-zinc-900"
-              value={pipeLookback}
-              onChange={(e) => setPipeLookback(Number(e.target.value))}
-            />
-          </label>
+      <OpportunityPreferencesBar
+        sizing={sizingInput}
+        onSizingChange={persistSizing}
+        broker={broker}
+        onBrokerChange={persistBroker}
+      />
+
+      <section aria-label="Filtri rapidi" className="flex flex-wrap gap-2">
+        <span className="w-full text-xs font-medium text-[var(--text-muted)]">Decisione</span>
+        {(
+          [
+            ["all", "Tutti"],
+            ["execute", "✅ Esegui"],
+            ["monitor", "👁 Monitora"],
+            ["discard", "Scarta"],
+          ] as const
+        ).map(([id, label]) => (
           <button
+            key={id}
             type="button"
-            disabled={pipeLoading}
-            onClick={() => void runPipelineRefresh()}
-            className="rounded bg-zinc-900 px-4 py-2 text-sm font-medium text-white disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900"
+            className={pillClass(decisionFilter === id, id === "execute" ? "execute" : id === "monitor" ? "monitor" : id === "discard" ? "warn" : undefined)}
+            onClick={() => setDecisionFilter(id)}
           >
-            {pipeLoading ? "Esecuzione…" : "Esegui aggiornamento pipeline"}
+            {label}
           </button>
-        </div>
-        {pipeMessage && (
-          <p className="mt-2 text-sm text-emerald-700 dark:text-emerald-400">
-            {pipeMessage}
-          </p>
-        )}
-        {pipeError && (
-          <p className="mt-2 text-sm text-red-600 dark:text-red-400">{pipeError}</p>
-        )}
-      </section>
-
-      <section
-        className="rounded-lg border border-emerald-200/90 bg-emerald-50/40 p-4 dark:border-emerald-900/50 dark:bg-emerald-950/25"
-        aria-label="Convenienza economica (anteprima)"
-      >
-        <h2 className="text-sm font-medium text-emerald-950 dark:text-emerald-100">
-          Convenienza per il tuo conto
-        </h2>
-        <p className="mt-1 text-xs text-emerald-900/90 dark:text-emerald-200/85">
-          Usa gli stessi parametri salvati nel browser del dettaglio serie (capitale, rischio %, fee,
-          slippage, max % conto, leva). Il filtro non chiama il backend: ricalcola in tempo reale sul trade
-          plan già presente in ogni riga.
-        </p>
-        <div className="mt-3 flex flex-wrap items-end gap-4">
-          <label className="flex flex-col gap-1 text-xs">
-            <span className="font-medium text-emerald-950 dark:text-emerald-100">Filtro economico</span>
-            <select
-              className="min-w-[14rem] rounded border border-emerald-300 bg-white px-2 py-1.5 text-sm dark:border-emerald-800 dark:bg-zinc-900"
-              value={econPrefs.filterMode}
-              onChange={(e) =>
-                setEconPrefs((p) => ({
-                  ...p,
-                  filterMode: e.target.value as OpportunitiesEconomicPrefs["filterMode"],
-                }))
-              }
-            >
-              <option value="all">Tutte (nessun filtro economico)</option>
-              <option value="good_only">Solo convenienti</option>
-              <option value="good_or_marginal">Convenienti + borderline (nascondi non convenienti)</option>
-            </select>
-          </label>
-          <label className="flex items-center gap-2 text-xs">
-            <input
-              type="checkbox"
-              className="rounded border-emerald-400"
-              checked={econPrefs.economicRankingEnabled}
-              onChange={(e) =>
-                setEconPrefs((p) => ({ ...p, economicRankingEnabled: e.target.checked }))
-              }
-            />
-            <span className="font-medium text-emerald-950 dark:text-emerald-100">
-              Priorità convenienza economica (poi score tecnico)
-            </span>
-          </label>
+        ))}
+        <span className="mx-1 w-full sm:w-auto sm:pl-2" />
+        <span className="w-full text-xs font-medium text-[var(--text-muted)] sm:w-auto">Timeframe</span>
+        {(
+          [
+            ["all", "Tutti"],
+            ["1h", "1h"],
+            ["5m", "5m"],
+          ] as const
+        ).map(([id, label]) => (
           <button
+            key={id}
             type="button"
-            className="rounded border border-emerald-300 bg-white px-2 py-1.5 text-xs dark:border-emerald-800 dark:bg-zinc-900"
-            onClick={() => setSizingInput(loadPositionSizingInput())}
+            className={pillClass(tfFilter === id)}
+            onClick={() => setTfFilter(id)}
           >
-            Ricarica impostazioni conto dal browser
+            {label}
           </button>
-        </div>
+        ))}
+        <span className="mx-1 w-full sm:w-auto sm:pl-2" />
+        <span className="w-full text-xs font-medium text-[var(--text-muted)] sm:w-auto">Direzione</span>
+        {(
+          [
+            ["all", "Tutti"],
+            ["bearish", "Bearish"],
+            ["bullish", "Bullish"],
+          ] as const
+        ).map(([id, label]) => (
+          <button
+            key={id}
+            type="button"
+            className={pillClass(dirFilter === id)}
+            onClick={() => setDirFilter(id)}
+          >
+            {label}
+          </button>
+        ))}
       </section>
-
-      <section
-        className="flex flex-wrap items-center gap-2 rounded-lg border border-zinc-200 bg-zinc-50/90 px-3 py-2 dark:border-zinc-800 dark:bg-zinc-950/40"
-        aria-label="Filtro rapido decisione"
-      >
-        <span className="text-xs font-medium text-zinc-600 dark:text-zinc-400">
-          Semaforo:
-        </span>
-        <button
-          type="button"
-          onClick={() => setDecisionQuickFilter("all")}
-          className={`rounded px-2.5 py-1 text-xs font-medium ${
-            decisionQuickFilter === "all"
-              ? "bg-sky-600 text-white"
-              : "bg-zinc-200 text-zinc-800 dark:bg-zinc-800 dark:text-zinc-200"
-          }`}
-        >
-          Tutti
-        </button>
-        <button
-          type="button"
-          onClick={() => setDecisionQuickFilter("execute")}
-          className={`rounded px-2.5 py-1 text-xs font-medium ${
-            decisionQuickFilter === "execute"
-              ? "bg-emerald-600 text-white"
-              : "bg-zinc-200 text-zinc-800 dark:bg-zinc-800 dark:text-zinc-200"
-          }`}
-        >
-          Solo Esegui
-        </button>
-        <button
-          type="button"
-          onClick={() => setDecisionQuickFilter("monitor")}
-          className={`rounded px-2.5 py-1 text-xs font-medium ${
-            decisionQuickFilter === "monitor"
-              ? "bg-amber-500 text-white"
-              : "bg-zinc-200 text-zinc-800 dark:bg-zinc-800 dark:text-zinc-200"
-          }`}
-        >
-          Solo monitor
-        </button>
-      </section>
-
-      <section className="flex flex-wrap items-end gap-3" aria-label="Filtri">
-        <label className="flex flex-col gap-1 text-xs">
-          <span className="font-medium text-zinc-700 dark:text-zinc-300">
-            Simbolo
-          </span>
-          <input
-            className="min-w-[12rem] rounded border border-zinc-300 bg-white px-2 py-1.5 text-sm dark:border-zinc-600 dark:bg-zinc-900"
-            value={filterSymbol}
-            onChange={(e) => setFilterSymbol(e.target.value)}
-            placeholder="es. BTC/USDT (esatto)"
-          />
-        </label>
-        <label className="flex flex-col gap-1 text-xs">
-          <span className="font-medium text-zinc-700 dark:text-zinc-300">
-            Timeframe
-          </span>
-          <select
-            className="rounded border border-zinc-300 bg-white px-2 py-1.5 text-sm dark:border-zinc-600 dark:bg-zinc-900"
-            value={filterTimeframe}
-            onChange={(e) => setFilterTimeframe(e.target.value)}
-          >
-            {TIMEFRAME_FILTER_OPTIONS.map((tf) => (
-              <option key={tf || "all"} value={tf}>
-                {timeframeFilterLabel(tf)}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="flex flex-col gap-1 text-xs">
-          <span className="font-medium text-zinc-700 dark:text-zinc-300">
-            Provider
-          </span>
-          <select
-            className="min-w-[9rem] rounded border border-zinc-300 bg-white px-2 py-1.5 text-sm dark:border-zinc-600 dark:bg-zinc-900"
-            value={filterProvider}
-            onChange={(e) => setFilterProvider(e.target.value)}
-          >
-            {PROVIDER_FILTER_OPTIONS.map((p) => (
-              <option key={p || "all"} value={p}>
-                {p === ""
-                  ? "Tutti"
-                  : p === "yahoo_finance"
-                    ? "Yahoo Finance"
-                    : "Binance"}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="flex flex-col gap-1 text-xs">
-          <span className="font-medium text-zinc-700 dark:text-zinc-300">
-            Asset
-          </span>
-          <select
-            className="min-w-[7rem] rounded border border-zinc-300 bg-white px-2 py-1.5 text-sm dark:border-zinc-600 dark:bg-zinc-900"
-            value={filterAssetType}
-            onChange={(e) => setFilterAssetType(e.target.value)}
-          >
-            {ASSET_TYPE_FILTER_OPTIONS.map((a) => (
-              <option key={a || "all"} value={a}>
-                {a === "" ? "Tutti" : a}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="flex flex-col gap-1 text-xs">
-          <span className="font-medium text-zinc-700 dark:text-zinc-300">
-            Decisione
-          </span>
-          <select
-            className="min-w-[11rem] rounded border border-zinc-300 bg-white px-2 py-1.5 text-sm dark:border-zinc-600 dark:bg-zinc-900"
-            value={filterDecision}
-            onChange={(e) => setFilterDecision(e.target.value)}
-          >
-            {DECISION_FILTER_OPTIONS.map((d) => (
-              <option key={d || "all"} value={d}>
-                {d === ""
-                  ? "Tutte"
-                  : d === "execute"
-                    ? "Esegui"
-                    : d === "monitor"
-                      ? "Da monitorare"
-                      : "Scartare"}
-              </option>
-            ))}
-          </select>
-        </label>
-        <button
-          type="button"
-          onClick={() => void load()}
-          disabled={loading}
-          className="rounded border border-zinc-300 bg-white px-3 py-1.5 text-sm dark:border-zinc-600 dark:bg-zinc-900"
-        >
-          Applica filtri
-        </button>
-      </section>
-
-      {!loading && !error && displayRows.length > 0 && (
-        <OpportunitySummaryBar rows={displayRows.map((e) => e.row)} />
-      )}
 
       {loading && (
         <div
-          className="rounded-lg border border-dashed border-zinc-300 p-8 text-center text-sm text-zinc-600 dark:border-zinc-600 dark:text-zinc-400"
+          className="rounded-xl border border-dashed border-[var(--border)] p-10 text-center text-sm text-[var(--text-secondary)]"
           role="status"
         >
           Caricamento opportunità…
@@ -584,360 +537,226 @@ export default function OpportunitiesPage() {
 
       {!loading && error && (
         <div
-          className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-800 dark:border-red-900 dark:bg-red-950/40 dark:text-red-200"
+          className="rounded-xl border border-[var(--accent-bear)]/40 bg-[var(--accent-bear)]/10 p-4 text-sm text-[var(--accent-bear)]"
           role="alert"
         >
-          <strong className="font-medium">Impossibile caricare i dati.</strong>
-          <pre className="mt-2 whitespace-pre-wrap font-mono text-xs">{error}</pre>
+          <strong className="font-medium">Errore caricamento.</strong>
+          <pre className="mt-2 whitespace-pre-wrap font-[family-name:var(--font-trader-mono)] text-xs opacity-90">
+            {error}
+          </pre>
         </div>
       )}
 
       {!loading && !error && rows.length === 0 && (
-        <div className="rounded-lg border border-zinc-200 bg-zinc-50 p-8 text-center text-sm text-zinc-600 dark:border-zinc-800 dark:bg-zinc-900/40 dark:text-zinc-400">
-          Nessuna opportunità corrisponde ai filtri attuali.
+        <div className="rounded-xl border border-[var(--border)] bg-[var(--bg-surface)] p-8 text-center text-[var(--text-secondary)]">
+          Nessuna opportunità dal server. Verifica la pipeline o riprova tra poco.
         </div>
       )}
 
-      {!loading && !error && rows.length > 0 && displayRows.length === 0 && (
-        <div className="rounded-lg border border-amber-200 bg-amber-50 p-6 text-center text-sm text-amber-950 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-100">
-          Nessuna riga passa il filtro economico con i parametri attuali. Prova «Tutte» o rivedi capitale /
-          costi nel dettaglio serie.
+      {emptyExecute && (
+        <div className="animate-[slide-in_0.4s_ease-out] rounded-2xl border border-[var(--border)] bg-[var(--bg-surface)]/90 p-8 text-center backdrop-blur-sm">
+          <p className="font-[family-name:var(--font-trader-sans)] text-lg font-bold text-[var(--text-primary)]">
+            📡 In ascolto…
+          </p>
+          <p className="mt-2 text-sm text-[var(--text-secondary)]">
+            Nessun segnale operativo con i filtri attuali. Il refresh automatico è ogni {REFRESH_SEC}{" "}
+            secondi.
+          </p>
+          <p className="mt-4 font-[family-name:var(--font-trader-mono)] text-sm text-[var(--accent-neutral)]">
+            Prossimo refresh:{" "}
+            <span suppressHydrationWarning>
+              {autoRefresh ? `${secondsToRefresh}s` : "—"}
+            </span>
+          </p>
+          <p className="mt-4 text-xs text-[var(--text-muted)]">
+            Oggi (max execute in lista): {getTodayMaxExecute()} · Ultimi 7 giorni (somma max
+            giornalieri): {getWeekSumLast7Days()}
+          </p>
         </div>
       )}
 
-      {!loading && !error && displayRows.length > 0 && (
-        <div className="overflow-x-auto rounded-lg border border-zinc-200 dark:border-zinc-800">
-          <p
-            className="border-b border-zinc-200 bg-zinc-50/90 px-3 py-2 text-xs text-zinc-600 dark:border-zinc-800 dark:bg-zinc-900/40 dark:text-zinc-400"
-            role="note"
+      {showExecuteBlock && executeRows.length > 0 && (
+        <section aria-label="Segnali esegui">
+          <h2 className="mb-3 font-[family-name:var(--font-trader-sans)] text-sm font-bold uppercase tracking-wide text-[var(--text-secondary)]">
+            Esegui ora
+          </h2>
+          <div className="grid gap-4 sm:grid-cols-1 lg:grid-cols-2">
+            {executeRowsSorted.map((row) => (
+              <SignalCard
+                key={opportunityCardId(row)}
+                opportunity={row}
+                sizingInput={sizingInput}
+                broker={broker}
+                onBrokerChange={persistBroker}
+                currencySymbol={CURRENCY}
+                variant="execute"
+                cardId={opportunityCardId(row)}
+                expanded={expandedCardId === opportunityCardId(row)}
+                onExpandedChange={setExpandedCardId}
+              />
+            ))}
+          </div>
+        </section>
+      )}
+
+      {showMonitorBlock && monitorRows.length > 0 && (
+        <section aria-label="In monitoraggio">
+          <h2 className="mb-3 font-[family-name:var(--font-trader-sans)] text-sm font-bold uppercase tracking-wide text-[var(--text-secondary)]">
+            Monitora
+          </h2>
+          <div className="grid gap-4 sm:grid-cols-1 lg:grid-cols-2">
+            {monitorRowsSorted.map((row) => (
+              <SignalCard
+                key={opportunityCardId(row)}
+                opportunity={row}
+                sizingInput={sizingInput}
+                broker={broker}
+                onBrokerChange={persistBroker}
+                currencySymbol={CURRENCY}
+                variant="monitor"
+                cardId={opportunityCardId(row)}
+                expanded={expandedCardId === opportunityCardId(row)}
+                onExpandedChange={setExpandedCardId}
+              />
+            ))}
+          </div>
+        </section>
+      )}
+
+      {showDiscardBlock && discardRowsInUniverse.length > 0 && (
+        <section aria-label="Scartati nell'universo" className="mt-2">
+          <button
+            type="button"
+            onClick={() => setShowDiscarded((v) => !v)}
+            className="flex w-full items-center justify-between gap-2 border-t border-[var(--border)] py-3 text-left text-sm text-[var(--text-muted)] hover:text-[var(--text-secondary)]"
+            aria-expanded={showDiscarded}
           >
-            <span className="font-medium text-zinc-700 dark:text-zinc-300">
-              Direzioni:
-            </span>{" "}
-            «Dir. score» = interpretazione direzionale del contesto live dello screener; «Dir.
-            pattern» = direzione dell’ultimo pattern rilevato. «Allineamento segnale» le confronta.
-            Passa il mouse sulle intestazioni di colonna per il testo di aiuto.
-          </p>
-          <p
-            className="border-b border-zinc-200 bg-zinc-50/95 px-3 py-2 text-xs text-zinc-600 dark:border-zinc-800 dark:bg-zinc-900/50 dark:text-zinc-400"
-            role="note"
-          >
-            <span className="font-medium text-zinc-700 dark:text-zinc-300">
-              Fonte piano:
-            </span>{" "}
-            <span title={FONTE_PIANO_LEGENDA.promossa}>Promossa</span> = best variant
-            validata;{" "}
-            <span title={FONTE_PIANO_LEGENDA.watchlist}>Watchlist</span> = variante con
-            affidabilità media;{" "}
-            <span title={FONTE_PIANO_LEGENDA.fallback}>Fallback standard</span> = motore base
-            senza variante affidabile per le regole live.{" "}
-            <span className="font-medium text-zinc-700 dark:text-zinc-300">
-              Decisione:
-            </span>{" "}
-            passa il mouse sul badge per una sintesi della motivazione.
-          </p>
-          <table className="w-full min-w-[176rem] border-collapse text-left text-sm">
-            <thead>
-              <tr className="border-b border-zinc-200 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900/60">
-                <th className="sticky left-0 z-20 min-w-[8rem] border-r border-zinc-200 bg-zinc-50 px-3 py-2 font-medium shadow-[4px_0_12px_-6px_rgba(0,0,0,0.12)] dark:border-zinc-700 dark:bg-zinc-950">
-                  Simbolo
-                </th>
-                <th className="min-w-[10rem] whitespace-nowrap px-3 py-2 font-medium">
-                  Provider
-                </th>
-                <th className="px-3 py-2 font-medium">Asset</th>
-                <th
-                  className="min-w-[8rem] whitespace-nowrap px-3 py-2 font-medium"
-                  title={`${FONTE_PIANO_LEGENDA.promossa} | ${FONTE_PIANO_LEGENDA.watchlist} | ${FONTE_PIANO_LEGENDA.fallback}`}
-                >
-                  Fonte piano
-                </th>
-                <th
-                  className="cursor-help px-3 py-2 font-medium"
-                  title="Candidato alert: regole MVP (allineamento, OK TF, banda qualità, score). Priorità da score finale."
-                >
-                  Alert
-                </th>
-                <th className="px-3 py-2 font-medium">Priorità</th>
-                <th className="px-3 py-2 font-medium">TF</th>
-                <th className="px-3 py-2 font-medium">Mercato</th>
-                <th className="px-3 py-2 font-medium">Volatilità</th>
-                <th className="px-3 py-2 font-medium">Espansione</th>
-                <th className="px-3 py-2 font-medium">Bias dir.</th>
-                <th className="px-3 py-2 font-medium">Score screener</th>
-                <th className="px-3 py-2 font-medium">Score finale</th>
-                <th
-                  className="min-w-[7rem] px-3 py-2 font-medium"
-                  title="Da anteprima sizing con il tuo capitale (dettaglio serie)"
-                >
-                  Conv. econ.
-                </th>
-                <th className="min-w-[5rem] px-3 py-2 font-medium tabular-nums" title="Notional stimato">
-                  Puntata €
-                </th>
-                <th className="min-w-[5rem] px-3 py-2 font-medium tabular-nums" title="Utile netto TP1 stimato">
-                  TP1 netto
-                </th>
-                <th className="px-3 py-2 font-medium">Livello finale</th>
-                <th className="px-3 py-2 font-medium">Etichetta</th>
-                <th
-                  className="cursor-help px-3 py-2 font-medium"
-                  title={TOOLTIP_DIR_SCORE_IT}
-                >
-                  Dir. score
-                </th>
-                <th className="px-3 py-2 font-medium">Pattern</th>
-                <th
-                  className="cursor-help px-3 py-2 font-medium"
-                  title={TOOLTIP_DIR_PATTERN_IT}
-                >
-                  Dir. pattern
-                </th>
-                <th
-                  className="min-w-[7rem] px-3 py-2 font-medium"
-                  title="Passa sulla cella: età in barre, soglia TF, esito recente o datato."
-                >
-                  Età pat.
-                </th>
-                <th
-                  className="cursor-help px-3 py-2 font-medium"
-                  title={TOOLTIP_ALLINEAMENTO_SEGNALE_IT}
-                >
-                  Allineamento segnale
-                </th>
-                <th className="px-3 py-2 font-medium">Qualità pat.</th>
-                <th className="px-3 py-2 font-medium">Band qualità</th>
-                <th
-                  className="cursor-help px-3 py-2 font-medium"
-                  title="Backtest sul timeframe: il pattern è storicamente adeguato su questo TF?"
-                >
-                  OK sul TF
-                </th>
-                <th
-                  className="cursor-help px-3 py-2 font-medium"
-                  title="Esito policy qualità pattern+timeframe (backtest)"
-                >
-                  Evid. storico TF
-                </th>
-                <th className="px-3 py-2 font-medium">Forza pattern</th>
-                <th className="px-3 py-2 font-medium">Orario ctx</th>
-                <th className="px-3 py-2 font-medium">Orario pattern</th>
-                <th
-                  className="sticky right-[11rem] z-20 min-w-[8rem] border-l border-zinc-200 bg-zinc-50 px-3 py-2 font-medium shadow-[-8px_0_12px_-6px_rgba(0,0,0,0.06)] dark:border-zinc-700 dark:bg-zinc-950"
-                  title="Regime SPY 1d (EMA50) alla data di riferimento."
-                >
-                  Regime SPY
-                </th>
-                <th
-                  className="sticky right-0 z-20 min-w-[11rem] border-l border-zinc-200 bg-zinc-50 px-3 py-2 font-medium shadow-[-8px_0_12px_-6px_rgba(0,0,0,0.06)] dark:border-zinc-700 dark:bg-zinc-950"
-                  title="Semaforo operativo validato (pattern/universo/regime). Sotto: motivazione."
-                >
-                  Decisione
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {displayRows.map(({ row: r, snap }) => (
-                <tr
-                  key={`${r.exchange}-${r.symbol}-${r.timeframe}-${r.context_timestamp}`}
-                  className={opportunityRowClass(r)}
-                  onClick={() =>
-                    router.push(
-                      seriesDetailHref(r.symbol, r.timeframe, r.exchange, {
-                        provider: r.provider,
-                        asset_type: r.asset_type,
-                      }),
-                    )
-                  }
-                >
-                  <td className="sticky left-0 z-20 min-w-[8rem] border-r border-zinc-200 bg-[var(--background)] px-3 py-2 font-mono text-xs shadow-[4px_0_12px_-6px_rgba(0,0,0,0.1)] dark:border-zinc-700 dark:bg-zinc-950">
-                    {r.symbol}
-                  </td>
-                  <td className="min-w-[10rem] whitespace-nowrap px-3 py-2 font-mono text-xs text-zinc-600 dark:text-zinc-400">
-                    {r.provider ?? "—"}
-                  </td>
-                  <td className="px-3 py-2 text-xs capitalize text-zinc-600 dark:text-zinc-400">
-                    {r.asset_type ?? "—"}
-                  </td>
-                  <td
-                    className="min-w-[8rem] whitespace-nowrap px-3 py-2 text-xs"
-                    title={fontePianoListTitle(r)}
-                  >
-                    <span
-                      className={
-                        (r.trade_plan_source ?? "default_fallback") === "variant_backtest"
-                          ? r.selected_trade_plan_variant_status === "promoted"
-                            ? "font-medium text-emerald-800 dark:text-emerald-300"
-                            : "font-medium text-sky-800 dark:text-sky-300"
-                          : "text-zinc-600 dark:text-zinc-400"
-                      }
-                    >
-                      {fontePianoListLabel(r)}
-                    </span>
-                  </td>
-                  <td className="px-3 py-2 text-xs tabular-nums">
-                    {r.alert_candidate ? (
-                      <span className="font-medium text-emerald-700 dark:text-emerald-400">
-                        Sì
-                      </span>
-                    ) : (
-                      <span className="text-zinc-500">No</span>
-                    )}
-                  </td>
-                  <td className="px-3 py-2">
-                    <span
-                      className={`inline-block rounded px-2 py-0.5 text-xs font-medium ${alertLevelBadgeClass(r.alert_level)}`}
-                    >
-                      {displayAlertLevelLabel(r.alert_level)}
-                    </span>
-                  </td>
-                  <td className="px-3 py-2 font-mono text-xs">{r.timeframe}</td>
-                  <td className="px-3 py-2">{displayEnumLabel(r.market_regime)}</td>
-                  <td className="px-3 py-2">{displayEnumLabel(r.volatility_regime)}</td>
-                  <td className="px-3 py-2">{displayEnumLabel(r.candle_expansion)}</td>
-                  <td className="px-3 py-2">{displayEnumLabel(r.direction_bias)}</td>
-                  <td className="px-3 py-2 tabular-nums">{r.screener_score}</td>
-                  <td
-                    className={`px-3 py-2 tabular-nums ${
-                      (r.trade_plan_source ?? "default_fallback") === "default_fallback"
-                        ? "font-normal text-zinc-600 dark:text-zinc-400"
-                        : "font-medium"
-                    }`}
-                  >
-                    {r.final_opportunity_score.toFixed(1)}
-                  </td>
-                  <td className={`px-3 py-2 text-xs ${snap ? economicVerdictCellClass(snap.simple.verdictLabel) : ""}`}>
-                    {snap?.preview.ok ? snap.simple.verdictLabel : "—"}
-                  </td>
-                  <td className="px-3 py-2 text-xs tabular-nums text-zinc-700 dark:text-zinc-300">
-                    {snap?.preview.ok ? formatEur(snap.preview.notionalPositionValue) : "—"}
-                  </td>
-                  <td className="px-3 py-2 text-xs tabular-nums text-zinc-700 dark:text-zinc-300">
-                    {snap?.preview.ok && snap.preview.estimatedNetProfitAtTp1 != null
-                      ? formatEur(snap.preview.estimatedNetProfitAtTp1)
-                      : "—"}
-                  </td>
-                  <td className="px-3 py-2 text-xs">
-                    {displayFinalOpportunityLabel(r.final_opportunity_label)}
-                  </td>
-                  <td className="px-3 py-2 text-xs">
-                    {displayTechnicalLabel(r.score_label)}
-                  </td>
-                  <td className="px-3 py-2">
-                    {displayEnumLabel(r.score_direction)}
-                  </td>
-                  <td
-                    className="max-w-[10rem] truncate px-3 py-2 text-xs"
-                    title={r.latest_pattern_name ?? undefined}
-                  >
-                    {displayTechnicalLabel(r.latest_pattern_name)}
-                  </td>
-                  <td className="px-3 py-2">
-                    {displayEnumLabel(r.latest_pattern_direction)}
-                  </td>
-                  <td
-                    className={`whitespace-nowrap px-3 py-2 text-xs tabular-nums ${patternAgeListCellClass(r.pattern_stale)}`}
-                    title={patternAgeListTooltip(r)}
-                  >
-                    {displayPatternAgeListLabel(r)}
-                  </td>
-                  <td className="px-3 py-2">
-                    <AllineamentoSegnaleBadge row={r} />
-                  </td>
-                  <td className="px-3 py-2 tabular-nums text-xs">
-                    {r.pattern_quality_score != null
-                      ? r.pattern_quality_score.toFixed(1)
-                      : "—"}
-                  </td>
-                  <td className="px-3 py-2 text-xs">
-                    {displayPatternQualityLabel(r.pattern_quality_label)}
-                  </td>
-                  <td className="px-3 py-2 text-xs tabular-nums">
-                    {r.pattern_timeframe_quality_ok == null
-                      ? "—"
-                      : r.pattern_timeframe_quality_ok
-                        ? "Sì"
-                        : "No"}
-                  </td>
-                  <td className="max-w-[14rem] px-3 py-2 text-xs">
-                    <span>{displayPatternTimeframeGateLabel(r.pattern_timeframe_gate_label)}</span>
-                    {r.pattern_timeframe_filtered_candidate ? (
-                      <span className="ml-1 font-medium text-amber-700 dark:text-amber-400">
-                        (filtrato)
-                      </span>
-                    ) : null}
-                  </td>
-                  <td className="px-3 py-2 tabular-nums text-xs">
-                    {formatStrength(r.latest_pattern_strength)}
-                  </td>
-                  <td className="whitespace-nowrap px-3 py-2 text-xs text-zinc-600 dark:text-zinc-400">
-                    {formatTs(r.context_timestamp)}
-                  </td>
-                  <td className="whitespace-nowrap px-3 py-2 text-xs text-zinc-600 dark:text-zinc-400">
-                    {formatTs(r.pattern_timestamp ?? undefined)}
-                  </td>
-                  <td
-                    className="sticky right-[11rem] z-10 min-w-[8rem] border-l border-zinc-200 bg-[var(--background)] px-3 py-2 text-xs shadow-[-8px_0_12px_-6px_rgba(0,0,0,0.06)] dark:border-zinc-700 dark:bg-zinc-950"
-                    title={
-                      r.regime_direction_ok === false
-                        ? "Direzione pattern non allineata al regime SPY"
-                        : "Regime macro SPY (informativo)"
-                    }
-                  >
-                    <span
-                      className={`inline-block rounded px-2 py-0.5 text-xs font-medium ${
-                        (r.regime_spy ?? "unknown") === "bullish"
-                          ? "bg-emerald-900/90 text-emerald-200"
-                          : (r.regime_spy ?? "unknown") === "bearish"
-                            ? "bg-red-900/90 text-red-200"
-                            : (r.regime_spy ?? "unknown") === "neutral"
-                              ? "bg-zinc-600 text-zinc-100"
-                              : (r.regime_spy ?? "unknown") === "n/a"
-                                ? "bg-slate-600 text-slate-100"
-                                : "bg-zinc-500/80 text-zinc-100"
-                      }`}
-                    >
-                      {(r.regime_spy ?? "unknown").replace("_", " ")}
-                    </span>
-                  </td>
-                  <td
-                    className="sticky right-0 z-10 min-w-[11rem] max-w-[14rem] border-l border-zinc-200 bg-[var(--background)] px-3 py-2 text-xs shadow-[-8px_0_12px_-6px_rgba(0,0,0,0.06)] dark:border-zinc-700 dark:bg-zinc-950"
-                    title={decisionRationaleTitleAttr(r)}
-                  >
-                    <div className="flex flex-col gap-1.5">
-                      <div className="flex flex-wrap items-center gap-1">
-                        <span
-                          className={`inline-flex items-center rounded-md px-2 py-0.5 text-xs font-bold ${
-                            r.operational_decision === "execute"
-                              ? "bg-emerald-600 text-white dark:bg-emerald-700"
-                              : r.operational_decision === "monitor"
-                                ? "bg-amber-500 text-white"
-                                : "bg-red-950 text-red-200"
-                          }`}
-                        >
-                          {r.operational_decision === "execute"
-                            ? "Esegui"
-                            : r.operational_decision === "monitor"
-                              ? "Monitor"
-                              : "Scarta"}
-                        </span>
-                      </div>
-                      {(r.decision_rationale ?? []).map((line, i) => (
-                        <p
-                          key={i}
-                          className="text-[0.7rem] leading-snug text-zinc-500 dark:text-zinc-400"
-                        >
-                          {line}
-                        </p>
-                      ))}
-                    </div>
-                  </td>
-                </tr>
+            <span>
+              {showDiscarded ? "▲" : "▼"} Nell&apos;universo ma pattern non operativo (
+              {discardRowsInUniverse.length})
+            </span>
+          </button>
+          {showDiscarded && (
+            <div className="space-y-2 pb-2" role="list">
+              {discardRowsSorted.map((row) => (
+                <DiscardedCard key={opportunityCardId(row)} opportunity={row} />
               ))}
-            </tbody>
-          </table>
-        </div>
+            </div>
+          )}
+        </section>
       )}
+
+      <details className="rounded-xl border border-[var(--border)] bg-[var(--bg-surface)]/60 p-4 text-sm text-[var(--text-secondary)]">
+        <summary className="cursor-pointer font-medium text-[var(--text-primary)]">
+          Manutenzione pipeline
+        </summary>
+        <p className="mt-2 text-xs">
+          Esegue ingest → features → context → patterns (POST /pipeline/refresh). Uso avanzato.
+        </p>
+        <div className="mt-3 flex flex-wrap items-end gap-3">
+          <label className="flex flex-col gap-1 text-xs">
+            Provider
+            <select
+              className="rounded-lg border border-[var(--border)] bg-[var(--bg-surface-2)] px-2 py-1.5 text-[var(--text-primary)]"
+              value={pipeProvider}
+              onChange={(e) => setPipeProvider(e.target.value as "binance" | "yahoo_finance")}
+            >
+              <option value="binance">Binance</option>
+              <option value="yahoo_finance">Yahoo Finance</option>
+            </select>
+          </label>
+          <label className="flex flex-col gap-1 text-xs">
+            Venue (opz.)
+            <input
+              className="rounded-lg border border-[var(--border)] bg-[var(--bg-surface-2)] px-2 py-1.5 text-[var(--text-primary)]"
+              value={pipeExchangeOverride}
+              onChange={(e) => setPipeExchangeOverride(e.target.value)}
+              placeholder="default"
+            />
+          </label>
+          <label className="flex flex-col gap-1 text-xs">
+            Simbolo
+            <input
+              className="rounded-lg border border-[var(--border)] bg-[var(--bg-surface-2)] px-2 py-1.5 text-[var(--text-primary)]"
+              value={pipeSymbol}
+              onChange={(e) => setPipeSymbol(e.target.value)}
+            />
+          </label>
+          <label className="flex flex-col gap-1 text-xs">
+            Timeframe
+            <select
+              className="rounded-lg border border-[var(--border)] bg-[var(--bg-surface-2)] px-2 py-1.5 text-[var(--text-primary)]"
+              value={pipeTimeframe}
+              onChange={(e) => setPipeTimeframe(e.target.value)}
+            >
+              {TIMEFRAME_PIPELINE.map((tf) => (
+                <option key={tf || "all"} value={tf}>
+                  {tf === "" ? "—" : tf}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="flex flex-col gap-1 text-xs">
+            Limite ingest
+            <input
+              type="number"
+              min={1}
+              className="w-24 rounded-lg border border-[var(--border)] bg-[var(--bg-surface-2)] px-2 py-1.5"
+              value={pipeIngestLimit}
+              onChange={(e) => setPipeIngestLimit(Number(e.target.value))}
+            />
+          </label>
+          <label className="flex flex-col gap-1 text-xs">
+            Limite extract
+            <input
+              type="number"
+              min={1}
+              className="w-24 rounded-lg border border-[var(--border)] bg-[var(--bg-surface-2)] px-2 py-1.5"
+              value={pipeExtractLimit}
+              onChange={(e) => setPipeExtractLimit(Number(e.target.value))}
+            />
+          </label>
+          <label className="flex flex-col gap-1 text-xs">
+            Lookback
+            <input
+              type="number"
+              min={3}
+              className="w-20 rounded-lg border border-[var(--border)] bg-[var(--bg-surface-2)] px-2 py-1.5"
+              value={pipeLookback}
+              onChange={(e) => setPipeLookback(Number(e.target.value))}
+            />
+          </label>
+          <button
+            type="button"
+            disabled={pipeLoading}
+            onClick={() => void runPipelineRefresh()}
+            className="rounded-lg bg-[var(--text-primary)] px-4 py-2 text-xs font-semibold text-[var(--bg-base)] disabled:opacity-50"
+          >
+            {pipeLoading ? "…" : "Esegui pipeline"}
+          </button>
+        </div>
+        {pipeMessage && <p className="mt-2 text-xs text-[var(--accent-bull)]">{pipeMessage}</p>}
+        {pipeError && <p className="mt-2 text-xs text-[var(--accent-bear)]">{pipeError}</p>}
+      </details>
     </div>
+  );
+}
+
+export default function OpportunitiesPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="mx-auto flex min-h-full max-w-6xl flex-col gap-4 px-4 pb-10 pt-4 sm:px-6">
+          <div
+            className="rounded-xl border border-dashed border-[var(--border)] p-10 text-center text-sm text-[var(--text-secondary)]"
+            role="status"
+          >
+            Caricamento opportunità…
+          </div>
+        </div>
+      }
+    >
+      <OpportunitiesPageInner />
+    </Suspense>
   );
 }

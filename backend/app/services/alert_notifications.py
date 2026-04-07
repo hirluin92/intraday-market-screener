@@ -3,8 +3,8 @@ Outbound alert notifications v1 (MVP).
 
 Dopo un pipeline refresh:
 
-- **Mirato** (exchange + symbol + timeframe): come prima; idoneità con
-  ``NOTIFICATION_TEST_INCLUDE_MEDIA_PRIORITA`` per i test.
+- **Mirato** (exchange + symbol + timeframe): idoneità con
+  ``INCLUDE_MEDIA_PRIORITA`` (env ``ALERT_INCLUDE_MEDIA_PRIORITA``).
 - **Globale** (nessun symbol e nessun timeframe nel body): elenca le opportunità per tutte le
   serie rilevanti e invia solo per ``alta_priorita`` (nessun media test).
 
@@ -26,6 +26,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.models.alert_notification_sent import AlertNotificationSent
+
+INCLUDE_MEDIA_PRIORITA = settings.alert_include_media_priorita
 from app.schemas.opportunities import OpportunityRow
 from app.schemas.pipeline import PipelineRefreshRequest
 from app.services.opportunity_final_score import compute_signal_alignment
@@ -36,12 +38,6 @@ logger = logging.getLogger(__name__)
 HIGH_ALERT_LEVEL = "alta_priorita"
 MEDIA_ALERT_LEVEL = "media_priorita"
 
-# ---------------------------------------------------------------------------
-# TEST NOTIFICHE — RIMUOVERE / METTERE False PER RIPRISTINARE SOLO alta_priorita
-# Non tocca lo scoring delle opportunità, solo il gating di invio Discord/Telegram.
-# ---------------------------------------------------------------------------
-NOTIFICATION_TEST_INCLUDE_MEDIA_PRIORITA = True
-
 # Max righe opportunità considerate in un refresh globale (post-ordinamento score).
 GLOBAL_NOTIFY_OPPORTUNITIES_LIMIT = 1000
 
@@ -50,12 +46,12 @@ TELEGRAM_TEXT_MAX = 4000
 
 
 def _notification_eligible_for_outbound(opp: OpportunityRow) -> bool:
-    """Solo gating invio: alta_priorita (produzione) e opzionalmente media_priorita (test)."""
+    """Solo gating invio: alta_priorita e opzionalmente media_priorita (env)."""
     if not opp.alert_candidate:
         return False
     if opp.alert_level == HIGH_ALERT_LEVEL:
         return True
-    if NOTIFICATION_TEST_INCLUDE_MEDIA_PRIORITA and opp.alert_level == MEDIA_ALERT_LEVEL:
+    if INCLUDE_MEDIA_PRIORITA and opp.alert_level == MEDIA_ALERT_LEVEL:
         return True
     return False
 
@@ -108,6 +104,7 @@ def _quality_band_it(label: str) -> str:
         "medium": "media",
         "low": "bassa",
         "unknown": "sconosciuta",
+        "insufficient": "insufficiente",
     }.get(label, label)
 
 
@@ -357,12 +354,12 @@ async def _notify_targeted_pipeline(
     logger.info(
         "alert_notifications: alert_candidates_count=%d high_priority_candidates_count=%d "
         "media_priority_candidates_count=%d notification_eligible_count=%d "
-        "NOTIFICATION_TEST_INCLUDE_MEDIA_PRIORITA=%s discord_configured=%s",
+        "ALERT_INCLUDE_MEDIA_PRIORITA=%s discord_configured=%s",
         alert_candidates_count,
         high_priority_candidates_count,
         media_priority_candidates_count,
         notification_eligible_count,
-        NOTIFICATION_TEST_INCLUDE_MEDIA_PRIORITA,
+        INCLUDE_MEDIA_PRIORITA,
         discord_cfg,
     )
 
@@ -378,7 +375,7 @@ async def _notify_targeted_pipeline(
     if not _notification_eligible_for_outbound(opp):
         logger.info(
             "alert_notifications: no notification eligible for outbound "
-            "(alta_priorita, or media_priorita when NOTIFICATION_TEST_INCLUDE_MEDIA_PRIORITA=True) "
+            "(alta_priorita, or media_priorita when ALERT_INCLUDE_MEDIA_PRIORITA=true) "
             "alert_candidate=%s alert_level=%s final_opportunity_score=%.2f",
             opp.alert_candidate,
             opp.alert_level,
@@ -386,13 +383,10 @@ async def _notify_targeted_pipeline(
         )
         return
 
-    if (
-        NOTIFICATION_TEST_INCLUDE_MEDIA_PRIORITA
-        and opp.alert_level == MEDIA_ALERT_LEVEL
-    ):
+    if INCLUDE_MEDIA_PRIORITA and opp.alert_level == MEDIA_ALERT_LEVEL:
         logger.info(
-            "alert_notifications: media priority notification allowed for test "
-            "(NOTIFICATION_TEST_INCLUDE_MEDIA_PRIORITA=True; set False to restore alta-only)",
+            "alert_notifications: media priority notification allowed "
+            "(ALERT_INCLUDE_MEDIA_PRIORITA=true; set false for alta-only)",
         )
 
     if await _already_sent(
@@ -437,7 +431,7 @@ async def _notify_targeted_pipeline(
         "alert_notifications: notification sent successfully (all channels ok, dedupe recorded) "
         "tier=%s media_tier_test=%s exchange=%s symbol=%s timeframe=%s context_timestamp=%s",
         opp.alert_level,
-        opp.alert_level == MEDIA_ALERT_LEVEL and NOTIFICATION_TEST_INCLUDE_MEDIA_PRIORITA,
+        opp.alert_level == MEDIA_ALERT_LEVEL and INCLUDE_MEDIA_PRIORITA,
         opp.exchange,
         opp.symbol,
         opp.timeframe,

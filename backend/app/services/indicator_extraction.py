@@ -13,7 +13,8 @@ per compatibilità con l'ambiente Docker esistente.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+import logging
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
 
@@ -22,6 +23,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.candle import Candle
+from app.models.candle_feature import CandleFeature
 from app.models.candle_indicator import CandleIndicator
 from app.schemas.indicators import IndicatorExtractRequest, IndicatorExtractResponse
 from app.services.funding_rate_service import (
@@ -30,11 +32,24 @@ from app.services.funding_rate_service import (
     funding_bias_from_rate,
 )
 
+logger = logging.getLogger(__name__)
+
+
+def _normalize_ts(ts: datetime) -> datetime:
+    """Chiave stabile per allineare timestamp tra serie (UTC, microsecondi azzerati)."""
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    else:
+        ts = ts.astimezone(timezone.utc)
+    return ts.replace(microsecond=0)
+
+
 # Ora di apertura/chiusura sessione US (UTC)
 _US_SESSION_OPEN_HOUR = 14  # 09:30 ET = 14:30 UTC (ora legale)
 _US_SESSION_OPEN_MIN = 30
 _US_SESSION_CLOSE_HOUR = 21  # 16:00 ET = 21:00 UTC
 _OR_BARS_5M = 6  # Opening range = prime 6 barre da 5m = 30 minuti
+_OR_BARS_15M = 2  # Opening range = prime 2 barre da 15m = 30 minuti
 _OR_BARS_1H = 1  # Opening range = prima barra da 1h = prima ora
 
 _UPSERT_CHUNK_SIZE = 500
@@ -338,7 +353,13 @@ def _calc_vwap_and_session_levels(
                 sl_out[i] = session_l
 
                 # Opening range
-                or_bars = _OR_BARS_5M if timeframe == "5m" else _OR_BARS_1H
+                or_bars = (
+                    _OR_BARS_5M
+                    if timeframe == "5m"
+                    else _OR_BARS_15M
+                    if timeframe == "15m"
+                    else _OR_BARS_1H
+                )
                 if not or_complete:
                     or_bars_count += 1
                     or_h = hi if or_h is None else max(or_h, hi)
@@ -436,6 +457,258 @@ def _calc_fibonacci_levels(
     return f382, f500, f618, d382, d500, d618
 
 
+_FVG_MIN_GAP_PCT = 0.1
+
+
+def _calc_fair_value_gaps(
+    highs: list[float],
+    lows: list[float],
+    closes: list[float],
+) -> tuple[
+    list[bool],
+    list[bool],
+    list[float | None],
+    list[float | None],
+    list[float | None],
+    list[str | None],
+    list[bool],
+]:
+    """
+    Fair Value Gaps (3 candele: i-2, i-1, i).
+
+    Bullish: lows[i] > highs[i-2] e gap relativo >= 0,1% → zona [highs[i-2], lows[i]].
+    Bearish: highs[i] < lows[i-2] e gap >= 0,1% → zona [highs[i], lows[i-2]].
+
+    Mantiene FVG attivi; filled quando il prezzo attraversa la zona (bullish: low <= bordo
+    inferiore; bearish: high >= bordo superiore). Per ogni barra: flag se close è nella zona,
+    livelli del FVG più vicino (per distanza dal centro), dist_to_fvg_pct.
+    """
+    n = len(closes)
+    in_bull: list[bool] = [False] * n
+    in_bear: list[bool] = [False] * n
+    out_hi: list[float | None] = [None] * n
+    out_lo: list[float | None] = [None] * n
+    dist_pct: list[float | None] = [None] * n
+    out_dir: list[str | None] = [None] * n
+    out_filled: list[bool] = [False] * n
+
+    # {kind: "bullish"|"bearish", lo, hi, filled}
+    active: list[dict[str, Any]] = []
+
+    for j in range(n):
+        # Prima: mitigazione FVG esistenti con la barra corrente
+        for fvg in active:
+            if fvg["filled"]:
+                continue
+            lo, hi = fvg["lo"], fvg["hi"]
+            if fvg["kind"] == "bullish":
+                if lows[j] <= lo:
+                    fvg["filled"] = True
+            else:
+                if highs[j] >= hi:
+                    fvg["filled"] = True
+
+        if j >= 2:
+            # Nuovo FVG bullish
+            if lows[j] > highs[j - 2]:
+                ref = highs[j - 2]
+                if ref > 0:
+                    gap_rel = (lows[j] - ref) / ref * 100.0
+                    if gap_rel >= _FVG_MIN_GAP_PCT:
+                        active.append(
+                            {
+                                "kind": "bullish",
+                                "lo": ref,
+                                "hi": lows[j],
+                                "filled": False,
+                            },
+                        )
+            # Nuovo FVG bearish
+            if highs[j] < lows[j - 2]:
+                ref = highs[j]
+                if ref > 0:
+                    gap_rel = (lows[j - 2] - ref) / ref * 100.0
+                    if gap_rel >= _FVG_MIN_GAP_PCT:
+                        active.append(
+                            {
+                                "kind": "bearish",
+                                "lo": highs[j],
+                                "hi": lows[j - 2],
+                                "filled": False,
+                            },
+                        )
+
+        c = closes[j]
+        best: dict[str, Any] | None = None
+        best_d = float("inf")
+        for fvg in active:
+            if fvg["filled"]:
+                continue
+            lo, hi = fvg["lo"], fvg["hi"]
+            if lo <= c <= hi:
+                center = (lo + hi) / 2.0
+                if center <= 0:
+                    continue
+                d = abs(c - center) / center * 100.0
+                if d < best_d:
+                    best_d = d
+                    best = fvg
+
+        if best is not None:
+            if best["kind"] == "bullish":
+                in_bull[j] = True
+            else:
+                in_bear[j] = True
+            out_lo[j] = best["lo"]
+            out_hi[j] = best["hi"]
+            dist_pct[j] = best_d
+            out_dir[j] = best["kind"]
+            out_filled[j] = bool(best["filled"])
+
+    return in_bull, in_bear, out_hi, out_lo, dist_pct, out_dir, out_filled
+
+
+_OB_MIN_IMPULSE_RATIO = 1.5
+_OB_MIN_BODY_PCT = 0.003
+
+
+def _calc_order_blocks(
+    opens: list[float],
+    highs: list[float],
+    lows: list[float],
+    closes: list[float],
+) -> tuple[
+    list[bool],
+    list[bool],
+    list[float | None],
+    list[float | None],
+    list[str | None],
+    list[float | None],
+    list[bool],
+    list[float | None],
+]:
+    """
+    Order Block: candela i (setup), i+1 impulsiva, i+2 continuazione.
+
+    OB bullish: i bearish, i+1 bullish con corpo > media×1.5, i+2 rialzo (close > open e > close i+1).
+    Zona = [low[i], high[i]] della candela OB.
+
+    OB bearish: simmetrico. Invalidazione: close < ob_low (bull) o close > ob_high (bear).
+    """
+    n = len(closes)
+    in_bull = [False] * n
+    in_bear = [False] * n
+    ob_h: list[float | None] = [None] * n
+    ob_l: list[float | None] = [None] * n
+    ob_dir: list[str | None] = [None] * n
+    ob_str: list[float | None] = [None] * n
+    ob_filled_out = [False] * n
+    dist_pct: list[float | None] = [None] * n
+
+    if n < 3:
+        return in_bull, in_bear, ob_h, ob_l, ob_dir, ob_str, ob_filled_out, dist_pct
+
+    bodies = [abs(closes[i] - opens[i]) for i in range(n)]
+    avg_body = sum(bodies) / n
+    if avg_body < 1e-12:
+        avg_body = 1e-12
+
+    active: list[dict[str, Any]] = []
+
+    for j in range(n):
+        cl = closes[j]
+
+        # Invalida OB attraversati da close (non più difendibili)
+        still: list[dict[str, Any]] = []
+        for ob in active:
+            lo, hi = ob["lo"], ob["hi"]
+            if ob["kind"] == "bullish":
+                if cl < lo:
+                    continue
+            else:
+                if cl > hi:
+                    continue
+            still.append(ob)
+        active = still
+
+        # Nuovo OB con terza barra j (indici j-2, j-1, j)
+        if j >= 2:
+            # Bullish OB
+            if closes[j - 2] < opens[j - 2]:
+                impulse_body = abs(closes[j - 1] - opens[j - 1])
+                if (
+                    closes[j - 1] > opens[j - 1]
+                    and impulse_body > avg_body * _OB_MIN_IMPULSE_RATIO
+                    and impulse_body > opens[j - 1] * _OB_MIN_BODY_PCT
+                    and closes[j] > opens[j]
+                    and closes[j] > closes[j - 1]
+                ):
+                    z_lo = lows[j - 2]
+                    z_hi = highs[j - 2]
+                    strength = min(
+                        1.0,
+                        impulse_body / (avg_body * _OB_MIN_IMPULSE_RATIO + 1e-12),
+                    )
+                    active.append(
+                        {
+                            "kind": "bullish",
+                            "lo": z_lo,
+                            "hi": z_hi,
+                            "strength": strength,
+                        },
+                    )
+            # Bearish OB
+            if closes[j - 2] > opens[j - 2]:
+                impulse_body = abs(closes[j - 1] - opens[j - 1])
+                if (
+                    closes[j - 1] < opens[j - 1]
+                    and impulse_body > avg_body * _OB_MIN_IMPULSE_RATIO
+                    and impulse_body > opens[j - 1] * _OB_MIN_BODY_PCT
+                    and closes[j] < opens[j]
+                    and closes[j] < closes[j - 1]
+                ):
+                    z_lo = lows[j - 2]
+                    z_hi = highs[j - 2]
+                    strength = min(
+                        1.0,
+                        impulse_body / (avg_body * _OB_MIN_IMPULSE_RATIO + 1e-12),
+                    )
+                    active.append(
+                        {
+                            "kind": "bearish",
+                            "lo": z_lo,
+                            "hi": z_hi,
+                            "strength": strength,
+                        },
+                    )
+
+        best: dict[str, Any] | None = None
+        best_d = float("inf")
+        for ob in active:
+            lo, hi = ob["lo"], ob["hi"]
+            if lo <= cl <= hi:
+                mid = (lo + hi) / 2.0
+                if cl > 0:
+                    d = abs(cl - mid) / cl * 100.0
+                    if d < best_d:
+                        best_d = d
+                        best = ob
+
+        if best is not None:
+            if best["kind"] == "bullish":
+                in_bull[j] = True
+            else:
+                in_bear[j] = True
+            ob_h[j] = best["hi"]
+            ob_l[j] = best["lo"]
+            ob_dir[j] = best["kind"]
+            ob_str[j] = best["strength"]
+            dist_pct[j] = best_d
+            ob_filled_out[j] = False
+
+    return in_bull, in_bear, ob_h, ob_l, ob_dir, ob_str, ob_filled_out, dist_pct
+
+
 def _calc_cvd(
     opens: list[float],
     highs: list[float],
@@ -507,6 +780,174 @@ def _calc_cvd(
         cvd_5_out.append(sum(vd[start_5 : i + 1]))
 
     return vd, cvd_list, cvd_norm, cvd_trend, cvd_5_out
+
+
+async def _load_spy_returns(
+    session: AsyncSession,
+    *,
+    provider: str,
+    timeframe: str,
+    timestamps: list[datetime],
+) -> dict[datetime, float]:
+    """Rendimenti % SPY per timestamp (stesso provider/timeframe della serie).
+
+    Chiavi del dict sono sempre :func:`_normalize_ts` così l’allineamento con la
+    serie del simbolo non dipende da microsecondi / rappresentazione tz.
+
+    Preferisce ``candle_features.pct_return_1``; se mancante, calcola da ``candles`` SPY.
+    """
+    if not timestamps or provider != "yahoo_finance":
+        return {}
+
+    requested_norm = {_normalize_ts(t) for t in timestamps}
+    logger.info(
+        "_load_spy_returns: timeframe=%s timestamp richiesti=%d (unici normalizzati=%d)",
+        timeframe,
+        len(timestamps),
+        len(requested_norm),
+    )
+
+    min_ts = min(timestamps)
+    max_ts = max(timestamps)
+
+    stmt = select(
+        CandleFeature.timestamp,
+        CandleFeature.pct_return_1,
+    ).where(
+        and_(
+            CandleFeature.symbol == "SPY",
+            CandleFeature.provider == provider,
+            CandleFeature.timeframe == timeframe,
+            CandleFeature.timestamp >= min_ts - timedelta(hours=2),
+            CandleFeature.timestamp <= max_ts + timedelta(hours=2),
+        )
+    )
+    result = await session.execute(stmt)
+    out: dict[datetime, float] = {}
+    for row in result.fetchall():
+        if row.pct_return_1 is None:
+            continue
+        kn = _normalize_ts(row.timestamp)
+        if kn in requested_norm:
+            out[kn] = float(row.pct_return_1)
+
+    logger.info("_load_spy_returns: da candle_features=%d rendimenti", len(out))
+
+    missing_norm = requested_norm - set(out.keys())
+    if not missing_norm:
+        logger.info("_load_spy_returns: totale finale=%d (solo features)", len(out))
+        return out
+
+    min_m = min(missing_norm)
+    max_m = max(missing_norm)
+    stmt_c = (
+        select(Candle.timestamp, Candle.close)
+        .where(
+            and_(
+                Candle.symbol == "SPY",
+                Candle.provider == provider,
+                Candle.timeframe == timeframe,
+                Candle.timestamp >= min_m - timedelta(days=14),
+                Candle.timestamp <= max_m + timedelta(hours=2),
+            )
+        )
+        .order_by(Candle.timestamp.asc())
+    )
+    c_rows = (await session.execute(stmt_c)).fetchall()
+    prev_close: float | None = None
+    for row in c_rows:
+        close = float(row.close)
+        ts = row.timestamp
+        kn = _normalize_ts(ts)
+        if prev_close is not None and abs(prev_close) > 1e-12:
+            pct = (close - prev_close) / prev_close * 100.0
+            if kn in missing_norm and kn not in out:
+                out[kn] = pct
+        prev_close = close
+
+    still_missing = missing_norm - set(out.keys())
+    logger.info(
+        "_load_spy_returns: dopo fallback candele, ancora senza rendimento=%d; totale chiavi=%d",
+        len(still_missing),
+        len(out),
+    )
+    return out
+
+
+async def _load_features_pct_return_by_candle(
+    session: AsyncSession,
+    candle_ids: list[int],
+) -> dict[int, float | None]:
+    """pct_return_1 da candle_features per candle_id."""
+    if not candle_ids:
+        return {}
+    stmt = select(CandleFeature.candle_id, CandleFeature.pct_return_1).where(
+        CandleFeature.candle_id.in_(candle_ids),
+    )
+    result = await session.execute(stmt)
+    return {
+        int(r.candle_id): (float(r.pct_return_1) if r.pct_return_1 is not None else None)
+        for r in result.all()
+    }
+
+
+def _sym_pct_returns_from_features(
+    candles: list[Candle],
+    closes: list[float],
+    feat_pct_by_candle_id: dict[int, float | None],
+) -> list[float | None]:
+    """Rendimento % barra: preferisce candle_features, altrimenti variazione close."""
+    out: list[float | None] = []
+    for i, c in enumerate(candles):
+        if c.id in feat_pct_by_candle_id and feat_pct_by_candle_id[c.id] is not None:
+            out.append(feat_pct_by_candle_id[c.id])
+        elif i > 0 and abs(closes[i - 1]) > 1e-12:
+            out.append((closes[i] - closes[i - 1]) / closes[i - 1] * 100.0)
+        else:
+            out.append(None)
+    return out
+
+
+def _calc_relative_strength(
+    pct_returns: list[float | None],
+    spy_returns: list[float | None],
+    window: int = 5,
+) -> tuple[list[float | None], list[float | None], list[str | None]]:
+    """
+    RS = rendimento simbolo - rendimento SPY sulla stessa barra.
+    rs_vs_spy_5: media delle RS non nulle nella finestra (fino a `window` barre).
+    """
+    n = len(pct_returns)
+    rs: list[float | None] = [None] * n
+    rs_5: list[float | None] = [None] * n
+    sig: list[str | None] = [None] * n
+
+    for i in range(n):
+        sym_ret = pct_returns[i]
+        spy_ret = spy_returns[i] if i < len(spy_returns) else None
+        if sym_ret is None or spy_ret is None:
+            continue
+
+        rs_val = sym_ret - spy_ret
+        rs[i] = rs_val
+
+        if i >= window - 1:
+            rs_window = [rs[j] for j in range(i - window + 1, i + 1) if rs[j] is not None]
+            if rs_window:
+                rs_5[i] = sum(rs_window) / len(rs_window)
+
+        if rs_val > 1.0:
+            sig[i] = "strong_bull"
+        elif rs_val > 0.3:
+            sig[i] = "bull"
+        elif rs_val < -1.0:
+            sig[i] = "strong_bear"
+        elif rs_val < -0.3:
+            sig[i] = "bear"
+        else:
+            sig[i] = "neutral"
+
+    return rs, rs_5, sig
 
 
 async def _distinct_series(
@@ -597,6 +1038,21 @@ async def _chunked_upsert_indicators(
                 "dist_to_fib_382_pct": excluded.dist_to_fib_382_pct,
                 "dist_to_fib_500_pct": excluded.dist_to_fib_500_pct,
                 "dist_to_fib_618_pct": excluded.dist_to_fib_618_pct,
+                "in_fvg_bullish": excluded.in_fvg_bullish,
+                "in_fvg_bearish": excluded.in_fvg_bearish,
+                "fvg_high": excluded.fvg_high,
+                "fvg_low": excluded.fvg_low,
+                "dist_to_fvg_pct": excluded.dist_to_fvg_pct,
+                "fvg_direction": excluded.fvg_direction,
+                "fvg_filled": excluded.fvg_filled,
+                "in_ob_bullish": excluded.in_ob_bullish,
+                "in_ob_bearish": excluded.in_ob_bearish,
+                "ob_high": excluded.ob_high,
+                "ob_low": excluded.ob_low,
+                "ob_direction": excluded.ob_direction,
+                "ob_strength": excluded.ob_strength,
+                "ob_filled": excluded.ob_filled,
+                "dist_to_ob_pct": excluded.dist_to_ob_pct,
                 "funding_rate": excluded.funding_rate,
                 "funding_rate_annualized_pct": excluded.funding_rate_annualized_pct,
                 "funding_bias": excluded.funding_bias,
@@ -605,6 +1061,9 @@ async def _chunked_upsert_indicators(
                 "cvd_normalized": excluded.cvd_normalized,
                 "cvd_trend": excluded.cvd_trend,
                 "cvd_5": excluded.cvd_5,
+                "rs_vs_spy": excluded.rs_vs_spy,
+                "rs_vs_spy_5": excluded.rs_vs_spy_5,
+                "rs_signal": excluded.rs_signal,
             },
         )
         result = await session.execute(stmt)
@@ -692,6 +1151,27 @@ async def extract_indicators(
             last_sl,
         )
 
+        (
+            in_fvg_bull,
+            in_fvg_bear,
+            fvg_high_vals,
+            fvg_low_vals,
+            dist_fvg_pct_vals,
+            fvg_dir_vals,
+            fvg_filled_vals,
+        ) = _calc_fair_value_gaps(highs, lows, closes)
+
+        (
+            in_ob_bull,
+            in_ob_bear,
+            ob_h_vals,
+            ob_l_vals,
+            ob_dir_vals,
+            ob_str_vals,
+            ob_filled_vals,
+            dist_ob_pct_vals,
+        ) = _calc_order_blocks(opens_f, highs, lows, closes)
+
         # Funding rate (solo Binance, simboli mappati in funding_rate_service)
         funding_rates_raw: list[float | None] = [None] * len(candles)
         if prov == "binance":
@@ -713,6 +1193,42 @@ async def extract_indicators(
             volumes,
             vol_ma20,
         )
+
+        timestamps_list = [c.timestamp for c in candles]
+        feat_pct_map = await _load_features_pct_return_by_candle(
+            session,
+            [c.id for c in candles],
+        )
+        sym_pct_returns = _sym_pct_returns_from_features(candles, closes, feat_pct_map)
+
+        n_c = len(candles)
+        if prov == "yahoo_finance" and sym.upper() != "SPY":
+            spy_map = await _load_spy_returns(session, provider=prov, timeframe=tf, timestamps=timestamps_list)
+            spy_returns_aligned = [spy_map.get(_normalize_ts(ts)) for ts in timestamps_list]
+            spy_non_none = sum(1 for v in spy_returns_aligned if v is not None)
+            logger.info(
+                "RS %s %s: spy_returns non-null %d/%d",
+                sym,
+                tf,
+                spy_non_none,
+                len(spy_returns_aligned),
+            )
+            rs_vals, rs_5_vals, rs_sig_vals = _calc_relative_strength(
+                sym_pct_returns,
+                spy_returns_aligned,
+            )
+            rs_non_none = sum(1 for v in rs_vals if v is not None)
+            logger.info(
+                "RS %s %s: rs_vs_spy non-null %d/%d",
+                sym,
+                tf,
+                rs_non_none,
+                len(rs_vals),
+            )
+        else:
+            rs_vals = [None] * n_c
+            rs_5_vals = [None] * n_c
+            rs_sig_vals = [None] * n_c
 
         for i, candle in enumerate(candles):
             cl = closes[i]
@@ -845,6 +1361,49 @@ async def extract_indicators(
                         if d_fib618[i] is not None
                         else None
                     ),
+                    "in_fvg_bullish": in_fvg_bull[i],
+                    "in_fvg_bearish": in_fvg_bear[i],
+                    "fvg_high": (
+                        Decimal(str(round(fvg_high_vals[i], 12)))
+                        if fvg_high_vals[i] is not None
+                        else None
+                    ),
+                    "fvg_low": (
+                        Decimal(str(round(fvg_low_vals[i], 12)))
+                        if fvg_low_vals[i] is not None
+                        else None
+                    ),
+                    "dist_to_fvg_pct": (
+                        Decimal(str(round(dist_fvg_pct_vals[i], 8)))
+                        if dist_fvg_pct_vals[i] is not None
+                        else None
+                    ),
+                    "fvg_direction": fvg_dir_vals[i],
+                    "fvg_filled": fvg_filled_vals[i],
+                    "in_ob_bullish": in_ob_bull[i],
+                    "in_ob_bearish": in_ob_bear[i],
+                    "ob_high": (
+                        Decimal(str(round(ob_h_vals[i], 12)))
+                        if ob_h_vals[i] is not None
+                        else None
+                    ),
+                    "ob_low": (
+                        Decimal(str(round(ob_l_vals[i], 12)))
+                        if ob_l_vals[i] is not None
+                        else None
+                    ),
+                    "ob_direction": ob_dir_vals[i],
+                    "ob_strength": (
+                        Decimal(str(round(ob_str_vals[i], 4)))
+                        if ob_str_vals[i] is not None
+                        else None
+                    ),
+                    "ob_filled": ob_filled_vals[i],
+                    "dist_to_ob_pct": (
+                        Decimal(str(round(dist_ob_pct_vals[i], 8)))
+                        if dist_ob_pct_vals[i] is not None
+                        else None
+                    ),
                     "funding_rate": (
                         Decimal(str(round(funding_rates_raw[i], 10)))
                         if funding_rates_raw[i] is not None
@@ -876,6 +1435,17 @@ async def extract_indicators(
                     ),
                     "cvd_trend": cvd_trend_vals[i],
                     "cvd_5": Decimal(str(round(cvd5_vals[i], 4))),
+                    "rs_vs_spy": (
+                        Decimal(str(round(rs_vals[i], 6)))
+                        if rs_vals[i] is not None
+                        else None
+                    ),
+                    "rs_vs_spy_5": (
+                        Decimal(str(round(rs_5_vals[i], 6)))
+                        if rs_5_vals[i] is not None
+                        else None
+                    ),
+                    "rs_signal": rs_sig_vals[i],
                 }
             )
 

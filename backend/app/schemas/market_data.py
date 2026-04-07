@@ -26,7 +26,7 @@ class MarketDataIngestRequest(BaseModel):
     )
     timeframes: list[str] | None = Field(
         default=None,
-        description="Depends on provider: Binance defaults 1m,5m,15m,1h; Yahoo defaults 1d,1h.",
+        description="Depends on provider: Binance defaults 1m,5m,15m,1h,1d; Yahoo defaults 1d,1h (15m/5m on-demand).",
     )
     limit: int = Field(
         default=2500,
@@ -36,7 +36,7 @@ class MarketDataIngestRequest(BaseModel):
             "Barre OHLCV da richiedere per simbolo/timeframe. "
             "Yahoo Finance 1d: fino a ~2500 barre (period=10y). "
             "Yahoo Finance 1h: fino a ~3500 barre (period=730d). "
-            "Yahoo Finance 5m: fino a ~11700 barre (period=60d); su 5m il tail non taglia lo storico. "
+            "Yahoo Finance 5m/15m: fino a ~60d di storico (period); su intraday il tail non taglia come su 1h/1d. "
             "Binance ccxt: max 1000 per chiamata singola senza paginazione. "
         ),
     )

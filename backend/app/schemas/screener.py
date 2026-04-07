@@ -35,7 +35,7 @@ class RankedScreenerRow(BaseModel):
     )
     pattern_quality_label: str = Field(
         default="unknown",
-        description="high | medium | low | unknown.",
+        description="high | medium | low | insufficient | unknown.",
     )
 
 

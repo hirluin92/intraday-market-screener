@@ -80,6 +80,17 @@ export type OpportunityRow = {
   regime_spy?: string;
   /** Direzione pattern coerente con filtro regime (Yahoo) */
   regime_direction_ok?: boolean;
+  /** True se (latest_pattern_name, timeframe) è nella lista validata OOS */
+  pattern_is_validated?: boolean;
+  /** operational | development | experimental */
+  pattern_operational_status?: "operational" | "development" | "experimental";
+  /** Ultimo close candela (DB) per la serie */
+  current_price?: number | null;
+  /** Distanza % vs entry del trade plan */
+  price_distance_pct?: number | null;
+  /** Prezzo oltre soglia vs entry / stop */
+  price_stale?: boolean;
+  price_stale_reason?: string | null;
 };
 
 export type OpportunitiesResponse = {
@@ -150,6 +161,30 @@ export async function fetchOpportunities(params: {
   return res.json();
 }
 
+/** Risposta GET /api/v1/ibkr/status */
+export type IbkrStatus = {
+  enabled?: boolean;
+  message?: string;
+  paper_trading?: boolean;
+  auto_execute?: boolean;
+  authenticated?: boolean;
+  account_id?: string;
+  max_capital?: number;
+  risk_per_trade_pct?: number;
+  max_simultaneous_positions?: number;
+  gateway_url?: string;
+};
+
+export async function fetchIbkrStatus(): Promise<IbkrStatus | null> {
+  try {
+    const res = await fetch(`${base}/api/v1/ibkr/status`, { cache: "no-store" });
+    if (!res.ok) return null;
+    return res.json();
+  } catch {
+    return null;
+  }
+}
+
 export type BacktestAggregateRow = {
   pattern_name: string;
   timeframe: string;
@@ -166,6 +201,13 @@ export type BacktestAggregateRow = {
   win_rate_5: number | null;
   win_rate_10: number | null;
   pattern_quality_score: number | null;
+  win_rate_ci_lower?: number | null;
+  win_rate_ci_upper?: number | null;
+  sample_reliability?: string | null;
+  win_rate_pvalue?: number | null;
+  win_rate_significance?: string | null;
+  expectancy_r_pvalue?: number | null;
+  expectancy_r_significance?: string | null;
 };
 
 export type BacktestPatternsResponse = {
@@ -238,6 +280,10 @@ export type BacktestSimulationResponse = {
   sharpe_ratio: number | null;
   /** Media R per trade (backend). */
   expectancy_r?: number | null;
+  win_rate_pvalue?: number | null;
+  win_rate_significance?: string | null;
+  expectancy_pvalue?: number | null;
+  expectancy_significance?: string | null;
   profit_factor?: number | null;
   equity_curve: SimulationEquityPoint[];
   pattern_names_used: string[];
@@ -248,6 +294,8 @@ export type BacktestSimulationResponse = {
   bars_with_trades?: number;
   trades_skipped_by_regime?: number;
   regime_filter_active?: boolean;
+  cooldown_bars_used?: number;
+  trades_skipped_by_cooldown?: number;
   note: string | null;
 };
 
@@ -293,6 +341,8 @@ export type SimulationParams = {
   date_to?: string;
   /** Filtro regime SPY 1d (default API: false se omesso). */
   use_regime_filter?: boolean;
+  /** Barre di cooldown per serie dopo un trade (default API 3; 0 = disattivo). */
+  cooldown_bars?: number;
   /** Ore UTC da escludere (solo Yahoo; Binance ignora). Ripetuto in query. */
   exclude_hours?: number[];
   include_hours?: number[];
@@ -343,6 +393,9 @@ export async function fetchBacktestSimulation(
       String(params.use_regime_filter),
     );
   }
+  if (params.cooldown_bars != null) {
+    url.searchParams.set("cooldown_bars", String(params.cooldown_bars));
+  }
   if (params.exclude_hours?.length) {
     for (const h of params.exclude_hours) {
       url.searchParams.append("exclude_hours", String(h));
@@ -392,6 +445,131 @@ export type OutOfSampleParams = {
   include_trades?: boolean;
   use_regime_filter?: boolean;
 };
+
+export type WalkForwardFoldRow = {
+  fold_number: number;
+  train_start: string;
+  train_end: string;
+  test_start: string;
+  test_end: string;
+  train_trades: number;
+  test_trades: number;
+  train_return_pct: number;
+  test_return_pct: number;
+  train_win_rate: number;
+  test_win_rate: number;
+  train_max_dd: number;
+  test_max_dd: number;
+  train_expectancy_r: number | null;
+  test_expectancy_r: number | null;
+  degradation_pct: number;
+  verdict: "robusto" | "degradazione_moderata" | "possibile_overfitting";
+};
+
+export type WalkForwardResult = {
+  n_folds: number;
+  folds: WalkForwardFoldRow[];
+  avg_test_return_pct: number;
+  avg_test_win_rate: number;
+  avg_degradation_pct: number;
+  pct_folds_positive: number;
+  overall_verdict:
+    | "robusto"
+    | "prevalentemente_robusto"
+    | "degradazione_moderata"
+    | "possibile_overfitting";
+  date_range_start: string;
+  date_range_end: string;
+};
+
+export type WalkForwardParams = {
+  provider: string;
+  timeframe: string;
+  pattern_names?: string[];
+  n_folds?: number;
+  initial_capital?: number;
+  risk_per_trade_pct?: number;
+  cost_rate?: number;
+  max_simultaneous?: number;
+  use_regime_filter?: boolean;
+  exclude_hours?: number[];
+  include_hours?: number[];
+  exclude_symbols?: string[];
+  include_symbols?: string[];
+  /** Timeout ms (default 120000). */
+  timeoutMs?: number;
+};
+
+export async function fetchWalkForward(
+  params: WalkForwardParams,
+): Promise<WalkForwardResult> {
+  const url = new URL(`${base}/api/v1/backtest/walk-forward`);
+  url.searchParams.set("provider", params.provider.trim());
+  url.searchParams.set("timeframe", params.timeframe.trim());
+  for (const p of params.pattern_names ?? []) {
+    const t = p.trim();
+    if (t) url.searchParams.append("pattern_names", t);
+  }
+  if (params.n_folds != null) {
+    url.searchParams.set("n_folds", String(params.n_folds));
+  }
+  if (params.initial_capital != null) {
+    url.searchParams.set("initial_capital", String(params.initial_capital));
+  }
+  if (params.risk_per_trade_pct != null) {
+    url.searchParams.set("risk_per_trade_pct", String(params.risk_per_trade_pct));
+  }
+  if (params.cost_rate != null) {
+    url.searchParams.set("cost_rate", String(params.cost_rate));
+  }
+  if (params.max_simultaneous != null) {
+    url.searchParams.set("max_simultaneous", String(params.max_simultaneous));
+  }
+  if (params.use_regime_filter !== undefined) {
+    url.searchParams.set(
+      "use_regime_filter",
+      String(params.use_regime_filter),
+    );
+  }
+  if (params.exclude_hours?.length) {
+    for (const h of params.exclude_hours) {
+      url.searchParams.append("exclude_hours", String(h));
+    }
+  }
+  if (params.include_hours?.length) {
+    for (const h of params.include_hours) {
+      url.searchParams.append("include_hours", String(h));
+    }
+  }
+  if (params.exclude_symbols?.length) {
+    for (const s of params.exclude_symbols) {
+      const t = s.trim();
+      if (t) url.searchParams.append("exclude_symbols", t);
+    }
+  }
+  if (params.include_symbols?.length) {
+    for (const s of params.include_symbols) {
+      const t = s.trim();
+      if (t) url.searchParams.append("include_symbols", t);
+    }
+  }
+  const timeoutMs = params.timeoutMs ?? 120_000;
+  const ctrl = new AbortController();
+  const tid = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await fetch(url.toString(), {
+      cache: "no-store",
+      signal: ctrl.signal,
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(text || `${res.status} ${res.statusText}`);
+    }
+    return res.json();
+  } finally {
+    clearTimeout(tid);
+  }
+}
 
 export async function fetchOutOfSample(
   params: OutOfSampleParams,

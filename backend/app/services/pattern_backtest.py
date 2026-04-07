@@ -10,6 +10,7 @@ On-demand pattern backtest: forward returns vs stored candles (MVP, no persisten
 from __future__ import annotations
 
 from collections import defaultdict
+from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
@@ -20,7 +21,14 @@ from app.models.candle import Candle
 from app.models.candle_feature import CandleFeature
 from app.models.candle_pattern import CandlePattern
 from app.schemas.backtest import PatternBacktestAggregateRow, PatternBacktestResponse
-from app.services.pattern_quality import compute_pattern_quality_score
+from app.services.pattern_quality import (
+    binomial_test_vs_50pct,
+    compute_pattern_quality_score,
+    pattern_forward_win_rate_wilson_ci,
+    pattern_primary_horizon_wins_rets,
+    significance_label,
+    ttest_expectancy_vs_zero,
+)
 
 HORIZONS = (1, 3, 5, 10)
 
@@ -36,10 +44,15 @@ async def pattern_quality_lookup_by_name_tf(
     provider: str | None = None,
     asset_type: str | None = None,
     timeframe: str | None,
+    dt_from: datetime | None = None,
+    dt_to: datetime | None = None,
 ) -> dict[tuple[str, str], PatternBacktestAggregateRow]:
     """
     Reuses ``run_pattern_backtest`` aggregates keyed by (pattern_name, timeframe).
     Filters align with screener list filters so quality matches the evaluated universe.
+
+    ``dt_from`` / ``dt_to``: se impostati, solo righe ``CandlePattern`` con timestamp in
+    quell'intervallo (utile per OOS: lookup solo su train pre-cutoff).
     """
     resp = await run_pattern_backtest(
         session,
@@ -50,6 +63,8 @@ async def pattern_quality_lookup_by_name_tf(
         timeframe=timeframe,
         pattern_name=None,
         limit=PATTERN_QUALITY_AGGREGATE_LIMIT,
+        dt_from=dt_from,
+        dt_to=dt_to,
     )
     return {(a.pattern_name, a.timeframe): a for a in resp.aggregates}
 
@@ -98,6 +113,8 @@ async def run_pattern_backtest(
     timeframe: str | None,
     pattern_name: str | None,
     limit: int,
+    dt_from: datetime | None = None,
+    dt_to: datetime | None = None,
 ) -> PatternBacktestResponse:
     stmt = (
         select(CandlePattern, Candle.close, CandleFeature.candle_id)
@@ -117,6 +134,10 @@ async def run_pattern_backtest(
         conds.append(CandlePattern.timeframe == timeframe)
     if pattern_name is not None:
         conds.append(CandlePattern.pattern_name == pattern_name)
+    if dt_from is not None:
+        conds.append(CandlePattern.timestamp >= dt_from)
+    if dt_to is not None:
+        conds.append(CandlePattern.timestamp <= dt_to)
     if conds:
         stmt = stmt.where(and_(*conds))
     stmt = stmt.order_by(CandlePattern.timestamp.desc()).limit(limit)
@@ -197,6 +218,23 @@ async def run_pattern_backtest(
             win_rate_3=wr3,
             win_rate_5=wr5,
         )
+        ci_lo, ci_hi, rel = pattern_forward_win_rate_wilson_ci(
+            hdata=hdata,
+            n3=n3,
+            n5=n5,
+        )
+        wins_h, n_h, rets_h = pattern_primary_horizon_wins_rets(hdata)
+        win_p: float | None = None
+        win_sig: str | None = None
+        exp_p: float | None = None
+        exp_sig: str | None = None
+        if n_h > 0:
+            win_p = binomial_test_vs_50pct(wins_h, n_h)
+            win_sig = significance_label(win_p)
+        if n_h >= 2:
+            _, exp_p_raw = ttest_expectancy_vs_zero(rets_h)
+            exp_p = exp_p_raw
+            exp_sig = significance_label(exp_p_raw)
         aggregates.append(
             PatternBacktestAggregateRow(
                 pattern_name=pn,
@@ -214,6 +252,13 @@ async def run_pattern_backtest(
                 win_rate_5=wr5,
                 win_rate_10=_win_rate(hdata[10]["wins"]),
                 pattern_quality_score=pq,
+                win_rate_ci_lower=ci_lo,
+                win_rate_ci_upper=ci_hi,
+                sample_reliability=rel,
+                win_rate_pvalue=win_p,
+                win_rate_significance=win_sig,
+                expectancy_r_pvalue=exp_p,
+                expectancy_r_significance=exp_sig,
             )
         )
 

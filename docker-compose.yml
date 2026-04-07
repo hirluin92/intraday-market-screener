@@ -25,7 +25,9 @@ services:
       - "${BACKEND_PORT:-8000}:8000"
     volumes:
       - ./backend:/app
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    # Senza --reload: con volume Windows→Docker, watchfiles/uvicorn può andare in ENOMEM (os error 12).
+    # Hot reload: uvicorn in locale o override compose con --reload.
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
     depends_on:
       postgres:
         condition: service_healthy

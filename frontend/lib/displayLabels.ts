@@ -26,12 +26,13 @@ export function timeframeFilterLabel(tf: string): string {
   return tf || "Tutti";
 }
 
-/** Bande pattern_quality_label dall'API (high | medium | low | unknown). */
+/** Bande pattern_quality_label dall'API (high | medium | low | unknown | insufficient). */
 const PATTERN_QUALITY_LABEL_IT: Record<string, string> = {
   high: "alta",
   medium: "media",
   low: "bassa",
   unknown: "sconosciuta",
+  insufficient: "insufficiente",
 };
 
 export function displayPatternQualityLabel(v: string): string {

@@ -14,10 +14,12 @@ import {
 import {
   fetchBacktestSimulation,
   fetchOutOfSample,
+  fetchWalkForward,
   type BacktestSimulationResponse,
   type OOSResult,
   type SimulationEquityPoint,
   type SimulationTradeRow,
+  type WalkForwardResult,
 } from "@/lib/api";
 
 /**
@@ -211,6 +213,7 @@ export default function SimulationPage() {
     "Top Yahoo 1h",
   );
   const [maxSimultaneous, setMaxSimultaneous] = useState(3);
+  const [cooldownBars, setCooldownBars] = useState(0);
   const [includeTrades, setIncludeTrades] = useState(true);
   const [useRegimeFilter, setUseRegimeFilter] = useState(true);
   /** Solo Yahoo Finance — vuoto = nessun filtro (allineato all’API). */
@@ -228,6 +231,12 @@ export default function SimulationPage() {
   const [oosLoading, setOosLoading] = useState(false);
   const [oosResult, setOosResult] = useState<OOSResult | null>(null);
   const [oosError, setOosError] = useState<string | null>(null);
+
+  const [showWF, setShowWF] = useState(false);
+  const [nFolds, setNFolds] = useState(3);
+  const [wfLoading, setWfLoading] = useState(false);
+  const [wfResult, setWfResult] = useState<WalkForwardResult | null>(null);
+  const [wfError, setWfError] = useState<string | null>(null);
 
   const applyPreset = useCallback((key: PresetKey) => {
     const next = PRESETS[key];
@@ -286,6 +295,7 @@ export default function SimulationPage() {
         pattern_row_limit: 50_000,
         period,
         use_regime_filter: useRegimeFilter,
+        cooldown_bars: cooldownBars,
         ...(provider === "yahoo_finance" && excludedHours.length > 0
           ? { exclude_hours: excludedHours }
           : {}),
@@ -313,6 +323,7 @@ export default function SimulationPage() {
     period,
     excludedHours,
     includedSymbols,
+    cooldownBars,
   ]);
 
   const handleRunOOS = useCallback(async () => {
@@ -353,6 +364,54 @@ export default function SimulationPage() {
     costRate,
     maxSimultaneous,
     useRegimeFilter,
+  ]);
+
+  const handleRunWF = useCallback(async () => {
+    setWfLoading(true);
+    setWfError(null);
+    const trimmed =
+      selectedPatterns.length > 0
+        ? selectedPatterns.map((p) => p.trim()).filter(Boolean)
+        : [];
+    const names = trimmed.length > 0 ? trimmed : undefined;
+    try {
+      const res = await fetchWalkForward({
+        provider,
+        timeframe,
+        pattern_names: names,
+        n_folds: nFolds,
+        initial_capital: capital,
+        risk_per_trade_pct: riskPct,
+        cost_rate: costRate,
+        max_simultaneous: maxSimultaneous,
+        use_regime_filter: useRegimeFilter,
+        ...(provider === "yahoo_finance" && excludedHours.length > 0
+          ? { exclude_hours: excludedHours }
+          : {}),
+        ...(provider === "yahoo_finance" && includedSymbols.length > 0
+          ? { include_symbols: includedSymbols }
+          : {}),
+        timeoutMs: 120_000,
+      });
+      setWfResult(res);
+    } catch (e) {
+      setWfResult(null);
+      setWfError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setWfLoading(false);
+    }
+  }, [
+    provider,
+    timeframe,
+    selectedPatterns,
+    nFolds,
+    capital,
+    riskPct,
+    costRate,
+    maxSimultaneous,
+    useRegimeFilter,
+    excludedHours,
+    includedSymbols,
   ]);
 
   const derived = useMemo(
@@ -568,6 +627,23 @@ export default function SimulationPage() {
 
             <label className="flex flex-col gap-1 text-sm">
               <span className="text-zinc-600 dark:text-zinc-400">
+                Cooldown barre (anti-overlap per serie)
+              </span>
+              <select
+                className="rounded border border-zinc-300 bg-white px-2 py-2 dark:border-zinc-600 dark:bg-zinc-950"
+                value={cooldownBars}
+                onChange={(e) => setCooldownBars(Number(e.target.value))}
+              >
+                <option value={0}>Nessuno (come prima)</option>
+                <option value={2}>2 barre</option>
+                <option value={3}>3 barre (consigliato)</option>
+                <option value={5}>5 barre</option>
+                <option value={10}>10 barre</option>
+              </select>
+            </label>
+
+            <label className="flex flex-col gap-1 text-sm">
+              <span className="text-zinc-600 dark:text-zinc-400">
                 Costo round-trip
               </span>
               <input
@@ -766,6 +842,14 @@ export default function SimulationPage() {
                 </p>
               ) : null}
 
+              {(result.trades_skipped_by_cooldown ?? 0) > 0 ? (
+                <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+                  {result.trades_skipped_by_cooldown} trade saltati per cooldown
+                  ({result.cooldown_bars_used ?? cooldownBars} barre anti-overlap
+                  per simbolo+timeframe+provider)
+                </p>
+              ) : null}
+
               <section className="grid grid-cols-2 gap-3 sm:grid-cols-3">
                 {metrics.map((m) => (
                   <div
@@ -788,6 +872,51 @@ export default function SimulationPage() {
                   </div>
                 ))}
               </section>
+
+              {result.total_trades > 0 ? (
+                <p className="text-xs text-zinc-600 dark:text-zinc-400">
+                  Significatività statistica (one-sided): win rate{" "}
+                  <span
+                    className={`font-mono font-medium ${
+                      result.win_rate_significance === "***"
+                        ? "text-emerald-600 dark:text-emerald-400"
+                        : result.win_rate_significance === "**"
+                          ? "text-sky-600 dark:text-sky-400"
+                          : result.win_rate_significance === "*"
+                            ? "text-amber-600 dark:text-amber-400"
+                            : "text-zinc-500 dark:text-zinc-500"
+                    }`}
+                  >
+                    {result.win_rate_significance ?? "ns"}
+                  </span>
+                  {result.win_rate_pvalue != null ? (
+                    <span className="text-zinc-500">
+                      {" "}
+                      (p={result.win_rate_pvalue.toFixed(3)})
+                    </span>
+                  ) : null}
+                  {" · "}edge R (expectancy){" "}
+                  <span
+                    className={`font-mono font-medium ${
+                      result.expectancy_significance === "***"
+                        ? "text-emerald-600 dark:text-emerald-400"
+                        : result.expectancy_significance === "**"
+                          ? "text-sky-600 dark:text-sky-400"
+                          : result.expectancy_significance === "*"
+                            ? "text-amber-600 dark:text-amber-400"
+                            : "text-zinc-500 dark:text-zinc-500"
+                    }`}
+                  >
+                    {result.expectancy_significance ?? "ns"}
+                  </span>
+                  {result.expectancy_pvalue != null ? (
+                    <span className="text-zinc-500">
+                      {" "}
+                      (p={result.expectancy_pvalue.toFixed(3)})
+                    </span>
+                  ) : null}
+                </p>
+              ) : null}
 
               <section className="rounded-xl border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-900/60">
                 <h2 className="mb-1 text-sm font-semibold text-zinc-800 dark:text-zinc-100">
@@ -1307,6 +1436,176 @@ export default function SimulationPage() {
                       </div>
                     ) : null}
                   </div>
+                ) : null}
+              </div>
+            ) : null}
+          </div>
+
+          <div className="mt-6 rounded-lg border border-zinc-200 dark:border-zinc-700">
+            <button
+              type="button"
+              onClick={() => setShowWF(!showWF)}
+              className="flex w-full items-center justify-between p-4 text-left transition-colors hover:bg-zinc-50 dark:hover:bg-zinc-800/50"
+            >
+              <div>
+                <span className="font-medium text-zinc-900 dark:text-zinc-100">
+                  Walk-Forward Validation
+                </span>
+                <span className="ml-2 text-xs text-zinc-500 dark:text-zinc-400">
+                  Test su {nFolds} periodi indipendenti (quality lookup solo sul train,
+                  no leakage)
+                </span>
+              </div>
+              <span className="text-zinc-400" aria-hidden>
+                {showWF ? "▲" : "▼"}
+              </span>
+            </button>
+
+            {showWF ? (
+              <div className="border-t border-zinc-200 p-4 dark:border-zinc-700">
+                <div className="mb-4 flex flex-wrap items-end gap-4">
+                  <div>
+                    <label className="mb-1 block text-sm text-zinc-600 dark:text-zinc-400">
+                      Numero di fold
+                    </label>
+                    <select
+                      value={nFolds}
+                      onChange={(e) => setNFolds(Number(e.target.value))}
+                      className="rounded border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-600 dark:bg-zinc-950"
+                    >
+                      <option value={2}>2 fold</option>
+                      <option value={3}>3 fold</option>
+                      <option value={4}>4 fold</option>
+                      <option value={5}>5 fold</option>
+                      <option value={6}>6 fold</option>
+                    </select>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => void handleRunWF()}
+                    disabled={wfLoading}
+                    className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-50"
+                  >
+                    {wfLoading ? "Analisi…" : "Esegui Walk-Forward"}
+                  </button>
+                </div>
+
+                {wfError ? (
+                  <p className="mb-4 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-800 dark:border-red-900 dark:bg-red-950/50 dark:text-red-200">
+                    {wfError}
+                  </p>
+                ) : null}
+
+                {wfResult ? (
+                  <>
+                    <div
+                      className={`mb-4 rounded p-3 text-sm font-medium ${
+                        wfResult.overall_verdict === "robusto"
+                          ? "border border-emerald-600/50 bg-emerald-50 text-emerald-900 dark:border-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-200"
+                          : wfResult.overall_verdict === "prevalentemente_robusto"
+                            ? "border border-sky-600/50 bg-sky-50 text-sky-900 dark:border-sky-700 dark:bg-sky-950/40 dark:text-sky-200"
+                            : wfResult.overall_verdict === "degradazione_moderata"
+                              ? "border border-amber-600/50 bg-amber-50 text-amber-900 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200"
+                              : "border border-red-600/50 bg-red-50 text-red-900 dark:border-red-800 dark:bg-red-950/40 dark:text-red-200"
+                      }`}
+                    >
+                      Verdict: {wfResult.overall_verdict} | Fold positivi:{" "}
+                      {wfResult.pct_folds_positive.toFixed(1)}% | Avg test return:{" "}
+                      {wfResult.avg_test_return_pct.toFixed(1)}% | Avg degradazione:{" "}
+                      {wfResult.avg_degradation_pct.toFixed(1)}%
+                    </div>
+
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-sm">
+                        <thead>
+                          <tr className="border-b border-zinc-200 text-zinc-500 dark:border-zinc-700 dark:text-zinc-400">
+                            <th className="py-2 pr-2 text-left font-medium">Fold</th>
+                            <th className="py-2 pr-2 text-left font-medium">
+                              Periodo test
+                            </th>
+                            <th className="py-2 pr-2 text-right font-medium">
+                              Train ret
+                            </th>
+                            <th className="py-2 pr-2 text-right font-medium">
+                              Test ret
+                            </th>
+                            <th className="py-2 pr-2 text-right font-medium">
+                              Test WR
+                            </th>
+                            <th className="py-2 pr-2 text-right font-medium">
+                              Test DD
+                            </th>
+                            <th className="py-2 pr-2 text-right font-medium">
+                              Degradazione
+                            </th>
+                            <th className="py-2 text-left font-medium">Verdict</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {wfResult.folds.map((fold) => (
+                            <tr
+                              key={fold.fold_number}
+                              className="border-b border-zinc-100 dark:border-zinc-800"
+                            >
+                              <td className="py-2 pr-2">{fold.fold_number}</td>
+                              <td className="py-2 pr-2 font-mono text-xs text-zinc-500 dark:text-zinc-400">
+                                {fold.test_start.substring(0, 10)} →{" "}
+                                {fold.test_end.substring(0, 10)}
+                              </td>
+                              <td
+                                className={`py-2 pr-2 text-right tabular-nums ${
+                                  fold.train_return_pct >= 0
+                                    ? "text-emerald-600 dark:text-emerald-400"
+                                    : "text-red-600 dark:text-red-400"
+                                }`}
+                              >
+                                {fold.train_return_pct >= 0 ? "+" : ""}
+                                {fold.train_return_pct.toFixed(0)}%
+                              </td>
+                              <td
+                                className={`py-2 pr-2 text-right tabular-nums ${
+                                  fold.test_return_pct > 0
+                                    ? "text-emerald-600 dark:text-emerald-400"
+                                    : "text-red-600 dark:text-red-400"
+                                }`}
+                              >
+                                {fold.test_return_pct > 0 ? "+" : ""}
+                                {fold.test_return_pct.toFixed(0)}%
+                              </td>
+                              <td className="py-2 pr-2 text-right tabular-nums">
+                                {fold.test_win_rate.toFixed(1)}%
+                              </td>
+                              <td className="py-2 pr-2 text-right tabular-nums text-red-600 dark:text-red-400">
+                                {fold.test_max_dd.toFixed(1)}%
+                              </td>
+                              <td
+                                className={`py-2 pr-2 text-right tabular-nums ${
+                                  fold.degradation_pct < 20
+                                    ? "text-emerald-600 dark:text-emerald-400"
+                                    : fold.degradation_pct < 50
+                                      ? "text-amber-600 dark:text-amber-400"
+                                      : "text-red-600 dark:text-red-400"
+                                }`}
+                              >
+                                {fold.degradation_pct.toFixed(1)}%
+                              </td>
+                              <td
+                                className={`py-2 text-xs ${
+                                  fold.verdict === "robusto"
+                                    ? "text-emerald-600 dark:text-emerald-400"
+                                    : fold.verdict === "degradazione_moderata"
+                                      ? "text-amber-600 dark:text-amber-400"
+                                      : "text-red-600 dark:text-red-400"
+                                }`}
+                              >
+                                {fold.verdict}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </>
                 ) : null}
               </div>
             ) : null}

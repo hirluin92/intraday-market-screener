@@ -84,6 +84,21 @@ class IndicatorRow(BaseModel):
     dist_to_fib_382_pct: Decimal | None = None
     dist_to_fib_500_pct: Decimal | None = None
     dist_to_fib_618_pct: Decimal | None = None
+    in_fvg_bullish: bool = False
+    in_fvg_bearish: bool = False
+    fvg_high: Decimal | None = None
+    fvg_low: Decimal | None = None
+    dist_to_fvg_pct: Decimal | None = None
+    fvg_direction: str | None = None
+    fvg_filled: bool = False
+    in_ob_bullish: bool = False
+    in_ob_bearish: bool = False
+    ob_high: Decimal | None = None
+    ob_low: Decimal | None = None
+    ob_direction: str | None = None
+    ob_strength: Decimal | None = None
+    ob_filled: bool = False
+    dist_to_ob_pct: Decimal | None = None
     funding_rate: Decimal | None = None
     funding_rate_annualized_pct: Decimal | None = None
     funding_bias: str | None = None
@@ -92,6 +107,9 @@ class IndicatorRow(BaseModel):
     cvd_normalized: Decimal | None = None
     cvd_trend: str | None = None
     cvd_5: Decimal | None = None
+    rs_vs_spy: Decimal | None = None
+    rs_vs_spy_5: Decimal | None = None
+    rs_signal: str | None = None
     created_at: datetime
 
 

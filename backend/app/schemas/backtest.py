@@ -30,6 +30,34 @@ class PatternBacktestAggregateRow(BaseModel):
         default=None,
         description="Heuristic 0–100 from win rate, avg return, and sample depth (horizon 5→3).",
     )
+    win_rate_ci_lower: float | None = Field(
+        default=None,
+        description="Estremo inferiore IC 95% Wilson sul win rate (orizzonte 5 poi 3), percentuale 0–100.",
+    )
+    win_rate_ci_upper: float | None = Field(
+        default=None,
+        description="Estremo superiore IC 95% Wilson sul win rate (orizzonte 5 poi 3), percentuale 0–100.",
+    )
+    sample_reliability: str | None = Field(
+        default=None,
+        description="Affidabilità campione: insufficient | poor | fair | good | excellent.",
+    )
+    win_rate_pvalue: float | None = Field(
+        default=None,
+        description="p-value test binomiale one-sided WR > 50% (orizzonte primario 5→3).",
+    )
+    win_rate_significance: str | None = Field(
+        default=None,
+        description="Etichetta: *** | ** | * | ns.",
+    )
+    expectancy_r_pvalue: float | None = Field(
+        default=None,
+        description="p-value t-test one-sided sui return % all'orizzonte primario (media > 0).",
+    )
+    expectancy_r_significance: str | None = Field(
+        default=None,
+        description="Etichetta: *** | ** | * | ns.",
+    )
 
 
 class PatternBacktestResponse(BaseModel):
@@ -98,6 +126,34 @@ class TradePlanBacktestAggregateRow(BaseModel):
         default=None,
         description="Expectancy per segnale: somma R / sample_size (0 R se ingresso non triggerato).",
     )
+    win_rate_ci_lower: float | None = Field(
+        default=None,
+        description="IC 95% Wilson su tp1_or_tp2 / entry_triggered, percentuale 0–100.",
+    )
+    win_rate_ci_upper: float | None = Field(
+        default=None,
+        description="IC 95% Wilson su tp1_or_tp2 / entry_triggered, percentuale 0–100.",
+    )
+    sample_reliability: str | None = Field(
+        default=None,
+        description="Affidabilità campione (entry_triggered): insufficient | poor | fair | good | excellent.",
+    )
+    win_rate_pvalue: float | None = Field(
+        default=None,
+        description="p-value binomiale one-sided: TP1/TP2 vs 50% su entry_triggered.",
+    )
+    win_rate_significance: str | None = Field(
+        default=None,
+        description="*** | ** | * | ns.",
+    )
+    expectancy_r_pvalue: float | None = Field(
+        default=None,
+        description="p-value t-test one-sided su R per segnale (0 se no ingresso).",
+    )
+    expectancy_r_significance: str | None = Field(
+        default=None,
+        description="*** | ** | * | ns.",
+    )
 
 
 class TradePlanBacktestResponse(BaseModel):
@@ -148,6 +204,34 @@ class TradePlanVariantRow(BaseModel):
     tp1_or_tp2_rate_given_entry: float | None = None
     avg_r: float | None = None
     expectancy_r: float | None = None
+    win_rate_ci_lower: float | None = Field(
+        default=None,
+        description="IC 95% Wilson su tp1_or_tp2 / entry_triggered, percentuale 0–100.",
+    )
+    win_rate_ci_upper: float | None = Field(
+        default=None,
+        description="IC 95% Wilson su tp1_or_tp2 / entry_triggered, percentuale 0–100.",
+    )
+    sample_reliability: str | None = Field(
+        default=None,
+        description="Affidabilità campione (entry_triggered): insufficient | poor | fair | good | excellent.",
+    )
+    win_rate_pvalue: float | None = Field(
+        default=None,
+        description="p-value binomiale one-sided: TP1/TP2 vs 50% su entry_triggered.",
+    )
+    win_rate_significance: str | None = Field(
+        default=None,
+        description="*** | ** | * | ns.",
+    )
+    expectancy_r_pvalue: float | None = Field(
+        default=None,
+        description="p-value t-test one-sided su R per segnale (0 se no ingresso).",
+    )
+    expectancy_r_significance: str | None = Field(
+        default=None,
+        description="*** | ** | * | ns.",
+    )
 
 
 class TradePlanVariantBacktestResponse(BaseModel):
@@ -281,17 +365,41 @@ class BacktestSimulationResponse(BaseModel):
         default=None,
         description="Media R per trade (somma pnl_r / total_trades).",
     )
+    win_rate_pvalue: float | None = Field(
+        default=None,
+        description="p-value test binomiale one-sided: win rate > 50%.",
+    )
+    win_rate_significance: str | None = Field(
+        default=None,
+        description="*** | ** | * | ns.",
+    )
+    expectancy_pvalue: float | None = Field(
+        default=None,
+        description="p-value t-test one-sided su pnl_r: expectancy > 0.",
+    )
+    expectancy_significance: str | None = Field(
+        default=None,
+        description="*** | ** | * | ns.",
+    )
     profit_factor: float | None = Field(
         default=None,
         description="Somma R su trade vincenti / somma |R| su trade perdenti (solo R≠0).",
     )
     trades_skipped_by_regime: int = Field(
         default=0,
-        description="Trade potenziali saltati per filtro regime SPY (moltiplicatore 0 sulla barra).",
+        description="Trade potenziali saltati per filtro regime daily (SPY o BTC/USDT a seconda del provider).",
     )
     regime_filter_active: bool = Field(
         default=False,
-        description="True se il filtro regime SPY 1d è stato applicato (dati presenti).",
+        description="True se il filtro regime daily è stato applicato (indicatori regime presenti nel DB).",
+    )
+    cooldown_bars_used: int = Field(
+        default=0,
+        description="Valore cooldown_bars applicato (0 = disattivo).",
+    )
+    trades_skipped_by_cooldown: int = Field(
+        default=0,
+        description="Segnali esclusi per anti-overlap sulla stessa serie (symbol+timeframe+provider).",
     )
     note: str | None = None
 
@@ -325,6 +433,62 @@ class OOSValidationResponse(BaseModel):
     performance_degradation_pct: float
     oos_verdict: Literal["robusto", "degradazione_moderata", "possibile_overfitting"]
     pattern_names_used: list[str] = Field(default_factory=list)
+    leakage_prevented: bool = Field(
+        default=True,
+        description=(
+            "True se il test set usa lo stesso quality lookup del train (solo dati pre-cutoff), "
+            "senza leakage da pattern futuri."
+        ),
+    )
+    train_quality_lookup_size: int = Field(
+        default=0,
+        description="Numero di chiavi (pattern_name, timeframe) nel lookup qualità train-only.",
+    )
+    note_oos: str = Field(
+        default="",
+        description="Nota sulla metodologia OOS (anti-leakage).",
+    )
+
+
+class WalkForwardFoldResponse(BaseModel):
+    """Un fold walk-forward: metriche train vs test su segmenti temporali consecutivi."""
+
+    fold_number: int
+    train_start: str
+    train_end: str
+    test_start: str
+    test_end: str
+    train_trades: int
+    test_trades: int
+    train_return_pct: float
+    test_return_pct: float
+    train_win_rate: float
+    test_win_rate: float
+    train_max_dd: float
+    test_max_dd: float
+    train_expectancy_r: float | None = None
+    test_expectancy_r: float | None = None
+    degradation_pct: float
+    verdict: Literal["robusto", "degradazione_moderata", "possibile_overfitting"]
+
+
+class WalkForwardResponse(BaseModel):
+    """Sintesi walk-forward: più split train/test cronologici con quality lookup solo sul train."""
+
+    n_folds: int
+    folds: list[WalkForwardFoldResponse]
+    avg_test_return_pct: float
+    avg_test_win_rate: float
+    avg_degradation_pct: float
+    pct_folds_positive: float
+    overall_verdict: Literal[
+        "robusto",
+        "prevalentemente_robusto",
+        "degradazione_moderata",
+        "possibile_overfitting",
+    ]
+    date_range_start: str
+    date_range_end: str
 
 
 class TradePlanVariantBestResponse(BaseModel):

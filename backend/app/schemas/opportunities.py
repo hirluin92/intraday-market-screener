@@ -89,7 +89,7 @@ class OpportunityRow(BaseModel):
     )
     pattern_quality_label: str = Field(
         default="unknown",
-        description="high | medium | low | unknown (from score + backtest match).",
+        description="high | medium | low | insufficient | unknown (from score + backtest match).",
     )
     final_opportunity_score: float = Field(
         description=(
@@ -199,18 +199,48 @@ class OpportunityRow(BaseModel):
         default_factory=list,
         description="2–4 righe IT per UI «Perché» (motivazione sintetica).",
     )
+    current_price: float | None = Field(
+        default=None,
+        description="Ultimo close candela nel DB per la serie (stesso refresh dello scheduler).",
+    )
+    price_distance_pct: float | None = Field(
+        default=None,
+        description="Distanza % tra current_price e trade_plan.entry_price (null se mancano dati).",
+    )
+    price_stale: bool = Field(
+        default=False,
+        description="True se il prezzo è oltre soglia vs entry o oltre/sotto stop (vedi price_stale_reason).",
+    )
+    price_stale_reason: str | None = Field(
+        default=None,
+        description="Motivo testuale se price_stale (IT).",
+    )
     regime_spy: str = Field(
         default="unknown",
         description=(
-            "Yahoo: regime SPY 1d (bullish | bearish | neutral). "
-            "Crypto Binance: n/a (SPY non applicabile). unknown se dati SPY assenti."
+            "Regime macro daily SPY su Yahoo (bullish | bearish | neutral). "
+            "Su Binance: n/a — filtro regime non applicato alle crypto."
         ),
     )
     regime_direction_ok: bool = Field(
         default=True,
         description=(
-            "True se la direzione del pattern è consentita dal filtro regime (Yahoo); "
-            "su crypto o senza dati SPY non si penalizza."
+            "True se la direzione è consentita dal filtro SPY (solo Yahoo); su Binance sempre coerente (n/a)."
+        ),
+    )
+    pattern_is_validated: bool = Field(
+        default=False,
+        description=(
+            "True se (latest_pattern_name, timeframe) è nella lista validata OOS "
+            "(stessi set di opportunity_validator per 1h/5m)."
+        ),
+    )
+    pattern_operational_status: Literal["operational", "development", "experimental"] = Field(
+        default="development",
+        description=(
+            "operational = pattern validato con edge reale; "
+            "development = implementato ma non nella lista validata; "
+            "experimental = storico/qualità insufficiente (es. insufficient/unknown)."
         ),
     )
 

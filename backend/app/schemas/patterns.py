@@ -54,7 +54,7 @@ class PatternExtractRequest(BaseModel):
         default=None,
         description=(
             "Restrict to one timeframe; allowed values depend on provider/venue "
-            "(Binance: 1m,5m,15m,1h — Yahoo: 5m,1h,1d). Omit for all timeframes."
+            "(Binance: 1m,5m,15m,1h — Yahoo: 5m,15m,1h,1d). Omit for all timeframes."
         ),
     )
     limit: int = Field(

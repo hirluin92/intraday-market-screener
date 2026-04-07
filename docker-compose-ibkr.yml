@@ -1,0 +1,17 @@
+# Client Portal Gateway IBKR (API REST locale su :5000).
+# Avvio: docker compose -f docker-compose-ibkr.yml up -d
+# Prima: copiare la conf ufficiale IBKR in ./ibkr-config/ (vedi ibkr-config/README.txt).
+#
+# Alternativa: gateway scaricato da
+# https://www.interactivebrokers.com/en/trading/ib-api.php (Client Portal Web API Gateway).
+
+services:
+  ibkr-gateway:
+    image: ghcr.io/unusualmachine/ibkr-client-portal-gateway:latest
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./ibkr-config/conf.yaml:/root/conf.yaml:ro
+    environment:
+      - TRADING_MODE=paper
+    restart: unless-stopped

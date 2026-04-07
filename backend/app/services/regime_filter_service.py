@@ -1,6 +1,10 @@
 """
-Filtro di regime SPY 1d (price_vs_ema50_pct): direzioni consentite per timestamp di barra.
-Usato dalla simulazione equity — nessuna query extra in runtime (cache caricata una volta).
+Filtro di regime giornaliero (price_vs_ema50_pct): direzioni consentite per timestamp di barra.
+
+- Yahoo / azioni-ETF: SPY 1d.
+- Binance / crypto: BTC/USDT 1d (stesso schema ±2% vs EMA50).
+
+Usato dalla simulazione equity e dalle opportunità — cache caricata una volta per richiesta.
 """
 
 from __future__ import annotations
@@ -10,8 +14,12 @@ from datetime import date, datetime, timedelta, timezone
 from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.market_identity import DEFAULT_PROVIDER_BINANCE, DEFAULT_VENUE_BINANCE
 from app.core.yahoo_finance_constants import YAHOO_VENUE_LABEL
 from app.models.candle_indicator import CandleIndicator
+
+REGIME_SYMBOL_BINANCE = "BTC/USDT"
+REGIME_TIMEFRAME_DAILY = "1d"
 
 
 def _d(v) -> float | None:
@@ -28,8 +36,8 @@ def get_allowed_directions_from_pct(
     _price_vs_ema20_pct: float | None = None,
 ) -> frozenset[str]:
     """
-    Regime BULLISH forte (SPY > EMA50 oltre 2%) → solo bullish.
-    Regime BEARISH forte (SPY < EMA50 oltre 2%) → solo bearish.
+    Regime BULLISH forte (prezzo > EMA50 oltre 2%) → solo bullish.
+    Regime BEARISH forte (prezzo < EMA50 oltre 2%) → solo bearish.
     Zona neutra ±2% → entrambe.
     """
     if price_vs_ema50_pct > 2.0:
@@ -40,7 +48,7 @@ def get_allowed_directions_from_pct(
 
 
 class RegimeFilter:
-    """Cache date UTC → riga SPY 1d."""
+    """Cache date UTC → riga indicator daily (SPY o BTC)."""
 
     def __init__(self, daily_indicators: list[CandleIndicator]) -> None:
         self._by_date: dict[str, CandleIndicator] = {}
@@ -93,14 +101,31 @@ async def load_regime_filter(
     *,
     dt_from: datetime | None = None,
     dt_to: datetime | None = None,
+    provider: str = "yahoo_finance",
 ) -> RegimeFilter | None:
-    """Carica SPY 1d Yahoo. None se nessuna riga (fallback: tutte le direzioni)."""
-    conditions = [
-        CandleIndicator.symbol == "SPY",
-        CandleIndicator.timeframe == "1d",
-        CandleIndicator.provider == "yahoo_finance",
-        CandleIndicator.exchange == YAHOO_VENUE_LABEL,
-    ]
+    """
+    Carica indicatori daily per il filtro regime.
+
+    - ``yahoo_finance`` (default): SPY 1d Yahoo.
+    - ``binance``: BTC/USDT 1d Binance (regime macro per le altcoin).
+
+    Se non ci sono righe, ritorna None (fallback: tutte le direzioni consentite).
+    """
+    p = (provider or "yahoo_finance").strip().lower()
+    if p == "binance":
+        conditions = [
+            CandleIndicator.symbol == REGIME_SYMBOL_BINANCE,
+            CandleIndicator.timeframe == REGIME_TIMEFRAME_DAILY,
+            CandleIndicator.provider == DEFAULT_PROVIDER_BINANCE,
+            CandleIndicator.exchange == DEFAULT_VENUE_BINANCE,
+        ]
+    else:
+        conditions = [
+            CandleIndicator.symbol == "SPY",
+            CandleIndicator.timeframe == "1d",
+            CandleIndicator.provider == "yahoo_finance",
+            CandleIndicator.exchange == YAHOO_VENUE_LABEL,
+        ]
     if dt_from is not None:
         conditions.append(CandleIndicator.timestamp >= dt_from - timedelta(days=14))
     if dt_to is not None:

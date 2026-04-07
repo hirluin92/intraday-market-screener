@@ -1,0 +1,3 @@
+# Sostituisci con la configurazione fornita da IBKR Client Portal Gateway.
+# Questo placeholder consente di avviare il compose dopo aver copiato il file reale.
+listenPort: 5000

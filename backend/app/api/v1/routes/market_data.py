@@ -230,7 +230,12 @@ async def get_patterns(
         default=None,
         description="Filter by pattern name (e.g. impulsive_bullish_candle). Omit for all patterns.",
     ),
-    limit: int = Query(default=100, ge=1, le=1000),
+    limit: int = Query(
+        default=100,
+        ge=1,
+        le=5000,
+        description="Massimo righe restituite (ordine timestamp desc). Fino a 5000 per analisi batch.",
+    ),
     session: AsyncSession = Depends(get_db_session),
 ) -> PatternsListResponse:
     rows = await list_stored_patterns(

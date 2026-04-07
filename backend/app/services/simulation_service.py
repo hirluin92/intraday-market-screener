@@ -27,10 +27,16 @@ from app.models.candle_feature import CandleFeature
 from app.models.candle_pattern import CandlePattern
 from app.schemas.backtest import (
     BacktestSimulationResponse,
+    PatternBacktestAggregateRow,
     SimulationEquityPoint,
     SimulationTradeRow,
 )
 from app.services.pattern_backtest import pattern_quality_lookup_by_name_tf
+from app.services.pattern_quality import (
+    binomial_test_vs_50pct,
+    significance_label,
+    ttest_expectancy_vs_zero,
+)
 from app.services.regime_filter_service import load_regime_filter
 from app.services.trade_plan_backtest import (
     MAX_BARS_AFTER_ENTRY,
@@ -50,6 +56,37 @@ def _utc_wall(ts: datetime) -> datetime:
     if ts.tzinfo is None:
         return ts.replace(tzinfo=timezone.utc)
     return ts.astimezone(timezone.utc)
+
+
+# Durata barra in secondi (cooldown anti-overlap per serie).
+_TIMEFRAME_TO_SECONDS: dict[str, float] = {
+    "1m": 60.0,
+    "3m": 180.0,
+    "5m": 300.0,
+    "15m": 900.0,
+    "30m": 1800.0,
+    "1h": 3600.0,
+    "4h": 14400.0,
+    "1d": 86400.0,
+}
+
+
+def _seconds_per_bar(timeframe: str) -> float | None:
+    return _TIMEFRAME_TO_SECONDS.get((timeframe or "").strip().lower())
+
+
+def _elapsed_bars_between(
+    earlier: datetime,
+    later: datetime,
+    timeframe: str,
+) -> float | None:
+    """Barre tra due timestamp; None se TF non mappato (cooldown disattivato per quel TF)."""
+    sec = _seconds_per_bar(timeframe)
+    if sec is None or sec <= 0:
+        return None
+    a = _utc_wall(earlier)
+    b = _utc_wall(later)
+    return (b - a).total_seconds() / sec
 
 
 def _bar_hours_utc_for_filter(
@@ -92,17 +129,21 @@ def _max_drawdown_from_curve(
     return max_dd
 
 
+def _pattern_strength_float(pat: CandlePattern) -> float:
+    try:
+        return float(pat.pattern_strength)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _pattern_strength_sort_key(pat: CandlePattern) -> tuple[float, int]:
     """Ordinamento decrescente per forza pattern, poi id stabile."""
-    try:
-        s = float(pat.pattern_strength)
-    except (TypeError, ValueError):
-        s = 0.0
+    s = _pattern_strength_float(pat)
     return (-s, -pat.id)
 
 
 def _normalize_pattern_direction(direction: str | None) -> str:
-    """Allinea a bullish/bearish per confronto con il regime SPY."""
+    """Allinea a bullish/bearish per confronto con il regime (SPY 1d o BTC/USDT 1d)."""
     d = (direction or "").strip().lower()
     if d in ("bearish", "short", "sell", "bear"):
         return "bearish"
@@ -166,6 +207,10 @@ async def run_simulation(
     include_hours: list[int] | None = None,
     exclude_symbols: list[str] | None = None,
     include_symbols: list[str] | None = None,
+    quality_lookup_override: dict[tuple[str, str], PatternBacktestAggregateRow]
+    | None = None,
+    cooldown_bars: int = 0,
+    min_strength: float | None = None,
 ) -> BacktestSimulationResponse:
     _ = seed  # compat API: simulazione deterministica, seed ignorato
 
@@ -197,6 +242,10 @@ async def run_simulation(
         raise ValueError("cost_rate deve essere in [0, 0.05]")
     if not (1 <= max_simultaneous <= 10):
         raise ValueError("max_simultaneous deve essere in [1, 10]")
+    if not (0 <= cooldown_bars <= 20):
+        raise ValueError("cooldown_bars deve essere in [0, 20]")
+    if min_strength is not None and not (0.0 <= min_strength <= 1.0):
+        raise ValueError("min_strength deve essere in [0, 1] o None")
 
     names_filter = [n.strip() for n in pattern_names if n and n.strip()]
     if not names_filter:
@@ -216,6 +265,8 @@ async def run_simulation(
         bars_with_trades=0,
         trades_skipped_by_regime=0,
         regime_filter_active=False,
+        cooldown_bars_used=cooldown_bars,
+        trades_skipped_by_cooldown=0,
     )
 
     if not names_filter:
@@ -238,6 +289,10 @@ async def run_simulation(
             forward_horizons_used=forward_meta,
             note="Nessun pattern_name nel DB per i filtri; nessun trade simulato.",
             expectancy_r=None,
+            win_rate_pvalue=None,
+            win_rate_significance=None,
+            expectancy_pvalue=None,
+            expectancy_significance=None,
             profit_factor=None,
             **empty_metrics,
         )
@@ -271,6 +326,9 @@ async def run_simulation(
     result = await session.execute(stmt)
     rows = list(result.all())
 
+    if min_strength is not None and min_strength > 0:
+        rows = [r for r in rows if _pattern_strength_float(r[0]) >= min_strength]
+
     if not rows:
         return BacktestSimulationResponse(
             initial_capital=initial_capital,
@@ -291,23 +349,36 @@ async def run_simulation(
             forward_horizons_used=forward_meta,
             note="Nessuna riga pattern+candle_context per i filtri selezionati.",
             expectancy_r=None,
+            win_rate_pvalue=None,
+            win_rate_significance=None,
+            expectancy_pvalue=None,
+            expectancy_significance=None,
             profit_factor=None,
             **empty_metrics,
         )
 
-    pq_lookup = await pattern_quality_lookup_by_name_tf(
-        session,
-        symbol=symbol,
-        exchange=exchange,
-        provider=provider,
-        asset_type=asset_type,
-        timeframe=timeframe,
-    )
+    if quality_lookup_override is not None:
+        pq_lookup = quality_lookup_override
+    else:
+        pq_lookup = await pattern_quality_lookup_by_name_tf(
+            session,
+            symbol=symbol,
+            exchange=exchange,
+            provider=provider,
+            asset_type=asset_type,
+            timeframe=timeframe,
+        )
 
     regime_filter = None
     regime_filter_active = False
-    if use_regime_filter:
-        regime_filter = await load_regime_filter(session, dt_from=dt_from, dt_to=dt_to)
+    # Filtro regime solo Yahoo (SPY 1d). Binance: use_regime_filter ignorato — edge indipendente da BTC.
+    if use_regime_filter and (provider or "").strip().lower() == "yahoo_finance":
+        regime_filter = await load_regime_filter(
+            session,
+            dt_from=dt_from,
+            dt_to=dt_to,
+            provider="yahoo_finance",
+        )
         regime_filter_active = bool(
             regime_filter is not None and regime_filter.has_data,
         )
@@ -343,6 +414,7 @@ async def run_simulation(
     total_trades = 0
     skipped = 0
     per_trade_returns: list[float] = []
+    per_trade_pnl_r: list[float] = []
     trade_rows: list[SimulationTradeRow] = []
 
     sum_pnl_r = 0.0
@@ -353,13 +425,18 @@ async def run_simulation(
     max_sim_obs = 0
     bars_with_trades = 0
     trades_skipped_by_regime = 0
+    trades_skipped_by_cooldown = 0
     hour_skip_counts: dict[int, int] = defaultdict(int)
     hour_filter_logged_once = False
+
+    last_entry_bar: dict[tuple[str, str, str], datetime] = {}
 
     # rows: Row (CandlePattern, Candle, CandleContext). groupby sulla chiave di barra
     # (CandlePattern.timestamp — verificato identico a Candle.timestamp nel DB).
     for _ts_key, group_iter in groupby(rows, key=lambda r: r[0].timestamp):
         group_rows = list(group_iter)
+        group_rows.sort(key=lambda r: _pattern_strength_sort_key(r[0]))
+        series_used_this_bar: set[tuple[str, str, str]] = set()
         candidates: list[tuple[CandlePattern, Candle, CandleContext, float, str]] = []
 
         ts_bar = (
@@ -404,6 +481,20 @@ async def run_simulation(
             allowed_dirs = regime_filter.get_allowed_directions(ts_bar)
 
         for pat, candle, ctx in group_rows:
+            series_key = (pat.symbol, pat.timeframe, pat.provider)
+            if cooldown_bars > 0:
+                if series_key in series_used_this_bar:
+                    trades_skipped_by_cooldown += 1
+                    skipped += 1
+                    continue
+                le_ts = last_entry_bar.get(series_key)
+                if le_ts is not None:
+                    elapsed_b = _elapsed_bars_between(le_ts, ts_bar, pat.timeframe)
+                    if elapsed_b is not None and elapsed_b < float(cooldown_bars):
+                        trades_skipped_by_cooldown += 1
+                        skipped += 1
+                        continue
+
             pdir = _normalize_pattern_direction(pat.direction)
             if pdir not in allowed_dirs:
                 trades_skipped_by_regime += 1
@@ -443,11 +534,11 @@ async def run_simulation(
 
             pnl_r, engine_outcome = tp_result
             candidates.append((pat, candle, ctx, pnl_r, engine_outcome))
+            series_used_this_bar.add(series_key)
 
         if not candidates:
             continue
 
-        candidates.sort(key=lambda t: _pattern_strength_sort_key(t[0]))
         if len(candidates) > max_simultaneous:
             dropped = candidates[max_simultaneous:]
             candidates = candidates[:max_simultaneous]
@@ -473,6 +564,7 @@ async def run_simulation(
                 wins += 1
             total_trades += 1
             sum_pnl_r += pnl_r
+            per_trade_pnl_r.append(pnl_r)
             if pnl_r > 0:
                 sum_pos_r += pnl_r
             elif pnl_r < 0:
@@ -487,6 +579,11 @@ async def run_simulation(
             pnl_r_net = net / risk_amount if risk_amount > 1e-18 else 0.0
             fills.append((pat, pnl_r, risk_amount, net, ts_point, row_outcome))
 
+        if fills and ts_point is not None:
+            for pat, _, _, _, _, _ in fills:
+                sk = (pat.symbol, pat.timeframe, pat.provider)
+                last_entry_bar[sk] = ts_point
+
         equity = equity_before_bar + bar_pnl
         equity = max(equity, EQUITY_FLOOR)
 
@@ -500,10 +597,7 @@ async def run_simulation(
         if include_trades:
             for pat, pnl_r, risk_amount, net, ts_pt, row_outcome in fills:
                 pnl_r_net = net / risk_amount if risk_amount > 1e-18 else 0.0
-                try:
-                    strength = float(pat.pattern_strength)
-                except (TypeError, ValueError):
-                    strength = 0.0
+                strength = _pattern_strength_float(pat)
                 trade_rows.append(
                     SimulationTradeRow(
                         timestamp=ts_pt,
@@ -547,12 +641,18 @@ async def run_simulation(
             forward_horizons_used=forward_meta,
             note="Nessun trade plan simulabile per i pattern selezionati.",
             expectancy_r=None,
+            win_rate_pvalue=None,
+            win_rate_significance=None,
+            expectancy_pvalue=None,
+            expectancy_significance=None,
             profit_factor=None,
             avg_simultaneous_trades=0.0,
             max_simultaneous_observed=0,
             bars_with_trades=0,
             trades_skipped_by_regime=trades_skipped_by_regime,
             regime_filter_active=regime_filter_active,
+            cooldown_bars_used=cooldown_bars,
+            trades_skipped_by_cooldown=trades_skipped_by_cooldown,
         )
 
     curve.insert(
@@ -587,11 +687,31 @@ async def run_simulation(
         f"diviso tra i fill (max {max_simultaneous} per pattern_strength); compounding tra barre. "
         f"Stesso motore di GET /backtest/trade-plans."
     )
+    if cooldown_bars > 0:
+        note += (
+            f" Cooldown {cooldown_bars} barre per serie: "
+            f"{trades_skipped_by_cooldown} segnali esclusi (anti-overlap)."
+        )
     if regime_filter_active:
         note += (
-            f" Filtro direzione SPY (1d, EMA50 ±2%): segnali esclusi per direzione: "
+            " Filtro direzione SPY (1d, EMA50 ±2%): segnali esclusi per direzione: "
             f"{trades_skipped_by_regime}."
         )
+    elif use_regime_filter and (provider or "").strip().lower() == "binance":
+        note += (
+            " use_regime_filter=true ignorato per Binance (filtro regime non applicato alle crypto)."
+        )
+
+    wr_pvalue: float | None = None
+    wr_sig: str | None = None
+    exp_pvalue: float | None = None
+    exp_sig: str | None = None
+    if total_trades > 0:
+        wr_pvalue = binomial_test_vs_50pct(wins, total_trades)
+        wr_sig = significance_label(wr_pvalue)
+    if len(per_trade_pnl_r) >= 2:
+        _, exp_pvalue = ttest_expectancy_vs_zero(per_trade_pnl_r)
+        exp_sig = significance_label(exp_pvalue)
 
     return BacktestSimulationResponse(
         initial_capital=float(initial_capital),
@@ -610,9 +730,15 @@ async def run_simulation(
         max_simultaneous_observed=max_sim_obs,
         bars_with_trades=bars_with_trades,
         expectancy_r=expectancy_r,
+        win_rate_pvalue=wr_pvalue,
+        win_rate_significance=wr_sig,
+        expectancy_pvalue=exp_pvalue,
+        expectancy_significance=exp_sig,
         profit_factor=profit_factor,
         trades_skipped_by_regime=trades_skipped_by_regime,
         regime_filter_active=regime_filter_active,
+        cooldown_bars_used=cooldown_bars,
+        trades_skipped_by_cooldown=trades_skipped_by_cooldown,
         note=note,
     )
 

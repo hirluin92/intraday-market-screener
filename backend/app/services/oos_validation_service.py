@@ -16,6 +16,7 @@ from app.schemas.backtest import (
     OOSValidationResponse,
 )
 from app.services.backtest_simulation import run_backtest_simulation
+from app.services.pattern_backtest import pattern_quality_lookup_by_name_tf
 
 OOSVerdict = Literal["robusto", "degradazione_moderata", "possibile_overfitting"]
 
@@ -59,6 +60,17 @@ async def run_oos_validation(
 ) -> OOSValidationResponse:
     train_end, test_start = _split_cutoff_utc(cutoff_date)
 
+    # Quality lookup solo su pattern ≤ train_end — stesse "regole" per train e test (no leakage).
+    train_quality_lookup = await pattern_quality_lookup_by_name_tf(
+        session,
+        symbol=None,
+        exchange=None,
+        provider=provider,
+        asset_type=None,
+        timeframe=timeframe,
+        dt_to=train_end,
+    )
+
     train_result = await run_backtest_simulation(
         session,
         provider=provider,
@@ -74,6 +86,7 @@ async def run_oos_validation(
         use_regime_filter=use_regime_filter,
         exclude_hours=exclude_hours,
         include_hours=include_hours,
+        quality_lookup_override=train_quality_lookup,
     )
 
     test_result = await run_backtest_simulation(
@@ -91,6 +104,7 @@ async def run_oos_validation(
         use_regime_filter=use_regime_filter,
         exclude_hours=exclude_hours,
         include_hours=include_hours,
+        quality_lookup_override=train_quality_lookup,
     )
 
     train_exp = train_result.expectancy_r
@@ -133,6 +147,11 @@ async def run_oos_validation(
         trades=test_result.trades or [],
     )
 
+    note_oos = (
+        "Test set simulato con quality lookup calcolato solo su dati pre-cutoff "
+        "(stesso dizionario del train; nessun leakage da pattern futuri)."
+    )
+
     return OOSValidationResponse(
         cutoff_date=cutoff_date.strip()[:10],
         train_set=train_set,
@@ -140,4 +159,7 @@ async def run_oos_validation(
         performance_degradation_pct=round(degradation_pct, 2),
         oos_verdict=verdict,
         pattern_names_used=test_result.pattern_names_used,
+        leakage_prevented=True,
+        train_quality_lookup_size=len(train_quality_lookup),
+        note_oos=note_oos,
     )

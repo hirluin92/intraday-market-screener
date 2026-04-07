@@ -109,7 +109,7 @@ async def maybe_send_pattern_alerts_after_pipeline(
             timeframe=body.timeframe,
         )
 
-        regime_filter = await load_regime_filter(session)
+        regime_filter = await load_regime_filter(session, provider=body.provider)
 
         for pat, candle, ctx in rows:
             agg = pq_lookup.get((pat.pattern_name, pat.timeframe))
@@ -157,6 +157,7 @@ async def maybe_send_pattern_alerts_after_pipeline(
                 cvd_trend=cvd_trend,
                 funding_bias=funding_bias,
                 timestamp=pat.timestamp,
+                exchange=pat.exchange,
             )
     except Exception:
         logger.exception(

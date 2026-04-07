@@ -11,6 +11,7 @@ import logging
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.cache import invalidate_opportunity_lookups_after_pipeline
 from app.core.config import settings
 from app.schemas.context import ContextExtractRequest
 from app.schemas.features import FeatureExtractRequest
@@ -27,6 +28,10 @@ from app.services.pattern_extraction import extract_patterns
 from app.services.pattern_pipeline_alerts import maybe_send_pattern_alerts_after_pipeline
 from app.services.yahoo_finance_ingestion import YahooFinanceIngestionService
 
+logger = logging.getLogger(__name__)
+
+_legacy_skip_logged_once = False
+
 
 async def execute_pipeline_refresh(
     session: AsyncSession,
@@ -37,6 +42,8 @@ async def execute_pipeline_refresh(
 
     Raises ``ValueError`` (validation) or ``ccxt.BaseError`` (Binance exchange/network).
     """
+    global _legacy_skip_logged_once
+
     symbols = [body.symbol] if body.symbol else None
     timeframes = [body.timeframe] if body.timeframe else None
 
@@ -44,7 +51,7 @@ async def execute_pipeline_refresh(
         yahoo = YahooFinanceIngestionService()
         yahoo_ingest_limit = (
             settings.pipeline_ingest_limit_5m
-            if body.timeframe == "5m"
+            if body.timeframe in ("5m", "15m")
             else body.ingest_limit
         )
         ingest_req = MarketDataIngestRequest(
@@ -107,7 +114,32 @@ async def execute_pipeline_refresh(
             "pattern alerts hook failed after extract_patterns (ignored)"
         )
 
-    await maybe_notify_after_pipeline_refresh(session, body)
+    if settings.alert_legacy_enabled:
+        await maybe_notify_after_pipeline_refresh(session, body)
+    else:
+        logger.debug(
+            "alert legacy disabilitato (ALERT_LEGACY_ENABLED=false) — "
+            "solo alert pattern via alert_service / pattern_pipeline_alerts"
+        )
+        if not _legacy_skip_logged_once:
+            logger.info(
+                "alert legacy disabilitato (ALERT_LEGACY_ENABLED=false); "
+                "skipped maybe_notify_after_pipeline_refresh — uso solo alert pattern"
+            )
+            _legacy_skip_logged_once = True
+
+    await invalidate_opportunity_lookups_after_pipeline(
+        provider=body.provider,
+        exchange=(body.exchange or "").strip(),
+        timeframe=body.timeframe,
+    )
+
+    try:
+        from app.services.auto_execute_service import maybe_ibkr_auto_execute_after_pipeline
+
+        await maybe_ibkr_auto_execute_after_pipeline(session, body)
+    except Exception:
+        logger.exception("IBKR auto-execute hook failed after pipeline (ignored)")
 
     return PipelineRefreshResponse(
         ingest=ingest_out,

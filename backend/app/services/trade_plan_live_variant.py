@@ -24,6 +24,8 @@ from app.services.trade_plan_engine import (
 from app.services.trade_plan_variant_backtest import TP_PROFILES, run_trade_plan_variant_backtest
 from app.services.trade_plan_variant_best import build_best_rows_from_variant_rows
 
+LIVE_VARIANT_BACKTEST_PATTERN_LIMIT = 300
+
 TradePlanFallbackReasonCode = Literal[
     "no_pattern",
     "no_variant_bucket",
@@ -69,7 +71,7 @@ async def load_best_variant_lookup_for_live(
     provider: str | None,
     asset_type: str | None,
     timeframe: str | None,
-    limit: int = 300,
+    limit: int = LIVE_VARIANT_BACKTEST_PATTERN_LIMIT,
     cost_rate: float = BACKTEST_TOTAL_COST_RATE_DEFAULT,
 ) -> dict[tuple[str, str, str, str], TradePlanVariantBestRow]:
     """Mappa bucket → riga best variant (stesso universo del trade plan variant backtest)."""

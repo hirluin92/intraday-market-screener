@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.trade_plan_variant_constants import (
     BACKTEST_TOTAL_COST_RATE_DEFAULT,
+    PATTERN_QUALITY_MIN_SAMPLE,
     TP_PROFILE_CONFIGS,
 )
 from app.models.candle import Candle
@@ -34,7 +35,14 @@ from app.services.opportunity_final_score import (
     compute_final_opportunity_score,
     final_opportunity_label_from_score,
 )
-from app.services.pattern_quality import pattern_quality_label_from_score
+from app.services.pattern_quality import (
+    binomial_test_vs_50pct,
+    pattern_quality_label_from_score,
+    sample_reliability_label,
+    significance_label,
+    ttest_expectancy_vs_zero,
+    wilson_confidence_interval,
+)
 from app.services.pattern_timeframe_policy import apply_pattern_timeframe_policy
 from app.services.pattern_backtest import pattern_quality_lookup_by_name_tf
 from app.services.screener_scoring import SnapshotForScoring, score_snapshot
@@ -172,6 +180,7 @@ async def run_trade_plan_variant_backtest(
     ] = defaultdict(
         lambda: {
             "r_list": [],
+            "r_per_signal": [],
             "entry_touch": 0,
             "stop": 0,
             "tp1": 0,
@@ -253,10 +262,12 @@ async def run_trade_plan_variant_backtest(
                 clist, idx, plan, cost_rate=cost_rate
             )
             if not entry_ok:
+                bucket[bkey]["r_per_signal"].append(0.0)
                 continue
             bucket[bkey]["entry_touch"] += 1
             assert outcome is not None and r_mult is not None
             bucket[bkey]["r_list"].append(r_mult)
+            bucket[bkey]["r_per_signal"].append(r_mult)
             if outcome == "stop":
                 bucket[bkey]["stop"] += 1
             elif outcome == "tp1":
@@ -273,11 +284,26 @@ async def run_trade_plan_variant_backtest(
         n = data["sample"]
         et = data["entry_touch"]
         rlist: list[float] = data["r_list"]
+        r_per_signal: list[float] = data["r_per_signal"]
         sum_r = sum(rlist)
         avg_r = sum_r / et if et else None
         expectancy_per_signal = sum_r / n if n else None
         tp1_or_tp2 = data["tp1"] + data["tp2"]
         sh = data["stop"]
+
+        tpb_rel = sample_reliability_label(et)
+        if et < PATTERN_QUALITY_MIN_SAMPLE:
+            ci_lo = ci_hi = None
+        else:
+            ci_lo, ci_hi = wilson_confidence_interval(tp1_or_tp2, et)
+
+        win_p = binomial_test_vs_50pct(tp1_or_tp2, et) if et > 0 else None
+        win_sig = significance_label(win_p) if win_p is not None else None
+        exp_p: float | None = None
+        exp_sig: str | None = None
+        if len(r_per_signal) >= 2:
+            _, exp_p = ttest_expectancy_vs_zero(r_per_signal)
+            exp_sig = significance_label(exp_p)
 
         out_rows.append(
             TradePlanVariantRow(
@@ -301,6 +327,13 @@ async def run_trade_plan_variant_backtest(
                 tp1_or_tp2_rate_given_entry=(tp1_or_tp2 / et) if et else None,
                 avg_r=round(avg_r, 4) if avg_r is not None else None,
                 expectancy_r=round(expectancy_per_signal, 4) if expectancy_per_signal is not None else None,
+                win_rate_ci_lower=ci_lo,
+                win_rate_ci_upper=ci_hi,
+                sample_reliability=tpb_rel,
+                win_rate_pvalue=win_p,
+                win_rate_significance=win_sig,
+                expectancy_r_pvalue=exp_p,
+                expectancy_r_significance=exp_sig,
             )
         )
 

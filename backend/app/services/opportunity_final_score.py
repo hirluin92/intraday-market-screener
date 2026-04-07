@@ -27,6 +27,7 @@ _QUALITY_BAND_BONUS = {
     "medium": 7.0,
     "low": 3.0,
     "unknown": 0.0,
+    "insufficient": 0.0,
 }
 
 # --- Pattern strength: stored ~0..1 in MVP engine ---

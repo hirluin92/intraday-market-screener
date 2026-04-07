@@ -73,6 +73,33 @@ _RMC_RSI_BEAR_MAX = 45.0  # RSI in zona momentum bearish
 _RMC_MIN_VOLUME_RATIO = 1.3  # volume sopra media
 _RMC_MIN_BODY_RATIO = 0.42
 
+
+def _relative_strength_bonus(ind: CandleIndicator | None, direction: str) -> float:
+    """Bonus/penalità da RS vs SPY (solo se valorizzato sui CandleIndicator)."""
+    if ind is None or ind.rs_signal is None:
+        return 0.0
+    sig = ind.rs_signal
+    if direction == "bullish":
+        if sig == "strong_bull":
+            return 0.08
+        if sig == "bull":
+            return 0.04
+        if sig == "strong_bear":
+            return -0.08
+        if sig == "bear":
+            return -0.04
+    else:
+        if sig == "strong_bear":
+            return 0.08
+        if sig == "bear":
+            return 0.04
+        if sig == "strong_bull":
+            return -0.08
+        if sig == "bull":
+            return -0.04
+    return 0.0
+
+
 # Pattern multi-candela classici
 _ENG_MIN_BODY_RATIO = 0.50  # corpo minimo per engulfing
 _ENG_ENGULF_FACTOR = 1.05  # il corpo deve essere > 1.05× quello precedente
@@ -96,6 +123,15 @@ _PREV_FEATURES_LOOKBACK = max(
 _VWAP_PROXIMITY_PCT = 0.3  # % max di distanza da VWAP per pattern VWAP
 _OR_BREAKOUT_CONFIRM_PCT = 0.1  # % min sopra/sotto OR per conferma breakout
 _FIB_PROXIMITY_PCT = 0.4  # % max di distanza da livello Fibonacci
+
+# FVG retest: dentro zona FVG + candela direzionale con corpo sufficiente
+_FVG_RETEST_MIN_BODY_RATIO = 0.35
+_FVG_RETEST_BULL_MIN_CP = 0.50
+_FVG_RETEST_BEAR_MAX_CP = 0.50
+
+_OB_MIN_BODY_RATIO = 0.40
+_OB_MIN_CP_BULL = 0.45
+_OB_MAX_CP_BEAR = 0.55
 
 
 def _f(x: Any) -> float:
@@ -281,6 +317,7 @@ def _detect_compression_to_expansion_transition(
     feat: CandleFeature,
     ctx: CandleContext,
     prev_ctx: CandleContext | None,
+    ind: CandleIndicator | None = None,
 ) -> tuple[float, str] | None:
     """
     Prior bar classified as compression; this bar as expansion — regime shift.
@@ -319,7 +356,8 @@ def _detect_compression_to_expansion_transition(
     align = 0.08 if (
         (direction == "bullish" and feat.is_bullish) or (direction == "bearish" and not feat.is_bullish)
     ) else 0.0
-    strength = min(1.0, 0.52 + vol_bonus + align)
+    rs_bonus = _relative_strength_bonus(ind, direction)
+    strength = min(1.0, 0.52 + vol_bonus + align + rs_bonus)
     return (strength, direction)
 
 
@@ -529,7 +567,8 @@ def _detect_rsi_momentum_continuation(
         if cp < 0.55:
             return None
         vol_bonus = min(0.10, (vol_ratio - 1.3) * 0.15)
-        strength = min(1.0, 0.55 + 0.15 * br + vol_bonus)
+        rs_bonus = _relative_strength_bonus(ind, "bullish")
+        strength = min(1.0, 0.55 + 0.15 * br + vol_bonus + rs_bonus)
         return (strength, "bullish")
 
     if ctx.direction_bias == "bearish":
@@ -542,7 +581,8 @@ def _detect_rsi_momentum_continuation(
         if cp > 0.45:
             return None
         vol_bonus = min(0.10, (vol_ratio - 1.3) * 0.15)
-        strength = min(1.0, 0.55 + 0.15 * br + vol_bonus)
+        rs_bonus = _relative_strength_bonus(ind, "bearish")
+        strength = min(1.0, 0.55 + 0.15 * br + vol_bonus + rs_bonus)
         return (strength, "bearish")
 
     return None
@@ -1155,6 +1195,110 @@ def _detect_fibonacci_bounce(
     return None
 
 
+def _detect_fvg_retest_bull(
+    feat: CandleFeature,
+    ind: CandleIndicator | None,
+) -> tuple[float, str] | None:
+    """Retest rialzista in zona FVG bullish (indicatori)."""
+    if ind is None or not ind.in_fvg_bullish:
+        return None
+    if not feat.is_bullish:
+        return None
+    br = _body_ratio(feat)
+    if br < _FVG_RETEST_MIN_BODY_RATIO:
+        return None
+    cp = _f(feat.close_position_in_range)
+    if cp < _FVG_RETEST_BULL_MIN_CP:
+        return None
+    strength = min(1.0, 0.42 * br + 0.48 * cp + 0.10)
+    strength = _cvd_strength_adjust(strength, ind, "bullish")
+    return (strength, "bullish")
+
+
+def _detect_fvg_retest_bear(
+    feat: CandleFeature,
+    ind: CandleIndicator | None,
+) -> tuple[float, str] | None:
+    """Retest ribassista in zona FVG bearish (indicatori)."""
+    if ind is None or not ind.in_fvg_bearish:
+        return None
+    if feat.is_bullish:
+        return None
+    br = _body_ratio(feat)
+    if br < _FVG_RETEST_MIN_BODY_RATIO:
+        return None
+    cp = _f(feat.close_position_in_range)
+    if cp > _FVG_RETEST_BEAR_MAX_CP:
+        return None
+    strength = min(1.0, 0.42 * br + 0.48 * (1.0 - cp) + 0.10)
+    strength = _cvd_strength_adjust(strength, ind, "bearish")
+    return (strength, "bearish")
+
+
+def _detect_ob_retest_bull(
+    feat: CandleFeature,
+    ctx: CandleContext,
+    ind: CandleIndicator | None,
+) -> tuple[float, str] | None:
+    """Retest rialzista in zona Order Block bullish."""
+    if ind is None or not ind.in_ob_bullish:
+        return None
+    if not feat.is_bullish:
+        return None
+    br = _body_ratio(feat)
+    if br < _OB_MIN_BODY_RATIO:
+        return None
+    cp = _f(feat.close_position_in_range)
+    if cp < _OB_MIN_CP_BULL:
+        return None
+    if ctx.volatility_regime == "low":
+        return None
+
+    cvd_bonus = 0.0
+    if ind.cvd_trend == "bullish":
+        cvd_bonus = 0.08
+    elif ind.cvd_trend == "bearish":
+        cvd_bonus = -0.06
+
+    ob_s = float(ind.ob_strength) if ind.ob_strength is not None else 0.5
+    ob_bonus = (ob_s - 0.5) * 0.1
+
+    strength = min(1.0, 0.60 + 0.15 * br + cvd_bonus + ob_bonus)
+    return (strength, "bullish")
+
+
+def _detect_ob_retest_bear(
+    feat: CandleFeature,
+    ctx: CandleContext,
+    ind: CandleIndicator | None,
+) -> tuple[float, str] | None:
+    """Retest ribassista in zona Order Block bearish."""
+    if ind is None or not ind.in_ob_bearish:
+        return None
+    if feat.is_bullish:
+        return None
+    br = _body_ratio(feat)
+    if br < _OB_MIN_BODY_RATIO:
+        return None
+    cp = _f(feat.close_position_in_range)
+    if cp > _OB_MAX_CP_BEAR:
+        return None
+    if ctx.volatility_regime == "low":
+        return None
+
+    cvd_bonus = 0.0
+    if ind.cvd_trend == "bearish":
+        cvd_bonus = 0.08
+    elif ind.cvd_trend == "bullish":
+        cvd_bonus = -0.06
+
+    ob_s = float(ind.ob_strength) if ind.ob_strength is not None else 0.5
+    ob_bonus = (ob_s - 0.5) * 0.1
+
+    strength = min(1.0, 0.60 + 0.15 * br + cvd_bonus + ob_bonus)
+    return (strength, "bearish")
+
+
 def _run_detectors(
     feat: CandleFeature,
     ctx: CandleContext,
@@ -1178,7 +1322,7 @@ def _run_detectors(
     if r:
         out.append(("range_expansion_breakout_candidate", r[0], r[1]))
 
-    r = _detect_compression_to_expansion_transition(feat, ctx, prev_ctx)
+    r = _detect_compression_to_expansion_transition(feat, ctx, prev_ctx, ind)
     if r:
         out.append(("compression_to_expansion_transition", r[0], r[1]))
 
@@ -1267,6 +1411,22 @@ def _run_detectors(
     r = _detect_fibonacci_bounce(feat, ctx, ind)
     if r:
         out.append(("fibonacci_bounce", r[0], r[1]))
+
+    r = _detect_fvg_retest_bull(feat, ind)
+    if r:
+        out.append(("fvg_retest_bull", r[0], r[1]))
+
+    r = _detect_fvg_retest_bear(feat, ind)
+    if r:
+        out.append(("fvg_retest_bear", r[0], r[1]))
+
+    r = _detect_ob_retest_bull(feat, ctx, ind)
+    if r:
+        out.append(("ob_retest_bull", r[0], r[1]))
+
+    r = _detect_ob_retest_bear(feat, ctx, ind)
+    if r:
+        out.append(("ob_retest_bear", r[0], r[1]))
 
     return out
 

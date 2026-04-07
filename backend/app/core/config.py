@@ -33,10 +33,11 @@ class Settings(BaseSettings):
         description="How often to run the full ingest→extract pipeline for each configured pair.",
     )
     pipeline_scheduler_source: str = Field(
-        default="universe",
+        default="explicit",
         description=(
-            "universe = cross-market jobs from app.core.market_universe; "
-            "legacy = Binance-only grid from PIPELINE_SYMBOLS × PIPELINE_TIMEFRAMES."
+            "explicit | validated_1h | universe = stessa lista esplicita 40 Yahoo 1h + 5 Binance 1h "
+            "(trade_plan_variant_constants); registry_full = espansione completa market_universe + tag; "
+            "legacy = Binance-only da PIPELINE_SYMBOLS × PIPELINE_TIMEFRAMES."
         ),
     )
     pipeline_universe_tags: str = Field(
@@ -70,8 +71,8 @@ class Settings(BaseSettings):
         ge=1,
         le=20_000,
         description=(
-            "Yahoo Finance 5m: valore passato a ingest quando timeframe=5m (pipeline refresh); "
-            "lo storico effettivo segue il periodo Yahoo (es. 60d) e non è più tagliato da tail su 5m."
+            "Yahoo Finance 5m/15m: valore passato a ingest quando timeframe è 5m o 15m (pipeline refresh); "
+            "lo storico effettivo segue il periodo Yahoo (es. 60d) e non è più tagliato da tail su intraday."
         ),
     )
     pipeline_extract_limit: int = Field(
@@ -101,16 +102,50 @@ class Settings(BaseSettings):
         description="Allowed CORS origins for the API (comma-separated).",
     )
 
-    # Outbound alerts (v1): alta_priorita only; see app.services.alert_notifications.
+    opportunity_lookup_cache_ttl_seconds: int = Field(
+        default=300,
+        ge=30,
+        le=86_400,
+        description=(
+            "TTL secondi per cache in-memory dei lookup backtest on-demand "
+            "(pattern quality, trade plan backtest, variant best) usati da GET opportunities."
+        ),
+    )
+
+    opportunity_price_staleness_pct: float = Field(
+        default=1.0,
+        ge=0.0,
+        le=50.0,
+        description=(
+            "Soglia % di distanza prezzo vs entry: oltre questa soglia un execute "
+            "viene declassato a monitor (ultimo close candela nel DB)."
+        ),
+    )
+
+    # Alerting legacy (pipeline refresh → Discord/Telegram; vedi app.services.alert_notifications).
+    alert_legacy_enabled: bool = Field(
+        default=False,
+        description=(
+            "Se True, esegue il flusso legacy maybe_notify_after_pipeline_refresh. "
+            "Default False: solo gli alert pattern (alert_service / pattern_pipeline_alerts)."
+        ),
+    )
+    # Stesso file legacy; richiede anche canali configurati e (in passato) questa flag era l'unico switch.
     alert_notifications_enabled: bool = Field(
         default=False,
         description="If true, send notifications after pipeline refresh when rules match.",
     )
-    alert_frontend_base_url: str = Field(
-        default="",
+    alert_include_media_priorita: bool = Field(
+        default=False,
         description=(
-            "Base URL for serie detail links in alerts (no trailing slash), "
-            "e.g. http://localhost:3000"
+            "Se True invia anche alert di media priorità (default False in produzione)"
+        ),
+    )
+    alert_frontend_base_url: str = Field(
+        default="http://localhost:3000",
+        description=(
+            "Base URL frontend per deep link opportunità / serie negli alert (no trailing slash), "
+            "es. http://localhost:3000"
         ),
     )
     discord_webhook_url: str = Field(
@@ -140,14 +175,68 @@ class Settings(BaseSettings):
         description="Score qualità backtest minimo (0–100) per inviare alert pattern.",
     )
     alert_min_strength: float = Field(
-        default=0.60,
+        default=0.65,
         ge=0.0,
         le=1.0,
         description="Pattern strength minima per inviare alert.",
     )
     alert_regime_filter: bool = Field(
         default=True,
-        description="Se true, non inviare alert se direzione pattern non è allineata al regime SPY 1d.",
+        description="Se true, non inviare alert se la direzione non è allineata al regime daily (SPY su Yahoo, BTC/USDT su Binance).",
+    )
+
+    # IBKR Client Portal Gateway (localhost) — esecuzione ordini
+    ibkr_enabled: bool = Field(
+        default=False,
+        description="Abilita integrazione IBKR Client Portal API.",
+    )
+    ibkr_paper_trading: bool = Field(
+        default=True,
+        description="True = paper trading; False = conto reale (richiede approvazione esplicita).",
+    )
+    ibkr_gateway_url: str = Field(
+        default="https://localhost:5000/v1/api",
+        description="Base URL API REST del gateway (tipicamente /v1/api).",
+    )
+    ibkr_gateway_host_header: str = Field(
+        default="",
+        description=(
+            "Se non vuoto, invia questo valore come header HTTP Host (es. localhost:5000). "
+            "Utile con Docker → host.docker.internal se il gateway si aspetta Host localhost."
+        ),
+    )
+    ibkr_debug: bool = Field(
+        default=False,
+        description="Se true, abilita GET /api/v1/ibkr/debug/auth (risposta grezza dal gateway).",
+    )
+    ibkr_account_id: str = Field(
+        default="",
+        description="Account ID IBKR (es. DU… per paper).",
+    )
+    ibkr_auto_execute: bool = Field(
+        default=False,
+        description="Se true, tenta ordini automatici dopo pipeline (solo se ibkr_enabled).",
+    )
+    ibkr_margin_account: bool = Field(
+        default=False,
+        description="Se true, conto margin (short permessi). Cash account → false: auto-execute skippa segnali bearish/short.",
+    )
+    ibkr_max_risk_per_trade_pct: float = Field(
+        default=0.5,
+        ge=0.01,
+        le=100.0,
+        description="Rischio massimo per trade come % del capitale allocato (position sizing).",
+    )
+    ibkr_max_capital: float = Field(
+        default=2269.0,
+        gt=0.0,
+        description="Capitale massimo (notional) da usare per sizing IBKR.",
+    )
+    ibkr_max_simultaneous_positions: int = Field(
+        default=3,
+        ge=1,
+        le=20,
+        description="Massimo posizioni aperte contemporanee (allineato a max_simultaneous backtest).",
     )
 
     @property

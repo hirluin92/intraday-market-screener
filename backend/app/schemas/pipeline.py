@@ -36,7 +36,7 @@ class PipelineRefreshRequest(BaseModel):
         default=2500,
         ge=1,
         le=10_000,
-        description="Barre OHLCV per simbolo/timeframe (ingest). 2500 default; Yahoo 5m usa anche pipeline_ingest_limit_5m.",
+        description="Barre OHLCV per simbolo/timeframe (ingest). 2500 default; Yahoo 5m/15m usa anche pipeline_ingest_limit_5m.",
     )
     extract_limit: int = Field(
         default=5000,

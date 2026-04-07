@@ -1,0 +1,62 @@
+/* Tema dashboard opportunità — scoped sotto .trader-dashboard */
+
+.trader-dashboard {
+  --bg-base: #0a0a0f;
+  --bg-surface: #111118;
+  --bg-surface-2: #16161f;
+  --border: #1e1e2e;
+  --border-active: #2a2a3e;
+  --accent-bull: #00d4aa;
+  --accent-bear: #ff4466;
+  --accent-neutral: #6b7fd7;
+  --text-primary: #f0f0f8;
+  --text-secondary: #6b6b8a;
+  --text-muted: #3a3a52;
+  --glow-bull: 0 0 20px rgba(0, 212, 170, 0.15);
+  --glow-bear: 0 0 20px rgba(255, 68, 102, 0.15);
+}
+
+@keyframes pulse-live {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.5;
+    transform: scale(0.85);
+  }
+}
+
+@keyframes glow-execute {
+  0%,
+  100% {
+    box-shadow: var(--glow-bull);
+  }
+  50% {
+    box-shadow: 0 0 28px rgba(0, 212, 170, 0.28);
+  }
+}
+
+@keyframes slide-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.trader-dashboard .animate-pulse-live {
+  animation: pulse-live 1.4s ease-in-out infinite;
+}
+
+.trader-dashboard .animate-glow-execute {
+  animation: glow-execute 3.2s ease-in-out infinite;
+}
+
+.trader-dashboard .animate-slide-in {
+  animation: slide-in 0.35s ease-out both;
+}

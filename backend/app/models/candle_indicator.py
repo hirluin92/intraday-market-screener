@@ -126,6 +126,49 @@ class CandleIndicator(Base):
         nullable=True,
     )
 
+    # Fair Value Gaps (3-candle imbalance)
+    in_fvg_bullish: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        server_default=text("false"),
+    )
+    in_fvg_bearish: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        server_default=text("false"),
+    )
+    fvg_high: Mapped[Decimal | None] = mapped_column(Numeric(24, 12), nullable=True)
+    fvg_low: Mapped[Decimal | None] = mapped_column(Numeric(24, 12), nullable=True)
+    dist_to_fvg_pct: Mapped[Decimal | None] = mapped_column(Numeric(12, 8), nullable=True)
+    fvg_direction: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    fvg_filled: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        server_default=text("false"),
+    )
+
+    # Order Block (ultima candela opposta prima dell’impulso a 3 barre)
+    in_ob_bullish: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        server_default=text("false"),
+    )
+    in_ob_bearish: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        server_default=text("false"),
+    )
+    ob_high: Mapped[Decimal | None] = mapped_column(Numeric(24, 12), nullable=True)
+    ob_low: Mapped[Decimal | None] = mapped_column(Numeric(24, 12), nullable=True)
+    ob_direction: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    ob_strength: Mapped[Decimal | None] = mapped_column(Numeric(8, 4), nullable=True)
+    ob_filled: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        server_default=text("false"),
+    )
+    dist_to_ob_pct: Mapped[Decimal | None] = mapped_column(Numeric(12, 8), nullable=True)
+
     # Funding rate Binance Futures (solo per provider=binance)
     # Valore grezzo dell'ultimo funding rate prima di questa candela
     funding_rate: Mapped[Decimal | None] = mapped_column(
@@ -162,6 +205,20 @@ class CandleIndicator(Base):
     )
     cvd_5: Mapped[Decimal | None] = mapped_column(
         Numeric(24, 4),
+        nullable=True,
+    )
+
+    # Relative Strength vs SPY (solo Yahoo: rendimento barra - rendimento SPY stesso timestamp)
+    rs_vs_spy: Mapped[Decimal | None] = mapped_column(
+        Numeric(12, 6),
+        nullable=True,
+    )
+    rs_vs_spy_5: Mapped[Decimal | None] = mapped_column(
+        Numeric(12, 6),
+        nullable=True,
+    )
+    rs_signal: Mapped[str | None] = mapped_column(
+        String(16),
         nullable=True,
     )
 

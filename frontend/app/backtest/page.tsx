@@ -5,6 +5,7 @@ import {
   fetchBacktestPatterns,
   type BacktestAggregateRow,
 } from "@/lib/api";
+import { isPatternValidatedForTimeframe } from "@/lib/constants";
 import { timeframeFilterLabel } from "@/lib/displayLabels";
 
 const TIMEFRAMES = ["", "1m", "5m", "15m", "1h", "1d"] as const;
@@ -21,6 +22,31 @@ function fmtPct(v: number | null | undefined, digits = 2): string {
 function fmtWinRate(v: number | null | undefined): string {
   if (v === null || v === undefined) return "—";
   return `${(v * 100).toFixed(1)}%`;
+}
+
+function sampleReliabilityCiClass(
+  rel: string | null | undefined,
+): string {
+  if (rel === "insufficient") return "text-red-400";
+  if (rel === "poor") return "text-orange-400";
+  if (rel === "fair") return "text-yellow-400";
+  return "text-green-400";
+}
+
+function sampleReliabilityBadgeClass(rel: string | null | undefined): string {
+  if (rel === "insufficient") return "bg-red-900 text-red-300";
+  if (rel === "poor") return "bg-orange-900 text-orange-300";
+  if (rel === "fair") return "bg-yellow-900 text-yellow-300";
+  if (rel === "good") return "bg-blue-900 text-blue-300";
+  return "bg-green-900 text-green-300";
+}
+
+function significanceTextClass(sig: string | null | undefined): string {
+  if (sig === "***")
+    return "text-emerald-600 dark:text-emerald-400";
+  if (sig === "**") return "text-sky-600 dark:text-sky-400";
+  if (sig === "*") return "text-amber-600 dark:text-amber-400";
+  return "text-zinc-500 dark:text-zinc-400";
 }
 
 export default function BacktestPage() {
@@ -100,6 +126,10 @@ export default function BacktestPage() {
           <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-500">
             Nota: il backtest pattern mostra rendimenti lordi (senza costi). I costi vengono inclusi
             solo nei backtest trade plan e varianti.
+          </p>
+          <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-500">
+            Significatività (test one-sided, WR &gt; 50% e media return &gt; 0): *** p&lt;0.01 | ** p&lt;0.05 |
+            * p&lt;0.10 | ns = non significativo
           </p>
         </div>
       </header>
@@ -227,6 +257,10 @@ export default function BacktestPage() {
                 </th>
                 <th className="px-3 py-2 font-medium">TF</th>
                 <th className="px-3 py-2 font-medium">Qualità</th>
+                <th className="px-3 py-2 font-medium">IC 95% WR (5→3)</th>
+                <th className="px-3 py-2 font-medium">Affidabilità</th>
+                <th className="px-3 py-2 font-medium">Signif. WR</th>
+                <th className="px-3 py-2 font-medium">Signif. ret</th>
                 <th className="px-3 py-2 font-medium">n</th>
                 <th className="px-3 py-2 font-medium">Media +1</th>
                 <th className="px-3 py-2 font-medium">Media +3</th>
@@ -245,13 +279,82 @@ export default function BacktestPage() {
                   className="border-b border-zinc-100 dark:border-zinc-800/80"
                 >
                   <td className="sticky left-0 bg-[var(--background)] px-3 py-2 font-mono text-xs">
-                    {r.pattern_name}
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <span>{r.pattern_name}</span>
+                      <span
+                        className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${
+                          isPatternValidatedForTimeframe(r.pattern_name, r.timeframe)
+                            ? "bg-emerald-900/50 text-emerald-400"
+                            : "bg-zinc-800 text-zinc-500"
+                        }`}
+                      >
+                        {isPatternValidatedForTimeframe(r.pattern_name, r.timeframe)
+                          ? "Operativo"
+                          : "Dev"}
+                      </span>
+                    </div>
                   </td>
                   <td className="px-3 py-2 font-mono text-xs">{r.timeframe}</td>
                   <td className="px-3 py-2 tabular-nums">
-                    {r.pattern_quality_score != null
-                      ? r.pattern_quality_score.toFixed(1)
-                      : "—"}
+                    {r.pattern_quality_score != null ? (
+                      <span className="font-bold">
+                        {r.pattern_quality_score.toFixed(1)}
+                      </span>
+                    ) : (
+                      "—"
+                    )}
+                  </td>
+                  <td className="px-3 py-2 tabular-nums text-xs">
+                    {r.win_rate_ci_lower != null &&
+                    r.win_rate_ci_upper != null ? (
+                      <span
+                        className={`ml-0 ${sampleReliabilityCiClass(r.sample_reliability)}`}
+                      >
+                        [{r.win_rate_ci_lower.toFixed(0)}%–
+                        {r.win_rate_ci_upper.toFixed(0)}%]
+                      </span>
+                    ) : (
+                      "—"
+                    )}
+                  </td>
+                  <td className="px-3 py-2">
+                    <span
+                      className={`inline-block rounded px-2 py-0.5 text-xs font-medium ${sampleReliabilityBadgeClass(
+                        r.sample_reliability,
+                      )}`}
+                    >
+                      n=
+                      {Math.max(r.sample_size_3, r.sample_size_5)} ·{" "}
+                      {r.sample_reliability ?? "—"}
+                    </span>
+                  </td>
+                  <td className="px-3 py-2 text-xs">
+                    <span
+                      className={`font-mono font-medium ${significanceTextClass(
+                        r.win_rate_significance,
+                      )}`}
+                    >
+                      {r.win_rate_significance ?? "—"}
+                    </span>
+                    {r.win_rate_pvalue != null ? (
+                      <span className="ml-1 text-zinc-500">
+                        p={r.win_rate_pvalue.toFixed(3)}
+                      </span>
+                    ) : null}
+                  </td>
+                  <td className="px-3 py-2 text-xs">
+                    <span
+                      className={`font-mono font-medium ${significanceTextClass(
+                        r.expectancy_r_significance,
+                      )}`}
+                    >
+                      {r.expectancy_r_significance ?? "—"}
+                    </span>
+                    {r.expectancy_r_pvalue != null ? (
+                      <span className="ml-1 text-zinc-500">
+                        p={r.expectancy_r_pvalue.toFixed(3)}
+                      </span>
+                    ) : null}
                   </td>
                   <td className="px-3 py-2 tabular-nums">{r.sample_size}</td>
                   <td className="px-3 py-2 tabular-nums text-xs">

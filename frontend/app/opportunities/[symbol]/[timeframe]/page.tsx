@@ -491,6 +491,7 @@ function SeriesDetailInner() {
             <SeriesCandleChart
               candles={candles}
               patterns={patterns}
+              timeframe={timeframe}
               opportunityContextTimestamp={snapshot.context_timestamp}
             />
           </Section>

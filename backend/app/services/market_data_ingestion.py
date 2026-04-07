@@ -24,6 +24,22 @@ DEFAULT_SYMBOLS = (
     "XRP/USDT",
     "DOGE/USDT",
     "ADA/USDT",
+    # Spot USDT aggiuntivi (refresh manuale / top alts; devono esistere su Binance spot)
+    "APT/USDT",
+    "ARB/USDT",
+    "ATOM/USDT",
+    "AVAX/USDT",
+    "DOT/USDT",
+    "FIL/USDT",
+    "INJ/USDT",
+    "LINK/USDT",
+    "LTC/USDT",
+    "MATIC/USDT",
+    "OP/USDT",
+    "SUI/USDT",
+    "TIA/USDT",
+    "UNI/USDT",
+    "WLD/USDT",
 )
 DEFAULT_TIMEFRAMES = DEFAULT_TIMEFRAMES_TUPLE
 
