@@ -41,6 +41,10 @@ async def execute_pipeline_refresh(
     Run the full pipeline with the same semantics as ``POST /api/v1/pipeline/refresh``.
 
     Raises ``ValueError`` (validation) or ``ccxt.BaseError`` (Binance exchange/network).
+    Provider routing:
+      - "yahoo_finance" → YahooFinanceIngestionService
+      - "alpaca"        → AlpacaIngestionService (incrementale: ultime ~50 barre)
+      - default         → MarketDataIngestionService (Binance ccxt)
     """
     global _legacy_skip_logged_once
 
@@ -61,6 +65,29 @@ async def execute_pipeline_refresh(
             limit=yahoo_ingest_limit,
         )
         ingest_out = await yahoo.ingest(session, ingest_req)
+
+    elif body.provider == "alpaca":
+        from datetime import UTC, timedelta
+
+        from app.services.alpaca_ingestion import AlpacaIngestionService
+
+        alpaca = AlpacaIngestionService()
+        ingest_req = MarketDataIngestRequest(
+            provider="alpaca",
+            symbols=symbols,
+            timeframes=timeframes,
+        )
+        # Aggiornamento incrementale: ultime 2 ore (5m) o 24h (1h) per il ciclo live
+        _tf = body.timeframe or "5m"
+        _window = timedelta(hours=2) if _tf == "5m" else timedelta(hours=26)
+        _now = __import__("datetime").datetime.now(UTC)
+        ingest_out = await alpaca.ingest(
+            session,
+            ingest_req,
+            start=_now - _window,
+            end=_now,
+        )
+
     else:
         service = MarketDataIngestionService()
         ingest_req = MarketDataIngestRequest(

@@ -3,6 +3,7 @@ from datetime import date, datetime, timedelta, timezone
 from dataclasses import asdict
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_db_session
@@ -963,4 +964,105 @@ async def get_trade_plan_variant_backtest(
         pattern_name=pattern_name,
         limit=limit,
         cost_rate=cost_rate,
+    )
+
+
+# ── Alpaca backfill ──────────────────────────────────────────────────────────
+
+class AlpacaBackfillResponse(BaseModel):
+    symbols: list[str]
+    timeframes: list[str]
+    candles_received: int
+    rows_inserted: int
+    start: str
+    end: str
+    feed: str
+    message: str
+
+
+@router.post("/alpaca-backfill", response_model=AlpacaBackfillResponse)
+async def alpaca_backfill(
+    symbols: list[str] | None = Query(
+        default=None,
+        description=(
+            "Simboli US da backfillare (es. AAPL, NVDA). "
+            "Default: tutti i simboli in ALPACA_ALLOWED_SYMBOLS."
+        ),
+    ),
+    timeframes: list[str] | None = Query(
+        default=None,
+        description=(
+            "Timeframe da scaricare: 1m, 5m, 15m, 30m, 1h, 1d. "
+            "Default: 5m, 1h (ottimale per validazione pattern intraday)."
+        ),
+    ),
+    years: int = Query(
+        default=3,
+        ge=1,
+        le=5,
+        description="Anni di storico da scaricare (override ALPACA_BACKFILL_YEARS).",
+    ),
+    session: AsyncSession = Depends(get_db_session),
+) -> AlpacaBackfillResponse:
+    """
+    Scarica e salva lo storico OHLCV Alpaca (US stocks).
+
+    **Requisiti**: ALPACA_ENABLED=true con API key valide in .env.
+
+    **Uso tipico** (backfill iniziale 3 anni di 5m su tutti i simboli):
+    ```
+    POST /api/v1/backtest/alpaca-backfill?timeframes=5m&timeframes=1h&years=3
+    ```
+
+    **Durata**: variabile in base al numero di simboli/timeframe e alla velocità di rete.
+    Per 14 simboli × 5m × 3 anni attendersi ~2-5 minuti.
+    Per l'universo completo (~140 simboli) attendersi 20-40 minuti.
+
+    Dopo il backfill, eseguire il pipeline (POST /api/v1/pipeline/refresh con i simboli
+    e provider=alpaca) per estrarre feature, contesto e pattern sulle nuove barre.
+    """
+    from datetime import UTC
+
+    from app.core.config import settings as cfg
+    from app.schemas.market_data import MarketDataIngestRequest
+    from app.services.alpaca_ingestion import AlpacaIngestionService
+
+    if not cfg.alpaca_enabled:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Alpaca non abilitato. "
+                "Imposta ALPACA_ENABLED=true, ALPACA_API_KEY e ALPACA_API_SECRET in .env "
+                "e riavvia il backend."
+            ),
+        )
+
+    now_utc = datetime.now(UTC).replace(second=0, microsecond=0)
+    start_dt = now_utc - timedelta(days=365 * years)
+
+    req = MarketDataIngestRequest(
+        symbols=symbols or None,
+        timeframes=timeframes or None,
+    )
+
+    service = AlpacaIngestionService()
+    try:
+        result = await service.ingest(session, req, start=start_dt, end=now_utc)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    return AlpacaBackfillResponse(
+        symbols=result.symbols,
+        timeframes=result.timeframes,
+        candles_received=result.candles_received,
+        rows_inserted=result.rows_inserted,
+        start=start_dt.date().isoformat(),
+        end=now_utc.date().isoformat(),
+        feed=cfg.alpaca_feed,
+        message=(
+            f"Backfill completato: {result.candles_received} barre ricevute, "
+            f"{result.rows_inserted} nuovi record inseriti in DB."
+        ),
     )

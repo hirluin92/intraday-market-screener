@@ -211,6 +211,42 @@ SCHEDULER_SYMBOLS_YAHOO_1H: list[tuple[str, str]] = [
     ("SPY", "1h"),
 ]
 
+# Simboli US stocks su Alpaca 5m — rispecchiano SCHEDULER_SYMBOLS_YAHOO_1H per coerenza.
+# Abilitati solo se ALPACA_ENABLED=true in .env.
+# Questi stessi simboli vengono backfillati via POST /api/v1/backtest/alpaca-backfill.
+SCHEDULER_SYMBOLS_ALPACA_5M: list[tuple[str, str]] = [
+    ("GOOGL", "5m"),
+    ("TSLA", "5m"),
+    ("AMD", "5m"),
+    ("META", "5m"),
+    ("NVDA", "5m"),
+    ("NFLX", "5m"),
+    ("COIN", "5m"),
+    ("MSTR", "5m"),
+    ("HOOD", "5m"),
+    ("SHOP", "5m"),
+    ("SOFI", "5m"),
+    ("ZS", "5m"),
+    ("NET", "5m"),
+    ("CELH", "5m"),
+    ("RBLX", "5m"),
+    ("PLTR", "5m"),
+    ("MDB", "5m"),
+    ("SMCI", "5m"),
+    ("DELL", "5m"),
+    ("NVO", "5m"),
+    ("LLY", "5m"),
+    ("MRNA", "5m"),
+    ("NKE", "5m"),
+    ("TGT", "5m"),
+    ("SCHW", "5m"),
+    ("WMT", "5m"),
+    ("SPY", "5m"),
+    ("AAPL", "5m"),
+    ("AMZN", "5m"),
+    ("MSFT", "5m"),
+]
+
 SCHEDULER_SYMBOLS_BINANCE_1H: list[tuple[str, str]] = [
     ("ETH/USDT", "1h"),
     ("DOGE/USDT", "1h"),

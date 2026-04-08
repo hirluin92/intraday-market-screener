@@ -175,7 +175,7 @@ class Settings(BaseSettings):
         description="Score qualità backtest minimo (0–100) per inviare alert pattern.",
     )
     alert_min_strength: float = Field(
-        default=0.65,
+        default=0.70,
         ge=0.0,
         le=1.0,
         description="Pattern strength minima per inviare alert.",
@@ -237,6 +237,116 @@ class Settings(BaseSettings):
         ge=1,
         le=20,
         description="Massimo posizioni aperte contemporanee (allineato a max_simultaneous backtest).",
+    )
+    ibkr_max_spread_pct: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=10.0,
+        description=(
+            "Spread bid/ask massimo tollerato (% del mid-price) per un segnale 'execute'. "
+            "Se spread > soglia, il segnale viene retrocesso a 'monitor' per cattiva liquidità. "
+            "0.0 = filtro disabilitato (default se IBKR non configurato). "
+            "Valori tipici: 0.3 (liquidi) – 0.8 (small cap). "
+            "Richede IBKR_ENABLED=true e Gateway autenticato."
+        ),
+    )
+
+    # ── TWS (Trader Workstation) API ──────────────────────────────────────────
+    tws_enabled: bool = Field(
+        default=False,
+        description=(
+            "Abilita connessione diretta a IBKR Trader Workstation (ib_insync). "
+            "Richiede TWS aperto con API socket abilitata. "
+            "Fornisce bid/ask streaming, market depth Level 2 e storico bid/ask. "
+            "Se false (default), il sistema usa solo Client Portal REST."
+        ),
+    )
+    tws_host: str = Field(
+        default="host.docker.internal",
+        description="Host TWS (host.docker.internal da Docker, localhost da locale).",
+    )
+    tws_port: int = Field(
+        default=7497,
+        description="Porta TWS API (7497 paper trading, 7496 live).",
+    )
+    tws_client_id: int = Field(
+        default=10,
+        ge=1,
+        description=(
+            "Client ID per la connessione TWS API. "
+            "Deve essere diverso da quello usato da altri client (es. TWS stesso usa 0). "
+            "Scegli qualsiasi intero >= 1 non già in uso."
+        ),
+    )
+
+    # ── Alpaca Markets (storico 5m US stocks) ─────────────────────────────────
+    alpaca_enabled: bool = Field(
+        default=False,
+        description=(
+            "Abilita provider Alpaca per ingestion OHLCV US stocks (5m/15m/1h/1d). "
+            "Richiede alpaca_api_key e alpaca_api_secret validi. "
+            "Alpaca free tier (IEX feed): storico ~2-3 anni su 5m — "
+            "ideale per validazione pattern intraday che Yahoo Finance non può fornire (max 60 giorni su 5m)."
+        ),
+    )
+    alpaca_api_key: str = Field(
+        default="",
+        description="Alpaca API Key ID (da https://app.alpaca.markets → Paper o Live).",
+    )
+    alpaca_api_secret: str = Field(
+        default="",
+        description="Alpaca API Secret Key.",
+    )
+    alpaca_base_url: str = Field(
+        default="https://data.alpaca.markets/v2",
+        description=(
+            "Base URL Alpaca Data API v2. "
+            "Default: SIP feed (richiede abbonamento Live). "
+            "Paper account: usa stesso endpoint, dati IEX feed via alpaca_feed=iex."
+        ),
+    )
+    alpaca_feed: str = Field(
+        default="iex",
+        description=(
+            "Feed dati Alpaca: 'iex' (free, dati IEX) o 'sip' (paid, dati SIP National Best Bid/Offer). "
+            "Con account paper/free usare 'iex'."
+        ),
+    )
+    alpaca_backfill_years: int = Field(
+        default=3,
+        ge=1,
+        le=5,
+        description="Anni di storico da backfillare con Alpaca (endpoint /backtest/alpaca-backfill).",
+    )
+
+    # ── ML Signal Scorer ──────────────────────────────────────────────────────
+    ml_model_path: str = Field(
+        default="",
+        description=(
+            "Path al file .pkl del modello LightGBM (da analyze_and_train.py --save-model). "
+            "Se vuoto (default), il ML scorer è disabilitato e ml_score = None. "
+            "Es: eda_output/lgbm_baseline_tp1_hit.pkl"
+        ),
+    )
+    ml_min_score: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Soglia ML minima per mantenere la decisione 'execute' (0.0 = solo annotazione, "
+            "nessun filtro aggiuntivo). Es: 0.55 → i segnali con ml_score < 0.55 "
+            "vengono retrocessi a 'monitor' anche se passano tutti gli altri filtri."
+        ),
+    )
+    ml_min_score_short: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Soglia ML per segnali SHORT (bearish). Se 0.0 usa ml_min_score come fallback. "
+            "Il modello ML è addestrato principalmente su dati BULL: in regime BEAR i punteggi "
+            "per SHORT sono sistematicamente inferiori → usare soglia ridotta (es. 0.40)."
+        ),
     )
 
     @property

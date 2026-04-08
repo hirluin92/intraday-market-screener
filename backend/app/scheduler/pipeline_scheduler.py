@@ -26,6 +26,7 @@ from app.core.market_universe import (
     validate_registry_timeframes,
 )
 from app.core.trade_plan_variant_constants import (
+    SCHEDULER_SYMBOLS_ALPACA_5M,
     SCHEDULER_SYMBOLS_BINANCE_1D_REGIME,
     SCHEDULER_SYMBOLS_BINANCE_1H,
     SCHEDULER_SYMBOLS_YAHOO_1H,
@@ -120,6 +121,20 @@ def _get_symbols_to_refresh() -> list[dict]:
             },
         )
 
+    # Alpaca 5m: aggiunto solo se ALPACA_ENABLED=true (credenziali configurate)
+    if settings.alpaca_enabled:
+        for symbol, timeframe in SCHEDULER_SYMBOLS_ALPACA_5M:
+            symbols.append(
+                {
+                    "provider": "alpaca",
+                    "symbol": symbol,
+                    "timeframe": timeframe,
+                    "ingest_limit": 50,
+                    "extract_limit": 500,
+                    "lookback": 50,
+                },
+            )
+
     return symbols
 
 
@@ -179,10 +194,12 @@ async def _run_scheduled_pipeline_cycle() -> None:
 
     if _uses_explicit_scheduler_list(mode):
         t0 = time.perf_counter()
+        alpaca_count = len(SCHEDULER_SYMBOLS_ALPACA_5M) if settings.alpaca_enabled else 0
         logger.info(
-            "Scheduler ciclo: refreshing %d simboli Yahoo 1h + %d Binance 1h",
+            "Scheduler ciclo: refreshing %d simboli Yahoo 1h + %d Binance 1h%s",
             len(SCHEDULER_SYMBOLS_YAHOO_1H),
             len(SCHEDULER_SYMBOLS_BINANCE_1H),
+            f" + {alpaca_count} Alpaca 5m" if alpaca_count else "",
         )
         try:
             jobs = _resolve_scheduler_jobs()
