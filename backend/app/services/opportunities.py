@@ -5,6 +5,7 @@ Combine latest context snapshots with latest stored pattern per series (MVP, no 
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -15,7 +16,10 @@ from app.core.cache import (
     variant_best_cache,
 )
 from app.core.config import settings
-from app.core.trade_plan_variant_constants import BACKTEST_TOTAL_COST_RATE_DEFAULT
+from app.core.trade_plan_variant_constants import (
+    BACKTEST_TOTAL_COST_RATE_DEFAULT,
+    SIGNAL_MIN_CONFLUENCE,
+)
 from app.models.candle_context import CandleContext
 from app.models.candle_pattern import CandlePattern
 from app.schemas.backtest import PatternBacktestAggregateRow
@@ -23,7 +27,10 @@ from app.schemas.opportunities import OpportunityRow
 from app.schemas.screener import RankedScreenerRow
 from app.services.context_query import list_latest_context_per_series
 from app.services.pattern_backtest import pattern_quality_lookup_by_name_tf
-from app.services.pattern_query import list_latest_pattern_per_series
+from app.services.pattern_query import (
+    count_concurrent_patterns_per_series,
+    list_latest_pattern_per_series,
+)
 from app.services.opportunity_final_score import (
     compute_final_opportunity_score,
     final_opportunity_label_from_score,
@@ -44,6 +51,7 @@ from app.services.trade_plan_live_variant import (
     build_live_trade_plan_for_opportunity,
     load_best_variant_lookup_for_live,
 )
+from app.services.ml_signal_scorer import build_signal_feature_dict, is_enabled as ml_is_enabled, score_signal
 from app.services.operational_decision import map_decision_filter_param
 from app.services.opportunity_validator import validate_opportunity
 from app.services.regime_filter_service import RegimeFilter, load_regime_filter
@@ -53,6 +61,118 @@ from app.services.pattern_staleness import (
 )
 
 logger = logging.getLogger(__name__)
+
+# ── VIX cache: aggiornato al massimo ogni ora per le chiamate live ─────────────
+_vix_history_cache: dict[str, float] = {}
+_vix_cache_ts: float = 0.0
+_VIX_CACHE_TTL_S: float = 3600.0
+
+# ── IBKR spread cache: conid → {spread_pct, volume_live, ts}; TTL 2 min ────────
+# Evita N chiamate a IBKR per lo stesso simbolo nel medesimo ciclo di refresh.
+_spread_cache: dict[int, dict] = {}
+_SPREAD_CACHE_TTL_S: float = 120.0
+
+
+async def _get_vix_history() -> dict[str, float]:
+    """Ritorna la storia VIX (cache con TTL 1h). Non blocca se yfinance fallisce."""
+    import time  # noqa: PLC0415
+    global _vix_history_cache, _vix_cache_ts
+    now = time.monotonic()
+    if now - _vix_cache_ts < _VIX_CACHE_TTL_S and _vix_history_cache:
+        return _vix_history_cache
+    try:
+        import asyncio  # noqa: PLC0415
+        import yfinance as yf  # noqa: PLC0415
+        from datetime import timedelta  # noqa: PLC0415
+
+        def _dl() -> dict[str, float]:
+            # yf.download() per indici come ^VIX produce KeyError('chart') in alcune
+            # versioni di yfinance. Ticker.history() usa un path diverso ed è stabile.
+            df = yf.Ticker("^VIX").history(period="14mo", auto_adjust=False)
+            if df is None or df.empty:
+                return {}
+            close_col = next((c for c in ("Adj Close", "Close") if c in df.columns), df.columns[0])
+            return {idx.strftime("%Y-%m-%d"): float(v) for idx, v in zip(df.index, df[close_col])}
+
+        data = await asyncio.to_thread(_dl)
+        if data:
+            _vix_history_cache = data
+            _vix_cache_ts = now
+    except Exception as exc:
+        logger.debug("_get_vix_history: %s", exc)
+    return _vix_history_cache
+
+
+async def _get_ibkr_spread(symbol: str) -> dict[str, float | None]:
+    """
+    Ritorna bid/ask spread% e volume live per un simbolo.
+
+    Priorità:
+      1. TWS API (ib_insync) — dati streaming reali, se TWS_ENABLED=true
+      2. Client Portal REST — snapshot su richiesta, se IBKR_ENABLED=true
+      3. None — se nessuno disponibile
+
+    Cache per TTL 2 min per simbolo (evita N chiamate nel medesimo ciclo).
+    Non-blocking: restituisce valori None in caso di errore.
+    """
+    import time  # noqa: PLC0415
+
+    _EMPTY: dict[str, float | None] = {"spread_pct": None, "volume_live": None, "bid": None, "ask": None}
+
+    if settings.ibkr_max_spread_pct <= 0.0:
+        return _EMPTY
+
+    # Crypto (Binance) non sono stock — TWS restituirebbe Error 200, Gateway non li conosce
+    _CRYPTO_SUFFIXES = ("/USDT", "/BTC", "/ETH", "/BUSD", "/USD")
+    if any(symbol.upper().endswith(s) for s in _CRYPTO_SUFFIXES):
+        return _EMPTY
+
+    sym_clean = symbol.replace("/USDT", "").replace("/USD", "")
+    cache_key = sym_clean
+    now = time.monotonic()
+    cached = _spread_cache.get(cache_key)
+    if cached and now - cached.get("ts", 0) < _SPREAD_CACHE_TTL_S:
+        return cached
+
+    # ── Tentativo 1: TWS API (dati delayed se non abbonato real-time) ─────
+    try:
+        from app.services.tws_service import get_tws_service  # noqa: PLC0415
+
+        tws = get_tws_service()
+        if tws is not None and tws.is_connected:
+            quote = await tws.get_live_quote(sym_clean)
+            if quote is not None and quote.spread_pct is not None:
+                entry = {
+                    "spread_pct": quote.spread_pct,
+                    "volume_live": quote.volume,
+                    "bid": quote.bid,
+                    "ask": quote.ask,
+                    "source": "tws",
+                    "ts": now,
+                }
+                _spread_cache[cache_key] = entry
+                return entry
+    except Exception as exc:
+        logger.debug("TWS spread check %s: %s", symbol, exc)
+
+    # ── Tentativo 2: Client Portal REST (fallback, solo se Gateway attivo) ─
+    if not settings.ibkr_enabled:
+        return _EMPTY
+    try:
+        from app.services.ibkr_service import get_ibkr_service  # noqa: PLC0415
+
+        svc = get_ibkr_service()
+        conid = await svc.get_conid(sym_clean)
+        if conid is None:
+            return _EMPTY
+
+        snap = await svc.get_spread_snapshot(conid)
+        entry = {**snap, "source": "client_portal", "ts": now}
+        _spread_cache[cache_key] = entry
+        return entry
+    except Exception as exc:
+        logger.debug("_get_ibkr_spread %s: %s", symbol, exc)
+        return _EMPTY
 
 
 def _trade_plan_price_float(value: object | None) -> float | None:
@@ -190,6 +310,7 @@ async def list_opportunities(
     timeframe: str | None,
     limit: int,
     decision: str | None = None,
+    min_confluence_patterns: int | None = None,
 ) -> list[OpportunityRow]:
     contexts: list[CandleContext] = await list_latest_context_per_series(
         session,
@@ -211,6 +332,24 @@ async def list_opportunities(
         _pattern_key(p): p for p in latest_patterns
     }
 
+    # Confluence map: per ogni (exchange, symbol, timeframe) conta i pattern
+    # validati distinti alla barra corrente. Usato da validate_opportunity per
+    # filtrare segnali singoli (rumore) vs multi-segnale (confluenza).
+    try:
+        confluence_map: dict[tuple[str, str, str], int] = (
+            await count_concurrent_patterns_per_series(
+                session,
+                symbol=symbol,
+                exchange=exchange,
+                provider=provider,
+                asset_type=asset_type,
+                timeframe=timeframe,
+            )
+        )
+    except Exception:
+        logger.exception("list_opportunities: count_concurrent_patterns_per_series failed; confluence=1 for all")
+        confluence_map = {}
+
     pq_key = opportunity_lookup_key(
         "pq",
         symbol=symbol,
@@ -221,6 +360,7 @@ async def list_opportunities(
     )
 
     async def _compute_pq() -> dict[tuple[str, str], PatternBacktestAggregateRow]:
+        # dt_to=now(): usa solo pattern storici fino ad ora per evitare look-ahead bias.
         return await pattern_quality_lookup_by_name_tf(
             session,
             symbol=symbol,
@@ -228,6 +368,7 @@ async def list_opportunities(
             provider=provider,
             asset_type=asset_type,
             timeframe=timeframe,
+            dt_to=datetime.now(UTC),
         )
 
     pq_lookup = await pattern_quality_cache.get_or_compute(key=pq_key, compute=_compute_pq)
@@ -254,6 +395,13 @@ async def list_opportunities(
         )
 
     tpb_lookup = await trade_plan_backtest_cache.get_or_compute(key=tpb_key, compute=_compute_tpb)
+
+    # Lookup contesto per series key: usato nel secondo loop (enrichment + ML) per
+    # ricavare il CandleContext corrispondente alla row in elaborazione senza dipendere
+    # dalla variabile di loop del primo ciclo.
+    ctx_by_series: dict[tuple[str, str, str, str], CandleContext] = {
+        (c.provider, c.exchange, c.symbol, c.timeframe): c for c in contexts
+    }
 
     out: list[OpportunityRow] = []
     for ctx in contexts:
@@ -321,6 +469,9 @@ async def list_opportunities(
         pat_stale_thresh = stale_threshold_bars(ctx.timeframe)
         pat_val = pattern_is_validated_for_ui(pn, ctx.timeframe)
         pat_op = pattern_operational_status_for_ui(pn, ctx.timeframe, pq_label)
+        # Confluence count: numero pattern validati distinti attivi nella stessa barra.
+        # Fallback a 1 se la serie non è nella map (nessun pattern validato → già "monitor").
+        conf_count = confluence_map.get((ctx.exchange, ctx.symbol, ctx.timeframe), 1)
         out.append(
             OpportunityRow(
                 asset_type=ctx.asset_type,
@@ -367,6 +518,7 @@ async def list_opportunities(
                 selected_trade_plan_variant_expectancy_r=None,
                 trade_plan_source="default_fallback",
                 trade_plan_fallback_reason=None,
+                confluence_count=conf_count,
                 pattern_is_validated=pat_val,
                 pattern_operational_status=pat_op,
             )
@@ -484,6 +636,8 @@ async def list_opportunities(
             regime_filter=_rf_val,
             timestamp=ts_ref,
             pattern_strength=pat_str_f,
+            confluence_count=row_with_plan.confluence_count,
+            min_confluence_patterns=min_confluence_patterns,
         )
 
         threshold_pct = settings.opportunity_price_staleness_pct
@@ -499,6 +653,22 @@ async def list_opportunities(
         entry_f = _trade_plan_price_float(tp.entry_price) if tp else None
         stop_f = _trade_plan_price_float(tp.stop_loss) if tp else None
         direction = (row_with_plan.latest_pattern_direction or "bullish").strip().lower()
+
+        # ── Staleness pattern: pattern vecchio degrada la decisione ─────────────
+        # pattern_stale=True significa che il segnale è stato rilevato più di
+        # stale_threshold_bars fa — il setup potrebbe già essere scaduto.
+        if row_with_plan.pattern_stale:
+            age = row_with_plan.pattern_age_bars or 0
+            thresh = row_with_plan.pattern_stale_threshold_bars or 0
+            stale_msg = (
+                f"Pattern rilevato {age} barre fa (soglia: {thresh}) — "
+                "il momento ottimale di ingresso potrebbe essere già passato."
+            )
+            if v_dec == "execute":
+                v_dec = "monitor"
+                v_rationale = [stale_msg, "Attendere nuovo segnale o retest.", *list(v_rationale)]
+            elif v_dec == "monitor":
+                v_rationale = [stale_msg, *list(v_rationale)]
 
         if current_price is not None and entry_f is not None and entry_f > 0:
             is_stale, dist_pct, stale_reason = _price_stale_fields(
@@ -520,6 +690,103 @@ async def list_opportunities(
                     "Attendere retest dell'entry o nuovo segnale.",
                     *list(v_rationale),
                 ]
+            # ── Fix 2: price_stale degrada anche monitor → discard ───────────
+            # Se il prezzo è già oltre la soglia di staleness su un setup che
+            # era solo "monitor" (non eseguibile), l'entry è definitivamente
+            # scaduta — non ha senso mostrarlo come opportunità da monitorare.
+            elif v_dec == "monitor" and is_stale and entry_f is not None:
+                reason_line = stale_reason or "Prezzo lontano dall'entry."
+                v_dec = "discard"
+                v_rationale = [
+                    reason_line,
+                    "Entry scaduta — setup non più operabile. Attendere nuovo segnale.",
+                    *list(v_rationale),
+                ]
+
+        # ── ML Score (opzionale, non-blocking) ────────────────────────────────
+        ml_score: float | None = None
+        ml_filter_active = ml_is_enabled() and settings.ml_min_score > 0.0
+        if ml_is_enabled() and row_with_plan.latest_pattern_name:
+            try:
+                vix_hist = await _get_vix_history()
+                _lat_pat = by_series.get(
+                    (row_with_plan.exchange, row_with_plan.symbol, row_with_plan.timeframe)
+                )
+                # Usa il contesto corrispondente a questa row, non la variabile `ctx`
+                # del primo loop (che punterebbe all'ultimo contesto elaborato).
+                _ctx_for_row = ctx_by_series.get(
+                    (row_with_plan.provider, row_with_plan.exchange, row_with_plan.symbol, row_with_plan.timeframe)
+                )
+                feat = build_signal_feature_dict(
+                    pat=_lat_pat,
+                    ind=None,    # CandleIndicator non caricato in questo path (fill 0)
+                    ctx=_ctx_for_row,
+                    candle=c,
+                    regime_filter=_rf_val,
+                    vix_history=vix_hist,
+                    earnings_cal=None,   # non disponibile qui senza fetch aggiuntivo
+                    n_open_positions=0,
+                    capital_available_pct=100.0,
+                    pq_score=row_with_plan.pattern_quality_score,
+                    stop_distance_pct=(
+                        float(abs(tp.entry_price - tp.stop_loss) / tp.entry_price * 100)
+                        if tp and tp.entry_price and tp.stop_loss else None
+                    ),
+                )
+                ml_score = score_signal(feat)
+            except Exception as _ml_exc:
+                logger.debug("ML score skipped for %s: %s", row_with_plan.symbol, _ml_exc)
+
+        if ml_filter_active and ml_score is not None and v_dec == "execute":
+            # Soglia direction-aware: SHORT in regime BEAR usa ml_min_score_short
+            # (il modello è addestrato su dati prevalentemente BULL → punteggi SHORT sistematicamente
+            # inferiori; soglia ridotta evita di bloccare segnali short legittimi in bear market)
+            is_short_signal = (row_with_plan.latest_pattern_direction or "").lower() == "bearish"
+            short_threshold = settings.ml_min_score_short if settings.ml_min_score_short > 0.0 else None
+            effective_threshold = (
+                short_threshold if (is_short_signal and short_threshold is not None)
+                else settings.ml_min_score
+            )
+            if ml_score < effective_threshold:
+                v_dec = "monitor"
+                v_rationale = [
+                    f"ML score {ml_score:.2f} sotto la soglia minima ({effective_threshold:.2f}).",
+                    "Pattern valido ma probabilità ML insufficiente — attendere conferma.",
+                    *list(v_rationale),
+                ]
+
+        # ── IBKR Spread Filter (opzionale, non-blocking) ──────────────────────
+        bid_ask_spread_pct: float | None = None
+        live_volume_ratio: float | None = None
+        ibkr_spread_filter_active = (
+            settings.ibkr_enabled and settings.ibkr_max_spread_pct > 0.0
+        )
+        if ibkr_spread_filter_active and row_with_plan.latest_pattern_name:
+            try:
+                snap = await _get_ibkr_spread(row_with_plan.symbol)
+                bid_ask_spread_pct = snap.get("spread_pct")
+
+                # Calcola live_volume_ratio se abbiamo volume IBKR e candle corrente
+                vol_live = snap.get("volume_live")
+                if vol_live is not None and c is not None:
+                    avg_vol = float(getattr(c, "volume", 0) or 0)
+                    if avg_vol > 0:
+                        live_volume_ratio = round(vol_live / avg_vol, 3)
+
+                # Demotion se spread troppo ampio
+                if (
+                    bid_ask_spread_pct is not None
+                    and bid_ask_spread_pct > settings.ibkr_max_spread_pct
+                    and v_dec == "execute"
+                ):
+                    v_dec = "monitor"
+                    v_rationale = [
+                        f"Spread bid/ask {bid_ask_spread_pct:.2f}% > soglia {settings.ibkr_max_spread_pct:.2f}%.",
+                        "Liquidità insufficiente — slippage potenziale elevato.",
+                        *list(v_rationale),
+                    ]
+            except Exception as _sp_exc:
+                logger.debug("Spread check skipped %s: %s", row_with_plan.symbol, _sp_exc)
 
         enriched.append(
             row_with_plan.model_copy(
@@ -532,6 +799,11 @@ async def list_opportunities(
                     "price_distance_pct": price_distance_pct,
                     "price_stale": price_stale,
                     "price_stale_reason": price_stale_reason,
+                    "ml_score": ml_score,
+                    "ml_filter_active": ml_filter_active,
+                    "bid_ask_spread_pct": bid_ask_spread_pct,
+                    "live_volume_ratio": live_volume_ratio,
+                    "ibkr_spread_filter_active": ibkr_spread_filter_active,
                 },
             ),
         )
@@ -581,6 +853,7 @@ async def list_ranked_screener(
     )
 
     async def _compute_pq_ranked() -> dict[tuple[str, str], PatternBacktestAggregateRow]:
+        # dt_to=now(): stesso allineamento anti-leakage della prima lookup.
         return await pattern_quality_lookup_by_name_tf(
             session,
             symbol=symbol,
@@ -588,6 +861,7 @@ async def list_ranked_screener(
             provider=provider,
             asset_type=None,
             timeframe=timeframe,
+            dt_to=datetime.now(UTC),
         )
 
     pq_lookup = await pattern_quality_cache.get_or_compute(

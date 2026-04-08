@@ -6,12 +6,17 @@ Non blocca il pipeline: errori solo in log.
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime
 from decimal import Decimal
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.core.trade_plan_variant_constants import (
+    VALIDATED_PATTERNS_1H,
+    VALIDATED_PATTERNS_5M,
+)
 from app.models.candle import Candle
 from app.models.candle_context import CandleContext
 from app.models.candle_feature import CandleFeature
@@ -28,13 +33,11 @@ from app.services.trade_plan_backtest import (
 
 logger = logging.getLogger(__name__)
 
-VALID_PATTERNS_1H = frozenset(
-    {
-        "compression_to_expansion_transition",
-        "rsi_momentum_continuation",
-    }
-)
-VALID_PATTERNS_5M = frozenset({"rsi_momentum_continuation"})
+# Fonte unica di verità: importata da trade_plan_variant_constants (stessa lista usata
+# dal validator e dallo screener). Precedentemente hardcodata qui con solo 2 pattern,
+# causando mancato invio di alert per double_bottom/top, divergenze MACD/RSI, ecc.
+VALID_PATTERNS_1H = VALIDATED_PATTERNS_1H
+VALID_PATTERNS_5M = VALIDATED_PATTERNS_5M
 
 
 def _f_dec(x: Decimal | None) -> float | None:
@@ -100,6 +103,17 @@ async def maybe_send_pattern_alerts_after_pipeline(
         if not rows:
             return
 
+        # dt_to: limita il lookup al timestamp della barra piu' recente nel batch.
+        # Evita che la quality_score usi dati "futuri" rispetto al segnale valutato
+        # (stesso meccanismo anti-leakage di OOS/walk-forward).
+        alert_dt_to: datetime | None = None
+        if rows:
+            ts_vals = [pat.timestamp for pat, _c, _ctx in rows if pat.timestamp]
+            if ts_vals:
+                alert_dt_to = max(ts_vals)
+                if alert_dt_to.tzinfo is None:
+                    alert_dt_to = alert_dt_to.replace(tzinfo=UTC)
+
         pq_lookup = await pattern_quality_lookup_by_name_tf(
             session,
             symbol=body.symbol,
@@ -107,6 +121,7 @@ async def maybe_send_pattern_alerts_after_pipeline(
             provider=body.provider,
             asset_type=None,
             timeframe=body.timeframe,
+            dt_to=alert_dt_to,
         )
 
         regime_filter = await load_regime_filter(session, provider=body.provider)

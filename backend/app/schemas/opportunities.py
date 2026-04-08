@@ -228,6 +228,14 @@ class OpportunityRow(BaseModel):
             "True se la direzione è consentita dal filtro SPY (solo Yahoo); su Binance sempre coerente (n/a)."
         ),
     )
+    confluence_count: int = Field(
+        default=1,
+        description=(
+            "Numero di pattern VALIDATI distinti attivi nella stessa barra 1h per questo simbolo. "
+            "confluence_count >= SIGNAL_MIN_CONFLUENCE (default=2) è richiesto per 'execute'. "
+            "Valore 1 = singolo segnale (può restare 'monitor' per il filtro confluenza)."
+        ),
+    )
     pattern_is_validated: bool = Field(
         default=False,
         description=(
@@ -241,6 +249,44 @@ class OpportunityRow(BaseModel):
             "operational = pattern validato con edge reale; "
             "development = implementato ma non nella lista validata; "
             "experimental = storico/qualità insufficiente (es. insufficient/unknown)."
+        ),
+    )
+    ml_score: float | None = Field(
+        default=None,
+        description=(
+            "Probabilità predetta dal modello ML (0-1, target tp1_hit). "
+            "None se ML_MODEL_PATH non configurato o modello non disponibile. "
+            "Valore informativo — il filtro attivo dipende da ML_MIN_SCORE."
+        ),
+    )
+    ml_filter_active: bool = Field(
+        default=False,
+        description=(
+            "True se ML_MIN_SCORE > 0 e il modello è caricato. "
+            "Indica che la decisione operativa tiene conto del ml_score."
+        ),
+    )
+    bid_ask_spread_pct: float | None = Field(
+        default=None,
+        description=(
+            "Spread bid/ask live da IBKR al momento dello scoring (% del mid-price). "
+            "None se IBKR non disponibile, mercato chiuso, o symbol non quotato. "
+            "Spread ampio (> IBKR_MAX_SPREAD_PCT) retrocede il segnale a 'monitor'."
+        ),
+    )
+    live_volume_ratio: float | None = Field(
+        default=None,
+        description=(
+            "Volume cumulato oggi (IBKR) / volume medio giornaliero (MA20 da candele DB). "
+            "Valori < 0.3 indicano liquidità molto bassa. "
+            "None se dati IBKR o MA volume non disponibili."
+        ),
+    )
+    ibkr_spread_filter_active: bool = Field(
+        default=False,
+        description=(
+            "True se IBKR_MAX_SPREAD_PCT > 0 e IBKR è connesso. "
+            "Indica che la decisione operativa tiene conto dello spread live."
         ),
     )
 

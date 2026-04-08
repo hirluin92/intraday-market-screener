@@ -8,8 +8,8 @@ Campi simulati dal piano: ``trade_direction``, ``entry_strategy``, ``entry_price
 - **Ingresso**: tocco del prezzo a ``entry_price``; per ``entry_strategy == close`` la ricerca
   parte dalla **prima barra dopo** il segnale (conferma dopo chiusura barra); per ``breakout`` /
   ``retest`` anche il bar del segnale è ammesso se il range tocca il livello.
-- **Uscita**: stessa candela — stop prima (pessimistico); poi TP2 prima di TP1 se il movimento
-  tocca entrambi (obiettivo pieno TP2).
+- **Uscita**: stessa candela — stop prima (conservativo); poi TP1 prima di TP2 se entrambi
+  toccati (si assume il target più vicino raggiunto per primo).
 
 MVP: niente persistenza; aggregati on-demand come ``run_pattern_backtest``.
 """
@@ -17,6 +17,8 @@ MVP: niente persistenza; aggregati on-demand come ``run_pattern_backtest``.
 from __future__ import annotations
 
 from collections import defaultdict
+from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal
 from typing import Any, Literal
 
@@ -55,6 +57,18 @@ MAX_BARS_ENTRY_SCAN = 20
 MAX_BARS_AFTER_ENTRY = 48
 
 Outcome = Literal["stop", "tp1", "tp2", "timeout"]
+
+
+@dataclass(frozen=True, slots=True)
+class TradePlanExecutionResult:
+    """Risultato simulazione forward con barre di ingresso/uscita (per tracking capitale)."""
+
+    pnl_r: float
+    outcome: Outcome
+    entry_bar_index: int
+    exit_bar_index: int
+    entry_timestamp: datetime
+    exit_timestamp: datetime
 
 
 def _cost_r(entry: Decimal, risk: Decimal, cost_rate: float) -> float:
@@ -132,27 +146,32 @@ def _simulate_long_after_entry(
     tp2: Decimal,
     max_bars: int,
     cost_rate: float = 0.0,
-) -> tuple[Outcome, float]:
+) -> tuple[Outcome, float, int]:
     """
     Long: stop sotto; TP sopra (tp1 più vicino, tp2 più lontano).
-    Stessa candela: stop prima (pessimistico); poi TP2 prima di TP1 se entrambi
-    toccati — interpretazione «obiettivo pieno TP2» quando il movimento arriva in alto.
+    Stessa candela: stop prima; poi TP1 prima di TP2 se entrambi toccati (conservativo).
+    Ritorna anche l'indice della candela di uscita.
     """
     risk = entry - stop
     cr = _cost_r(entry, risk, cost_rate)
     if risk <= 0:
-        return "stop", -(1.0 + cr)
+        return "stop", -(1.0 + cr), entry_idx
     end = min(entry_idx + max_bars, len(candles))
     for k in range(entry_idx, end):
         c = candles[k]
         lo, hi = _d(c.low), _d(c.high)
+        # Stop ha priorità su qualsiasi TP (conservativo).
         if lo <= stop:
-            return "stop", -(1.0 + cr)
+            return "stop", -(1.0 + cr), k
+        # TP2 (più lontano) controllato PRIMA di TP1: se hi >= tp2 > tp1,
+        # senza questo ordine il check su tp1 scatterebbe sempre per primo
+        # e tp2 risulterebbe irraggiungibile come outcome separato.
         if hi >= tp2:
-            return "tp2", float((tp2 - entry) / risk) - cr
+            return "tp2", float((tp2 - entry) / risk) - cr, k
         if hi >= tp1:
-            return "tp1", float((tp1 - entry) / risk) - cr
-    return "timeout", -cr
+            return "tp1", float((tp1 - entry) / risk) - cr, k
+    last_k = entry_idx if end <= entry_idx else end - 1
+    return "timeout", -cr, last_k
 
 
 def _simulate_short_after_entry(
@@ -165,26 +184,32 @@ def _simulate_short_after_entry(
     tp2: Decimal,
     max_bars: int,
     cost_rate: float = 0.0,
-) -> tuple[Outcome, float]:
+) -> tuple[Outcome, float, int]:
     """
     Short: stop sopra; TP sotto (tp1 più vicino al prezzo, tp2 più lontano in basso).
-    Stessa candela: stop prima; poi TP2 prima di TP1 se il ribasso tocca entrambi.
+    Stessa candela: stop prima; poi TP1 prima di TP2 se entrambi toccati (conservativo).
+    Ritorna anche l'indice della candela di uscita.
     """
     risk = stop - entry
     cr = _cost_r(entry, risk, cost_rate)
     if risk <= 0:
-        return "stop", -(1.0 + cr)
+        return "stop", -(1.0 + cr), entry_idx
     end = min(entry_idx + max_bars, len(candles))
     for k in range(entry_idx, end):
         c = candles[k]
         lo, hi = _d(c.low), _d(c.high)
+        # Stop ha priorità su qualsiasi TP (conservativo).
         if hi >= stop:
-            return "stop", -(1.0 + cr)
+            return "stop", -(1.0 + cr), k
+        # TP2 (più lontano per short = prezzo più basso) controllato PRIMA di TP1:
+        # senza questo ordine il check su tp1 scatterebbe sempre per primo
+        # e tp2 risulterebbe irraggiungibile come outcome separato.
         if lo <= tp2:
-            return "tp2", float((entry - tp2) / risk) - cr
+            return "tp2", float((entry - tp2) / risk) - cr, k
         if lo <= tp1:
-            return "tp1", float((entry - tp1) / risk) - cr
-    return "timeout", -cr
+            return "tp1", float((entry - tp1) / risk) - cr, k
+    last_k = entry_idx if end <= entry_idx else end - 1
+    return "timeout", -cr, last_k
 
 
 def _eligible_plan(plan: TradePlanV1) -> bool:
@@ -229,7 +254,7 @@ def _simulate_one(
         return False, None, None
 
     if plan.trade_direction == "long":
-        out, r = _simulate_long_after_entry(
+        out, r, _exit_k = _simulate_long_after_entry(
             candles,
             entry_bar,
             entry=entry_px,
@@ -240,7 +265,7 @@ def _simulate_one(
             cost_rate=cost_rate,
         )
         return True, out, r
-    out, r = _simulate_short_after_entry(
+    out, r, _exit_k = _simulate_short_after_entry(
         candles,
         entry_bar,
         entry=entry_px,
@@ -251,6 +276,67 @@ def _simulate_one(
         cost_rate=cost_rate,
     )
     return True, out, r
+
+
+def _simulate_one_with_timing(
+    candles: list[Candle],
+    pattern_idx: int,
+    plan: TradePlanV1,
+    cost_rate: float = 0.0,
+) -> TradePlanExecutionResult | None:
+    """
+    Come ``_simulate_one`` ma con timestamp barra ingresso/uscita reali dalla serie candele.
+    """
+    if not _eligible_plan(plan):
+        return None
+    assert plan.entry_price is not None
+    assert plan.stop_loss is not None
+    assert plan.take_profit_1 is not None
+    assert plan.take_profit_2 is not None
+
+    entry_px = _d(plan.entry_price)
+    stop = _d(plan.stop_loss)
+    tp1 = _d(plan.take_profit_1)
+    tp2 = _d(plan.take_profit_2)
+
+    scan_from = _entry_scan_start_idx(pattern_idx, plan.entry_strategy)
+    entry_bar = _find_entry_bar(candles, scan_from, entry_px, MAX_BARS_ENTRY_SCAN)
+    if entry_bar is None:
+        return None
+
+    if plan.trade_direction == "long":
+        out, r, exit_k = _simulate_long_after_entry(
+            candles,
+            entry_bar,
+            entry=entry_px,
+            stop=stop,
+            tp1=tp1,
+            tp2=tp2,
+            max_bars=MAX_BARS_AFTER_ENTRY,
+            cost_rate=cost_rate,
+        )
+    else:
+        out, r, exit_k = _simulate_short_after_entry(
+            candles,
+            entry_bar,
+            entry=entry_px,
+            stop=stop,
+            tp1=tp1,
+            tp2=tp2,
+            max_bars=MAX_BARS_AFTER_ENTRY,
+            cost_rate=cost_rate,
+        )
+
+    ec = candles[entry_bar]
+    xc = candles[exit_k]
+    return TradePlanExecutionResult(
+        pnl_r=r,
+        outcome=out,
+        entry_bar_index=entry_bar,
+        exit_bar_index=exit_k,
+        entry_timestamp=ec.timestamp,
+        exit_timestamp=xc.timestamp,
+    )
 
 
 def simulate_trade_plan_forward(
@@ -321,6 +407,25 @@ def build_trade_plan_v1_for_stored_pattern(
     )
 
 
+def compute_trade_plan_execution_from_pattern_row(
+    pat: CandlePattern,
+    candle: Candle,
+    ctx: CandleContext,
+    clist: list[Candle],
+    idx: int,
+    pq_lookup: dict[tuple[str, str], PatternBacktestAggregateRow],
+    cost_rate: float,
+) -> TradePlanExecutionResult | None:
+    """
+    Simulazione forward con barre ingresso/uscita (stesso motore di ``_simulate_one``).
+    ``None`` se piano non idoneo o ingresso non triggerato.
+    """
+    plan = build_trade_plan_v1_for_stored_pattern(pat, candle, ctx, pq_lookup)
+    if not _eligible_plan(plan):
+        return None
+    return _simulate_one_with_timing(clist, idx, plan, cost_rate=cost_rate)
+
+
 def compute_trade_plan_pnl_from_pattern_row(
     pat: CandlePattern,
     candle: Candle,
@@ -334,13 +439,12 @@ def compute_trade_plan_pnl_from_pattern_row(
     R (multiplo) e outcome forward come ``run_trade_plan_backtest`` / ``_simulate_one``.
     ``None`` se piano non idoneo o ingresso non triggerato. I costi sono già inclusi in R (``_cost_r``).
     """
-    plan = build_trade_plan_v1_for_stored_pattern(pat, candle, ctx, pq_lookup)
-    if not _eligible_plan(plan):
+    ex = compute_trade_plan_execution_from_pattern_row(
+        pat, candle, ctx, clist, idx, pq_lookup, cost_rate
+    )
+    if ex is None:
         return None
-    entry_ok, outcome, r_mult = _simulate_one(clist, idx, plan, cost_rate=cost_rate)
-    if not entry_ok or outcome is None or r_mult is None:
-        return None
-    return r_mult, outcome
+    return ex.pnl_r, ex.outcome
 
 
 async def run_trade_plan_backtest(
@@ -390,6 +494,10 @@ async def run_trade_plan_backtest(
             backtest_cost_rate_rt=cost_rate,
         )
 
+    # Nota: quality lookup calcolata sull'INTERO storico disponibile (nessun dt_to).
+    # Introduce un look-ahead bias moderato: i pattern di backtest più vecchi ricevono
+    # un pq_score calcolato su campioni successivi a loro stessi. Per un'analisi
+    # rigorosa senza look-ahead usare run_simulation con use_temporal_quality=True.
     pq_lookup = await pattern_quality_lookup_by_name_tf(
         session,
         symbol=symbol,

@@ -65,12 +65,41 @@ TP_PROFILE_CONFIGS: tuple[tuple[str, float, float], ...] = (
 # Opportunità live — pattern e universo allineati a simulazione / OOS (aprile 2026)
 # ---------------------------------------------------------------------------
 # Soglia minima pattern strength per execute (validator) e default operativo alert.
-SIGNAL_MIN_STRENGTH: float = 0.65
+SIGNAL_MIN_STRENGTH: float = 0.70
+
+# Numero minimo di pattern distinti VALIDATI che devono risultare attivi nella
+# stessa barra 1h per lo stesso simbolo prima che il segnale venga promosso
+# a "execute". Valore 1 = nessun filtro (backward-compatible).
+# Validato via OOS: min_confluence=2 → TEST EV +0.478R (+95.3%), WR 58.4%,
+# PF 2.82, DD -19.8% — robusto su walk-forward (apr 2026).
+SIGNAL_MIN_CONFLUENCE: int = 2
 
 VALIDATED_PATTERNS_1H: frozenset[str] = frozenset(
     {
+        # ── Pattern universali (attivi in qualsiasi regime) ──────────────────────
+        # WR 67% / EV +0.45R — top assoluto, confermato OOS
         "compression_to_expansion_transition",
+        # WR 56% / EV +0.30R — secondo, confermato OOS
         "rsi_momentum_continuation",
+        # WR 65% / EV +0.55R — migliore nuovo pattern v2, robusto in tutti i regimi
+        "double_bottom",
+        # WR 61% / EV +0.41R — speculare, robusto in tutti i regimi
+        "double_top",
+        # fibonacci_bounce → SOSPESO (apr 2026): EV isolato +0.218R OOS ma EV portafoglio
+        # = -0.580R nel test (apr 2025–apr 2026). Blocca slot track_capital per molte barre
+        # con trade aperti a lungo (SL/TP generici + strength bassa → outcompetuto sempre).
+        # Da riesaminare con allocazione dedicata + SL/TP ottimizzati per isolamento.
+        # ── Pattern regime-dipendenti (attivi solo se regime corretto) ────────────
+        # Regime BEAR: WR 67% / EV +0.16R — inversione istituzionale contro trend
+        "engulfing_bullish",
+        # Regime BEAR: WR 71% / EV +0.86R — divergenza MACD in mercato ribassista
+        "macd_divergence_bull",
+        # Regime BEAR: WR 64% / EV +0.68R — divergenza RSI in mercato ribassista
+        "rsi_divergence_bull",
+        # Universale SHORT: WR 58% bull / 58% bear — EV +0.40R bull / +0.22R bear
+        "rsi_divergence_bear",
+        # Universale SHORT: WR 59% bull / 53% bear — EV +0.37R bull / +0.25R bear
+        "macd_divergence_bear",
     }
 )
 
@@ -196,41 +225,138 @@ SCHEDULER_SYMBOLS_BINANCE_1D_REGIME: list[tuple[str, str]] = [
     ("BTC/USDT", "1d"),
 ]
 
-# Pattern con edge reale confermato da simulazione OOS (nomi; la validità per TF usa VALIDATED_PATTERNS_1H / 5M).
-# Aggiornato aprile 2026 dopo walk-forward e stress test.
+# ---------------------------------------------------------------------------
+# Pattern con edge reale confermato da analisi dataset + simulazione OOS.
+# Aggiornato aprile 2026 dopo analisi dataset 26.714 segnali (WR per pattern).
+#
+# LONG patterns promossi:
+#   compression_to_expansion_transition  63% WR (n=932)
+#   rsi_momentum_continuation            61% WR (n=581)
+#   hammer_reversal                      57% WR (n=69)   ← soglia campione bassa
+#   fibonacci_bounce                     54% WR (n=179)
+#   engulfing_bullish                    52% WR (n=1331)
+#
+# SHORT patterns promossi:
+#   compression_to_expansion_transition  55% WR (n=898)  ← funziona short!
+#   rsi_momentum_continuation            53% WR (n=478)  ← funziona short!
+#   engulfing_bearish                    45% WR (n=1263)
+#   shooting_star_reversal               45% WR (n=66)   ← soglia campione bassa
+#
+# ESCLUSI (WR < 40%):
+#   impulsive_bearish_candle   32% WR (n=3646) ← il principale trascinatore negativo
+#   opening_range_breakout_bear 32% WR (n=1684)
+#   breakout_with_retest short  29% WR (n=455)
+#   evening_star               37% WR (n=240)
+# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Classificazione aggiornata aprile 2026 dopo analisi per regime SPY su 38k+ segnali v2.
+#
+# PATTERN UNIVERSALI (EV > +0.40R in tutti i regimi, n > 600):
+#   double_bottom   WR=64.5% EV=+0.55R (bull+0.50 / bear+0.60 / late+0.44)
+#   double_top      WR=60.9% EV=+0.41R (bull+0.42 / bear+0.39 / late+0.43)
+#   [fibonacci_bounce sospeso: EV portafoglio = -0.580R nel test apr 2025–26 → in sviluppo]
+#
+# PATTERN REGIME-CONDIZIONALI (EV molto diverso per regime):
+#   macd_divergence_bull  bear+0.86R★★★  bull+0.18R★★  → attivo solo in BEAR
+#   rsi_divergence_bull   bear+0.68R★★★  bull+0.11R★   → attivo solo in BEAR
+#   engulfing_bullish     bear+0.155R★★  bull=-0.13R✗  → attivo solo in BEAR
+#
+# PATTERN SHORT UNIVERSALI (EV positivo in entrambi i regimi — testato apr 2026):
+#   rsi_divergence_bear   bull+0.40R★★★  bear+0.22R★★  → attivo in QUALSIASI regime
+#   macd_divergence_bear  bull+0.37R★★★  bear+0.25R★★  → attivo in QUALSIASI regime
+#
+# BLOCCATI (EV ~0 su n > 1000):
+#   volatility_squeeze_breakout  EV=+0.04R  n=10211
+#   nr7_breakout                 EV=+0.04R  n=3350
+# ---------------------------------------------------------------------------
 VALIDATED_PATTERNS_OPERATIONAL: frozenset[str] = frozenset(
     {
-        "compression_to_expansion_transition",
-        "rsi_momentum_continuation",
+        # Sempre attivi (qualsiasi regime): WR>50%, EV>+0.15R confermato OOS
+        "compression_to_expansion_transition",  # WR 67% / EV +0.45R — top assoluto
+        "rsi_momentum_continuation",            # WR 56% / EV +0.30R — secondo
+        "double_bottom",                        # WR 65% / EV +0.55R — nuovo top, universale
+        "double_top",                           # WR 61% / EV +0.41R — robusto in tutti i regimi
+        # fibonacci_bounce → SOSPESO: EV portafoglio = -0.580R OOS test set (apr 2026)
+        # Attivo solo in regime BEAR (logica nel validator)
+        "engulfing_bullish",                    # WR 67% / EV +0.155R in bear
+        "macd_divergence_bull",                 # WR 71% / EV +0.86R in bear
+        "rsi_divergence_bull",                  # WR 64% / EV +0.68R in bear
+        # SHORT divergenze — attivi in qualsiasi regime (EV positivo in entrambi)
+        # bear: WR=58% EV=+0.22R | bull: WR=58% EV=+0.40R  → universo completo
+        "rsi_divergence_bear",
+        # bear: WR=53% EV=+0.25R | bull: WR=59% EV=+0.37R  → universo completo
+        "macd_divergence_bear",
     }
 )
 
-# Pattern in sviluppo — rilevati ma non operativi nella lista validata.
+# Pattern attivi SOLO in regime BEAR (EV positivo in bear, neutro/negativo in bull)
+PATTERNS_BEAR_REGIME_ONLY: frozenset[str] = frozenset(
+    {
+        "engulfing_bullish",     # bear: WR=67% EV=+0.16R | bull: WR=50% EV=-0.13R
+        "macd_divergence_bull",  # bear: WR=71% EV=+0.86R | bull: WR=47% EV=+0.18R
+        "rsi_divergence_bull",   # bear: WR=64% EV=+0.68R | bull: WR=44% EV=+0.11R
+    }
+)
+
+# Pattern con EV più alto in regime BULL ma comunque positivi anche in BEAR.
+# Trattati come universali dal validator: fire in qualsiasi regime (EV > 0).
+# La differenza di edge per regime viene comunicata nella rationale.
+PATTERNS_BULL_REGIME_ONLY: frozenset[str] = frozenset(
+    {
+        # rsi_divergence_bear   → spostato in universali (EV bear=+0.22R confermato)
+        # macd_divergence_bear  → spostato in universali (EV bear=+0.25R confermato)
+    }
+)
+
+# Pattern in sviluppo — campione insufficiente o EV non ancora confermato OOS.
+# Monitorati ma non eseguiti. Valutare dopo 200+ segnali eseguiti.
 PATTERNS_IN_DEVELOPMENT: frozenset[str] = frozenset(
     {
-        "impulsive_bullish_candle",
-        "impulsive_bearish_candle",
-        "engulfing_bullish",
-        "engulfing_bearish",
-        "hammer_reversal",
-        "shooting_star_reversal",
-        "morning_star",
-        "evening_star",
-        "bull_flag",
-        "bear_flag",
-        "inside_bar_breakout_bull",
-        "support_bounce",
-        "resistance_rejection",
-        "breakout_with_retest",
-        "vwap_bounce_bull",
-        "vwap_bounce_bear",
-        "opening_range_breakout_bull",
-        "opening_range_breakout_bear",
+        "hammer_reversal",               # WR 57% ctf, n=4 eseguiti — campione troppo piccolo
+        # fibonacci_bounce: EV isolato OOS +0.218R (robusto) MA EV portfolio = -0.580R nel test
+        # apr 2025–apr 2026. Causa: strength bassa (avg 0.654, max 0.732) → outcompetuto nei
+        # bar con competizione, ma quando vince il slot (pochi bar) ha EV negativo.
+        # Riesaminare: (1) SL/TP dedicati ottimizzati, (2) allocazione isolata senza concorrenza.
         "fibonacci_bounce",
+        "engulfing_bearish",             # WR 45% ctf — da validare
+        "shooting_star_reversal",        # WR 45% ctf — da validare
+        "morning_star",
+        "vwap_bounce_bull",
+        "ob_retest_bull",
+        "ob_retest_bear",
         "trend_continuation_pullback",
         "ema_pullback_to_support",
         "ema_pullback_to_resistance",
+        "fvg_retest_bull",
+        "fvg_retest_bear",
+        "resistance_rejection",
+        "support_bounce",
+        # Liquidity sweep: campione troppo piccolo (n=7-10) per decidere
+        "liquidity_sweep_bull",          # EV +0.42R ma n=7 — non sufficiente
+        "liquidity_sweep_bear",          # EV +0.37R ma n=10 — non sufficiente
+    }
+)
+
+# Pattern da NON tradare — EV quasi zero su campione grande o WR < 40% confermato.
+PATTERNS_BLOCKED: frozenset[str] = frozenset(
+    {
+        "impulsive_bearish_candle",       # 32% WR, n=3646 — il principale problema
+        "opening_range_breakout_bear",    # 32% WR, n=1684
+        "breakout_with_retest",           # 37% short (29%), 43% long — edge insufficiente
+        "evening_star",                   # 37% WR, n=240
+        "impulsive_bullish_candle",       # 41% WR, n=4057 — sotto breakeven
+        "vwap_bounce_bear",               # 38% WR
+        "bull_flag",
+        "bear_flag",
         "range_expansion_breakout_candidate",
+        # Nuovi v2 con EV ~0 su campione grande — non producono edge reale
+        "volatility_squeeze_breakout",    # EV=+0.04R, n=10211 — troppi segnali, troppo rumore
+        "nr7_breakout",                   # EV=+0.04R, n=3350 — definizione troppo generica
+        # Quality score alta (84.69) ma EV simulazione NEGATIVO: SL troppo stretto causa
+        # troppi stop prima del TP. Rivalutare solo con SL/TP ottimizzati per questo pattern.
+        "opening_range_breakout_bull",    # EV train=-0.099R, EV test=-0.148R — OOS apr 2026
+        # EV quasi zero in simulazione (train=-0.099R, test=+0.012R) — edge insufficiente.
+        "inside_bar_breakout_bull",       # EV train=-0.099R, EV test=+0.012R — OOS apr 2026
     }
 )
 

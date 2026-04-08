@@ -1,7 +1,13 @@
+from datetime import datetime
+from typing import Optional
+
 from fastapi import APIRouter, Depends, Query
+from pydantic import BaseModel
+from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_db_session
+from app.models.executed_signal import ExecutedSignal
 from app.schemas.context import LatestContextSnapshot, LatestScreenerResponse
 from app.schemas.timeframe_fields import OptionalAllMarketsTimeframe
 from app.schemas.opportunities import OpportunitiesResponse
@@ -24,6 +30,7 @@ async def _opportunities_response(
     timeframe: OptionalAllMarketsTimeframe,
     limit: int,
     decision: str | None,
+    min_confluence: int | None = None,
 ) -> OpportunitiesResponse:
     rows = await list_opportunities(
         session,
@@ -34,6 +41,7 @@ async def _opportunities_response(
         timeframe=timeframe,
         limit=limit,
         decision=decision,
+        min_confluence_patterns=min_confluence,
     )
     return OpportunitiesResponse(opportunities=rows, count=len(rows))
 
@@ -141,6 +149,17 @@ async def get_opportunities(
             "(operabile, da_monitorare, scartare). Alias: operable → execute."
         ),
     ),
+    min_confluence: int | None = Query(
+        default=None,
+        ge=1,
+        le=10,
+        description=(
+            "Override soglia confluenza: numero minimo di pattern validati distinti "
+            "nella stessa barra per promuovere il segnale a 'execute'. "
+            "Default: valore globale SIGNAL_MIN_CONFLUENCE (attualmente 2). "
+            "Usa 1 per disabilitare il filtro."
+        ),
+    ),
     session: AsyncSession = Depends(get_db_session),
 ) -> OpportunitiesResponse:
     return await _opportunities_response(
@@ -152,6 +171,7 @@ async def get_opportunities(
         timeframe=timeframe,
         limit=limit,
         decision=decision,
+        min_confluence=min_confluence,
     )
 
 
@@ -185,6 +205,17 @@ async def get_opportunities_short_path(
             "(operabile, da_monitorare, scartare). Alias: operable → execute."
         ),
     ),
+    min_confluence: int | None = Query(
+        default=None,
+        ge=1,
+        le=10,
+        description=(
+            "Override soglia confluenza: numero minimo di pattern validati distinti "
+            "nella stessa barra per promuovere il segnale a 'execute'. "
+            "Default: valore globale SIGNAL_MIN_CONFLUENCE (attualmente 2). "
+            "Usa 1 per disabilitare il filtro."
+        ),
+    ),
     session: AsyncSession = Depends(get_db_session),
 ) -> OpportunitiesResponse:
     return await _opportunities_response(
@@ -196,4 +227,54 @@ async def get_opportunities_short_path(
         timeframe=timeframe,
         limit=limit,
         decision=decision,
+        min_confluence=min_confluence,
+    )
+
+# ── Executed signals ──────────────────────────────────────────────────────────
+
+class ExecutedSignalRow(BaseModel):
+    id: int
+    symbol: str
+    timeframe: str
+    provider: str
+    exchange: str
+    direction: str
+    pattern_name: str
+    pattern_strength: Optional[float]
+    opportunity_score: Optional[float]
+    entry_price: float
+    stop_price: float
+    take_profit_1: Optional[float]
+    take_profit_2: Optional[float]
+    quantity_tp1: Optional[float]
+    entry_order_id: Optional[int]
+    tp_order_id: Optional[int]
+    sl_order_id: Optional[int]
+    tws_status: str
+    error: Optional[str]
+    executed_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class ExecutedSignalsResponse(BaseModel):
+    signals: list[ExecutedSignalRow]
+    count: int
+
+
+@router.get("/executed-signals", response_model=ExecutedSignalsResponse)
+async def get_executed_signals(
+    symbol: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=500),
+    session: AsyncSession = Depends(get_db_session),
+) -> ExecutedSignalsResponse:
+    stmt = select(ExecutedSignal).order_by(desc(ExecutedSignal.executed_at)).limit(limit)
+    if symbol:
+        stmt = stmt.where(ExecutedSignal.symbol == symbol.strip().upper())
+    result = await session.execute(stmt)
+    rows = result.scalars().all()
+    return ExecutedSignalsResponse(
+        signals=[ExecutedSignalRow.model_validate(r) for r in rows],
+        count=len(rows),
     )

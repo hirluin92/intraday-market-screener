@@ -64,6 +64,7 @@ class WalkForwardResult:
     overall_verdict: OverallVerdict
     date_range_start: str
     date_range_end: str
+    track_capital: bool
 
 
 async def run_walk_forward(
@@ -82,6 +83,9 @@ async def run_walk_forward(
     include_hours: list[int] | None = None,
     exclude_symbols: list[str] | None = None,
     include_symbols: list[str] | None = None,
+    track_capital: bool = True,
+    use_temporal_quality: bool = True,
+    min_confluence_patterns: int = 1,
 ) -> WalkForwardResult:
     """
     Walk-forward validation con n_folds fold.
@@ -166,6 +170,9 @@ async def run_walk_forward(
             exclude_symbols=exclude_symbols,
             include_symbols=include_symbols,
             quality_lookup_override=train_quality_lookup,
+            track_capital=track_capital,
+            use_temporal_quality=use_temporal_quality,
+            min_confluence_patterns=min_confluence_patterns,
         )
 
         test_result = await run_backtest_simulation(
@@ -186,6 +193,9 @@ async def run_walk_forward(
             exclude_symbols=exclude_symbols,
             include_symbols=include_symbols,
             quality_lookup_override=train_quality_lookup,
+            track_capital=track_capital,
+            use_temporal_quality=use_temporal_quality,
+            min_confluence_patterns=min_confluence_patterns,
         )
 
         train_exp = train_result.expectancy_r
@@ -230,11 +240,13 @@ async def run_walk_forward(
     pct_positive = sum(1 for f in folds if f.test_return_pct > 0) / n_folds * 100
 
     robust_count = sum(1 for f in folds if f.verdict == "robusto")
+    # Confronto intero: evita il problema floating-point con n_folds * 0.67.
+    # Es. n_folds=3: 2/3 fold robusti → 2*3 >= 3*2 → True → "prevalentemente_robusto".
     if robust_count == n_folds:
         overall: OverallVerdict = "robusto"
-    elif robust_count >= n_folds * 0.67:
+    elif robust_count * 3 >= n_folds * 2:  # >= 67% dei fold
         overall = "prevalentemente_robusto"
-    elif robust_count >= n_folds * 0.33:
+    elif robust_count * 3 >= n_folds:  # >= 33% dei fold
         overall = "degradazione_moderata"
     else:
         overall = "possibile_overfitting"
@@ -249,4 +261,5 @@ async def run_walk_forward(
         overall_verdict=overall,
         date_range_start=date_start.isoformat(),
         date_range_end=date_end.isoformat(),
+        track_capital=track_capital,
     )

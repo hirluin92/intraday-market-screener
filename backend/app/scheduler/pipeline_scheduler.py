@@ -12,6 +12,7 @@ Solo ``registry_full`` espande ``market_universe`` con ``PIPELINE_UNIVERSE_TAGS`
 
 from __future__ import annotations
 
+import asyncio
 import itertools
 import logging
 import time
@@ -38,11 +39,21 @@ from app.services.market_data_ingestion import (
     DEFAULT_TIMEFRAMES,
 )
 from app.services.alert_service import cleanup_old_alerts
+from app.services.opportunities import list_opportunities
 from app.services.pipeline_refresh import execute_pipeline_refresh
+from app.services.tws_live_candle_service import update_live_candles
 
 logger = logging.getLogger(__name__)
 
 _scheduler: AsyncIOScheduler | None = None
+
+# Timeout per singolo job pipeline (secondi); evita che un fetch lento blocchi il ciclo intero.
+_JOB_TIMEOUT_SECONDS: float = 120.0
+
+# Contatore fallimenti consecutivi per job (provider|symbol|timeframe).
+# Emette WARNING ogni N fallimenti senza successo.
+_CONSECUTIVE_FAIL_WARN_THRESHOLD: int = 3
+_consecutive_failures: dict[str, int] = {}
 
 _PIPELINE_EXCHANGE_BINANCE = "binance"
 
@@ -185,12 +196,14 @@ async def _run_scheduled_pipeline_cycle() -> None:
             symbol = spec["symbol"]
             timeframe = spec["timeframe"]
             provider = spec["provider"]
+            job_key = f"{provider}|{symbol}|{timeframe}"
             logger.info(
                 "pipeline scheduler: processing symbol=%s timeframe=%s provider=%s",
                 symbol,
                 timeframe,
                 provider,
             )
+            t_job = time.perf_counter()
             try:
                 async with AsyncSessionLocal() as session:
                     body = PipelineRefreshRequest(
@@ -202,22 +215,51 @@ async def _run_scheduled_pipeline_cycle() -> None:
                         extract_limit=spec["extract_limit"],
                         lookback=spec["lookback"],
                     )
-                    await execute_pipeline_refresh(session, body)
+                    await asyncio.wait_for(
+                        execute_pipeline_refresh(session, body),
+                        timeout=_JOB_TIMEOUT_SECONDS,
+                    )
+                elapsed_job = time.perf_counter() - t_job
                 ok += 1
+                _consecutive_failures[job_key] = 0
                 logger.info(
-                    "pipeline scheduler: refresh succeeded symbol=%s timeframe=%s provider=%s",
+                    "pipeline scheduler: refresh succeeded symbol=%s timeframe=%s provider=%s elapsed=%.2fs",
                     symbol,
                     timeframe,
                     provider,
+                    elapsed_job,
+                )
+            except asyncio.TimeoutError:
+                failed += 1
+                _consecutive_failures[job_key] = _consecutive_failures.get(job_key, 0) + 1
+                logger.error(
+                    "pipeline scheduler: refresh TIMEOUT (>%.0fs) symbol=%s timeframe=%s provider=%s consecutive_failures=%d",
+                    _JOB_TIMEOUT_SECONDS,
+                    symbol,
+                    timeframe,
+                    provider,
+                    _consecutive_failures[job_key],
                 )
             except Exception:
                 failed += 1
-                logger.exception(
-                    "pipeline scheduler: refresh failed symbol=%s timeframe=%s provider=%s",
-                    symbol,
-                    timeframe,
-                    provider,
-                )
+                consec = _consecutive_failures.get(job_key, 0) + 1
+                _consecutive_failures[job_key] = consec
+                if consec >= _CONSECUTIVE_FAIL_WARN_THRESHOLD:
+                    logger.warning(
+                        "pipeline scheduler: refresh FALLITO %d volte consecutive symbol=%s timeframe=%s provider=%s — verificare connettivita' provider",
+                        consec,
+                        symbol,
+                        timeframe,
+                        provider,
+                    )
+                else:
+                    logger.exception(
+                        "pipeline scheduler: refresh failed symbol=%s timeframe=%s provider=%s (consecutive=%d)",
+                        symbol,
+                        timeframe,
+                        provider,
+                        consec,
+                    )
 
         elapsed = time.perf_counter() - t0
         logger.info(
@@ -230,6 +272,7 @@ async def _run_scheduled_pipeline_cycle() -> None:
             ok,
             failed,
         )
+        await _prewarm_opportunities_cache()
         return
 
     try:
@@ -275,6 +318,8 @@ async def _run_scheduled_pipeline_cycle() -> None:
             exchange,
             asset_note,
         )
+        job_key = f"{provider}|{symbol}|{timeframe}"
+        t_job = time.perf_counter()
         try:
             async with AsyncSessionLocal() as session:
                 body = PipelineRefreshRequest(
@@ -286,27 +331,103 @@ async def _run_scheduled_pipeline_cycle() -> None:
                     extract_limit=settings.pipeline_extract_limit,
                     lookback=settings.pipeline_lookback,
                 )
-                await execute_pipeline_refresh(session, body)
+                await asyncio.wait_for(
+                    execute_pipeline_refresh(session, body),
+                    timeout=_JOB_TIMEOUT_SECONDS,
+                )
+            elapsed_job = time.perf_counter() - t_job
             ok += 1
+            _consecutive_failures[job_key] = 0
             logger.info(
-                "pipeline scheduler: refresh succeeded symbol=%s timeframe=%s provider=%s",
+                "pipeline scheduler: refresh succeeded symbol=%s timeframe=%s provider=%s elapsed=%.2fs",
                 symbol,
                 timeframe,
                 provider,
+                elapsed_job,
+            )
+        except asyncio.TimeoutError:
+            failed += 1
+            _consecutive_failures[job_key] = _consecutive_failures.get(job_key, 0) + 1
+            logger.error(
+                "pipeline scheduler: refresh TIMEOUT (>%.0fs) symbol=%s timeframe=%s provider=%s consecutive_failures=%d",
+                _JOB_TIMEOUT_SECONDS,
+                symbol,
+                timeframe,
+                provider,
+                _consecutive_failures[job_key],
             )
         except Exception:
             failed += 1
-            logger.exception(
-                "pipeline scheduler: refresh failed symbol=%s timeframe=%s provider=%s",
-                symbol,
-                timeframe,
-                provider,
-            )
+            consec = _consecutive_failures.get(job_key, 0) + 1
+            _consecutive_failures[job_key] = consec
+            if consec >= _CONSECUTIVE_FAIL_WARN_THRESHOLD:
+                logger.warning(
+                    "pipeline scheduler: refresh FALLITO %d volte consecutive symbol=%s timeframe=%s provider=%s — verificare connettivita' provider",
+                    consec,
+                    symbol,
+                    timeframe,
+                    provider,
+                )
+            else:
+                logger.exception(
+                    "pipeline scheduler: refresh failed symbol=%s timeframe=%s provider=%s (consecutive=%d)",
+                    symbol,
+                    timeframe,
+                    provider,
+                    consec,
+                )
 
     logger.info(
         "pipeline scheduler: refresh cycle finished (ok=%d failed=%d)",
         ok,
         failed,
+    )
+    await _prewarm_opportunities_cache()
+
+
+async def _prewarm_opportunities_cache() -> None:
+    """Pre-warm del cache opportunità globale dopo ogni ciclo scheduler.
+
+    Dopo il ciclo, tutte le cache pq/tpb/var per-simbolo sono state invalidate.
+    Questo step esegue list_opportunities per le combinazioni più comuni
+    (yahoo 1h e binance 1h) così la prima chiamata frontend trova il cache caldo.
+    """
+    t0 = time.perf_counter()
+    combos = [
+        {"provider": "yahoo_finance", "timeframe": "1h"},
+        {"provider": "binance", "timeframe": "1h"},
+    ]
+    total = 0
+    for combo in combos:
+        try:
+            async with AsyncSessionLocal() as session:
+                rows = await asyncio.wait_for(
+                    list_opportunities(
+                        session,
+                        symbol=None,
+                        exchange=None,
+                        provider=combo["provider"],
+                        asset_type=None,
+                        timeframe=combo["timeframe"],
+                        limit=500,
+                    ),
+                    timeout=90.0,
+                )
+                total += len(rows)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "pipeline scheduler: prewarm opportunities timeout provider=%s timeframe=%s",
+                combo["provider"], combo["timeframe"],
+            )
+        except Exception:
+            logger.exception(
+                "pipeline scheduler: prewarm opportunities failed provider=%s timeframe=%s",
+                combo["provider"], combo["timeframe"],
+            )
+    elapsed = time.perf_counter() - t0
+    logger.info(
+        "pipeline scheduler: prewarm opportunities completato in %.1fs — %d serie pronte",
+        elapsed, total,
     )
 
 
@@ -316,6 +437,22 @@ async def _run_alert_sent_cleanup() -> None:
         await cleanup_old_alerts(days_to_keep=7)
     except Exception:
         logger.exception("pipeline scheduler: alert_sent cleanup failed")
+
+
+async def _run_tws_live_candle_update() -> None:
+    """Aggiorna le candele live via TWS (barra corrente in formazione)."""
+    try:
+        result = await update_live_candles()
+        if result.get("skipped"):
+            return
+        logger.debug(
+            "tws_live_candles scheduler: ok=%d ko=%d rows=%d",
+            len(result.get("symbols_ok", [])),
+            len(result.get("symbols_failed", [])),
+            result.get("rows_upserted", 0),
+        )
+    except Exception:
+        logger.exception("pipeline scheduler: tws_live_candle_update failed")
 
 
 def start_pipeline_scheduler() -> None:
@@ -365,6 +502,20 @@ def start_pipeline_scheduler() -> None:
         max_instances=1,
         coalesce=True,
     )
+
+    if settings.tws_enabled:
+        _scheduler.add_job(
+            _run_tws_live_candle_update,
+            "interval",
+            minutes=2,
+            id="tws_live_candle_update",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+        )
+        logger.info("pipeline scheduler: tws_live_candle job aggiunto (ogni 2 min, orario mercato)")
+    else:
+        logger.debug("pipeline scheduler: tws_live_candle job saltato (TWS_ENABLED=false)")
 
     if not settings.pipeline_scheduler_enabled:
         _scheduler.start()

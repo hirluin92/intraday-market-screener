@@ -57,6 +57,9 @@ async def run_oos_validation(
     use_regime_filter: bool = False,
     exclude_hours: list[int] | None = None,
     include_hours: list[int] | None = None,
+    track_capital: bool = True,
+    use_temporal_quality: bool = True,
+    min_confluence_patterns: int = 1,
 ) -> OOSValidationResponse:
     train_end, test_start = _split_cutoff_utc(cutoff_date)
 
@@ -87,6 +90,9 @@ async def run_oos_validation(
         exclude_hours=exclude_hours,
         include_hours=include_hours,
         quality_lookup_override=train_quality_lookup,
+        track_capital=track_capital,
+        use_temporal_quality=use_temporal_quality,
+        min_confluence_patterns=min_confluence_patterns,
     )
 
     test_result = await run_backtest_simulation(
@@ -105,6 +111,9 @@ async def run_oos_validation(
         exclude_hours=exclude_hours,
         include_hours=include_hours,
         quality_lookup_override=train_quality_lookup,
+        track_capital=track_capital,
+        use_temporal_quality=use_temporal_quality,
+        min_confluence_patterns=min_confluence_patterns,
     )
 
     train_exp = train_result.expectancy_r
@@ -151,6 +160,15 @@ async def run_oos_validation(
         "Test set simulato con quality lookup calcolato solo su dati pre-cutoff "
         "(stesso dizionario del train; nessun leakage da pattern futuri)."
     )
+    if track_capital:
+        note_oos += (
+            " Simulazione train/test con track_capital=true (capitale impegnato fino all'uscita, "
+            "PnL alla chiusura)."
+        )
+    else:
+        note_oos += (
+            " Simulazione con track_capital=false (comportamento storico: PnL alla barra del segnale)."
+        )
 
     return OOSValidationResponse(
         cutoff_date=cutoff_date.strip()[:10],
@@ -162,4 +180,5 @@ async def run_oos_validation(
         leakage_prevented=True,
         train_quality_lookup_size=len(train_quality_lookup),
         note_oos=note_oos,
+        track_capital=track_capital,
     )

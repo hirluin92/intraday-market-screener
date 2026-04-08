@@ -141,6 +141,11 @@ async def invalidate_opportunity_lookups_after_pipeline(
 
     Se ``timeframe`` è assente, svuota tutte e tre le cache (refresh troppo ampio per
     chiavi puntuali).
+
+    Nota: le chiavi cache usano ``"*"`` per valori None/vuoti (funzione ``n()`` in
+    ``opportunity_lookup_key``). La needle deve usare la stessa normalizzazione per
+    garantire il match — es. exchange=None dallo scheduler explicit → needle ``|*|``
+    non ``||``.
     """
     if not (timeframe or "").strip():
         await pattern_quality_cache.invalidate_all()
@@ -151,7 +156,12 @@ async def invalidate_opportunity_lookups_after_pipeline(
         )
         return
 
-    needle = f"|{provider.strip()}|{exchange.strip()}|{timeframe.strip()}|"
+    def _norm(x: str) -> str:
+        """Coerente con ``n()`` in ``opportunity_lookup_key``: vuoto → '*'."""
+        s = x.strip()
+        return s if s else "*"
+
+    needle = f"|{_norm(provider)}|{_norm(exchange)}|{_norm(timeframe)}|"
     await pattern_quality_cache.invalidate_keys_containing(needle)
     await trade_plan_backtest_cache.invalidate_keys_containing(needle)
     await variant_best_cache.invalidate_keys_containing(needle)
