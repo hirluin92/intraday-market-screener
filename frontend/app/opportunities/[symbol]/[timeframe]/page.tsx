@@ -367,53 +367,58 @@ function SeriesDetailInner() {
     setLoading(true);
     setError(null);
     try {
-      const [opp, c, f, ctx, pat] = await Promise.all([
-        fetchOpportunities({
-          symbol,
-          timeframe,
-          exchange: effectiveExchange,
-          provider: providerParam || undefined,
-          asset_type: assetTypeParam || undefined,
-          limit: 5,
-        }),
-        fetchMarketDataCandles({
-          symbol,
-          exchange: effectiveExchange,
-          timeframe,
-          provider: providerParam || undefined,
-          asset_type: assetTypeParam || undefined,
-          limit: ROW_LIMIT,
-        }),
-        fetchMarketDataFeatures({
-          symbol,
-          exchange: effectiveExchange,
-          timeframe,
-          provider: providerParam || undefined,
-          asset_type: assetTypeParam || undefined,
-          limit: ROW_LIMIT,
-        }),
-        fetchMarketDataContext({
-          symbol,
-          exchange: effectiveExchange,
-          timeframe,
-          provider: providerParam || undefined,
-          asset_type: assetTypeParam || undefined,
-          limit: ROW_LIMIT,
-        }),
-        fetchMarketDataPatterns({
-          symbol,
-          exchange: effectiveExchange,
-          timeframe,
-          provider: providerParam || undefined,
-          asset_type: assetTypeParam || undefined,
-          limit: ROW_LIMIT,
-        }),
-      ]);
-      setSnapshot(opp.opportunities[0] ?? null);
-      setCandles(c.candles);
-      setFeatures(f.features);
-      setContexts(ctx.contexts);
-      setPatterns(pat.patterns);
+      // allSettled: candele/features/context/pattern possono fallire indipendentemente
+      // senza bloccare lo snapshot dell'opportunità principale
+      const [oppResult, cResult, fResult, ctxResult, patResult] =
+        await Promise.allSettled([
+          fetchOpportunities({
+            symbol,
+            timeframe,
+            exchange: effectiveExchange,
+            provider: providerParam || undefined,
+            asset_type: assetTypeParam || undefined,
+            limit: 5,
+          }),
+          fetchMarketDataCandles({
+            symbol,
+            exchange: effectiveExchange,
+            timeframe,
+            provider: providerParam || undefined,
+            asset_type: assetTypeParam || undefined,
+            limit: ROW_LIMIT,
+          }),
+          fetchMarketDataFeatures({
+            symbol,
+            exchange: effectiveExchange,
+            timeframe,
+            provider: providerParam || undefined,
+            asset_type: assetTypeParam || undefined,
+            limit: ROW_LIMIT,
+          }),
+          fetchMarketDataContext({
+            symbol,
+            exchange: effectiveExchange,
+            timeframe,
+            provider: providerParam || undefined,
+            asset_type: assetTypeParam || undefined,
+            limit: ROW_LIMIT,
+          }),
+          fetchMarketDataPatterns({
+            symbol,
+            exchange: effectiveExchange,
+            timeframe,
+            provider: providerParam || undefined,
+            asset_type: assetTypeParam || undefined,
+            limit: ROW_LIMIT,
+          }),
+        ]);
+
+      if (oppResult.status === "rejected") throw oppResult.reason;
+      setSnapshot(oppResult.value.opportunities[0] ?? null);
+      setCandles(cResult.status === "fulfilled" ? cResult.value.candles : []);
+      setFeatures(fResult.status === "fulfilled" ? fResult.value.features : []);
+      setContexts(ctxResult.status === "fulfilled" ? ctxResult.value.contexts : []);
+      setPatterns(patResult.status === "fulfilled" ? patResult.value.patterns : []);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {

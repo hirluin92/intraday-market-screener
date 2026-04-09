@@ -13,11 +13,12 @@ class Candle(Base):
     __tablename__ = "candles"
     __table_args__ = (
         UniqueConstraint(
+            "provider",
             "exchange",
             "symbol",
             "timeframe",
             "timestamp",
-            name="uq_candles_exchange_symbol_timeframe_timestamp",
+            name="uq_candles_provider_exchange_symbol_timeframe_timestamp",
         ),
         Index("ix_candles_exchange_symbol_timeframe", "exchange", "symbol", "timeframe"),
         Index("ix_candles_timestamp", "timestamp"),

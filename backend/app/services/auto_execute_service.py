@@ -125,17 +125,26 @@ async def execute_signal(
             }
 
     # ── Sizing ────────────────────────────────────────────────────────────
-    # Legge il saldo reale dal conto TWS; fallback a IBKR_MAX_CAPITAL se non disponibile.
+    # Il sizing deve essere basato sul saldo reale del conto — non su una stima statica.
+    # Se NetLiquidation non è disponibile l'ordine viene annullato: un fallback a
+    # IBKR_MAX_CAPITAL rischierebbe di calcolare size errate (over/under-sized)
+    # su un conto di cui non conosciamo il saldo corrente.
     net_liq = await tws.get_net_liquidation(currency="USD")
-    if net_liq is not None and net_liq > 0:
-        capital = net_liq
-        logger.info("TWS auto-execute: capitale da NetLiquidation=%.2f USD", capital)
-    else:
-        capital = settings.ibkr_max_capital
-        logger.warning(
-            "TWS auto-execute: NetLiquidation non disponibile, uso IBKR_MAX_CAPITAL=%.2f",
-            capital,
+    if net_liq is None or net_liq <= 0:
+        logger.error(
+            "TWS auto-execute: NetLiquidation non disponibile — ordine annullato "
+            "(symbol=%s, pattern=%s). Verificare connessione TWS e permessi account.",
+            symbol, pattern_name,
         )
+        return {
+            "status": "skipped",
+            "reason": (
+                "NetLiquidation non disponibile: impossibile calcolare il sizing "
+                "in modo sicuro. Ordine annullato per prevenire position size errata."
+            ),
+        }
+    capital = net_liq
+    logger.info("TWS auto-execute: capitale da NetLiquidation=%.2f USD", capital)
 
     size = calculate_position_size(
         capital=capital,

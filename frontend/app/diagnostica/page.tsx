@@ -86,14 +86,23 @@ export default function DiagnosticaPage() {
     setLoading(true);
     setError(null);
     try {
-      const [bt, op] = await Promise.all([
+      const [btResult, opResult] = await Promise.allSettled([
         fetchBacktestPatterns({ limit: FETCH_LIMIT }),
         fetchOpportunities({ limit: FETCH_LIMIT }),
       ]);
-      setAggregates(bt.aggregates);
-      setPatternsEvaluated(bt.patterns_evaluated);
-      setOpportunities(op.opportunities);
-      setOppCount(op.count);
+
+      if (btResult.status === "fulfilled") {
+        setAggregates(btResult.value.aggregates);
+        setPatternsEvaluated(btResult.value.patterns_evaluated);
+      }
+      if (opResult.status === "fulfilled") {
+        setOpportunities(opResult.value.opportunities);
+        setOppCount(opResult.value.count);
+      }
+      // Se entrambe falliscono, propaga il primo errore
+      if (btResult.status === "rejected" && opResult.status === "rejected") {
+        throw btResult.reason;
+      }
     } catch (e) {
       setAggregates([]);
       setOpportunities([]);

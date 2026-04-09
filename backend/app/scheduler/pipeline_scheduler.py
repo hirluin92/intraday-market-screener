@@ -454,7 +454,11 @@ async def _prewarm_opportunities_cache() -> None:
             )
             return 0
 
-    counts = await asyncio.gather(*[_prewarm_combo(c) for c in combos])
+    # return_exceptions=True: un fallimento su una combo non cancella le altre.
+    # _prewarm_combo gestisce già le eccezioni interne (ritorna 0 in caso di errore),
+    # ma return_exceptions difende da scenari di cancellazione esterna.
+    raw = await asyncio.gather(*[_prewarm_combo(c) for c in combos], return_exceptions=True)
+    counts = [r if isinstance(r, int) else 0 for r in raw]
     total = sum(counts)
     elapsed = time.perf_counter() - t0
     logger.info(

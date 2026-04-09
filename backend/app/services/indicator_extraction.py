@@ -14,9 +14,10 @@ per compatibilità con l'ambiente Docker esistente.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 from decimal import Decimal
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import and_, select
 from sqlalchemy.dialects.postgresql import insert
@@ -44,10 +45,12 @@ def _normalize_ts(ts: datetime) -> datetime:
     return ts.replace(microsecond=0)
 
 
-# Ora di apertura/chiusura sessione US (UTC)
-_US_SESSION_OPEN_HOUR = 14  # 09:30 ET = 14:30 UTC (ora legale)
-_US_SESSION_OPEN_MIN = 30
-_US_SESSION_CLOSE_HOUR = 21  # 16:00 ET = 21:00 UTC
+# Timezone US/Eastern — gestisce automaticamente EST (UTC-5) ed EDT (UTC-4).
+# zoneinfo + tzdata (già in requirements.txt) rendono inutili le costanti UTC hardcoded.
+_TZ_ET = ZoneInfo("America/New_York")
+_US_SESSION_OPEN_ET = time(9, 30)   # NYSE open (ora ET, fissa)
+_US_SESSION_CLOSE_ET = time(16, 0)  # NYSE close (ora ET, fissa)
+
 _OR_BARS_5M = 6  # Opening range = prime 6 barre da 5m = 30 minuti
 _OR_BARS_15M = 2  # Opening range = prime 2 barre da 15m = 30 minuti
 _OR_BARS_1H = 1  # Opening range = prima barra da 1h = prima ora
@@ -245,22 +248,30 @@ def _calc_structural_levels(
     return last_sh, last_sl, dist_sh, dist_sl, struct_range, price_pos
 
 
+def _ts_to_et(ts: datetime) -> datetime:
+    """Converte un datetime (UTC assumed se naive) in America/New_York."""
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return ts.astimezone(_TZ_ET)
+
+
 def _is_us_session(ts: datetime) -> bool:
-    """True se il timestamp è nella sessione regolare US (14:30-21:00 UTC)."""
-    h, m = ts.hour, ts.minute
-    start = h * 60 + m
-    open_min = _US_SESSION_OPEN_HOUR * 60 + _US_SESSION_OPEN_MIN
-    close_min = _US_SESSION_CLOSE_HOUR * 60
-    return open_min <= start < close_min
+    """True se il timestamp ricade nella sessione regolare NYSE (09:30-16:00 ET).
+
+    Usa zoneinfo per gestire automaticamente il cambio EST/EDT: nessuna costante
+    UTC hardcoded che richiederebbe aggiornamento manuale due volte l'anno.
+    """
+    t_et = _ts_to_et(ts).time()
+    return _US_SESSION_OPEN_ET <= t_et < _US_SESSION_CLOSE_ET
 
 
 def _session_date(ts: datetime) -> str:
-    """Data sessione US: prima delle 14:30 UTC = giorno precedente."""
-    if ts.hour < _US_SESSION_OPEN_HOUR or (
-        ts.hour == _US_SESSION_OPEN_HOUR and ts.minute < _US_SESSION_OPEN_MIN
-    ):
-        return (ts - timedelta(days=1)).strftime("%Y-%m-%d")
-    return ts.strftime("%Y-%m-%d")
+    """Data sessione NYSE in ET: barre pre-apertura appartengono al giorno precedente."""
+    ts_et = _ts_to_et(ts)
+    d = ts_et.date()
+    if ts_et.time() < _US_SESSION_OPEN_ET:
+        d = d - timedelta(days=1)
+    return d.strftime("%Y-%m-%d")
 
 
 def _calc_vwap_and_session_levels(

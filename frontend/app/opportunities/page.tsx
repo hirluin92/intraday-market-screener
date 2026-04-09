@@ -241,11 +241,21 @@ function OpportunitiesPageInner() {
     setLoading(true);
     setError(null);
     try {
-      const [data, ibkr, executed] = await Promise.all([
+      // allSettled: IBKR può essere offline senza bloccare il caricamento delle opportunità
+      const [dataResult, ibkrResult, executedResult] = await Promise.allSettled([
         fetchOpportunities({ limit: FETCH_LIMIT }),
         fetchIbkrStatus(),
         fetchExecutedSignals(50).catch(() => ({ signals: [], count: 0 })),
       ]);
+
+      if (dataResult.status === "rejected") throw dataResult.reason;
+      const data = dataResult.value;
+      const ibkr = ibkrResult.status === "fulfilled" ? ibkrResult.value : null;
+      const executed =
+        executedResult.status === "fulfilled"
+          ? executedResult.value
+          : { signals: [], count: 0 };
+
       setRows(data.opportunities);
       setIbkrStatus(ibkr);
       setExecutedSignals(executed.signals);
