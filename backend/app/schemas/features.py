@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
@@ -34,7 +34,7 @@ class FeatureExtractRequest(BaseModel):
     limit: int = Field(
         default=5000,
         ge=1,
-        le=10_000,
+        le=50_000,
         description="Max feature rows per series (oldest-first window). One extra prior candle is loaded for look-back only.",
     )
 

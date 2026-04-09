@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from datetime import datetime
 from typing import Any, Literal, Self
@@ -33,7 +33,7 @@ class ContextExtractRequest(BaseModel):
     limit: int = Field(
         default=5000,
         ge=1,
-        le=10_000,
+        le=50_000,
         description="Max candle-feature rows processed per series (oldest-first).",
     )
     lookback: int = Field(
