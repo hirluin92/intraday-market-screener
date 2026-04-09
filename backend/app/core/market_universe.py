@@ -1,7 +1,7 @@
-"""
+﻿"""
 Registro universo di mercato (MVP) per scheduler e screener.
 
-Fonte dati: definizioni statiche versionate nel repo. In futuro si può sostituire con
+Fonte dati: definizioni statiche versionate nel repo. In futuro si puÃ² sostituire con
 tabella DB senza cambiare i consumatori (``iter_scheduler_jobs``, ecc.).
 
 Estensione: aggiungere voci a ``MARKET_UNIVERSE_REGISTRY`` o filtrare con
@@ -19,7 +19,7 @@ from app.core.yahoo_finance_constants import (
     YAHOO_VENUE_LABEL,
 )
 
-ProviderId = Literal["binance", "yahoo_finance"]
+ProviderId = Literal["binance", "yahoo_finance", "alpaca"]
 AssetKind = Literal["crypto", "stock", "etf", "index"]
 
 
@@ -29,7 +29,7 @@ def _exchange_for_provider(provider: ProviderId) -> str:
 
 @dataclass(frozen=True, slots=True)
 class MarketUniverseEntry:
-    """Uno strumento configurato con i timeframe che lo scheduler può aggiornare."""
+    """Uno strumento configurato con i timeframe che lo scheduler puÃ² aggiornare."""
 
     symbol: str
     provider: ProviderId
@@ -42,7 +42,7 @@ class MarketUniverseEntry:
 
 @dataclass(frozen=True, slots=True)
 class SchedulerPipelineJob:
-    """Una coppia (simbolo, timeframe) già risolta per un ciclo scheduler."""
+    """Una coppia (simbolo, timeframe) giÃ  risolta per un ciclo scheduler."""
 
     symbol: str
     timeframe: str
@@ -851,7 +851,7 @@ MARKET_UNIVERSE_REGISTRY: tuple[MarketUniverseEntry, ...] = (
 
 
 def validate_registry_timeframes() -> list[str]:
-    """Ritorna messaggi di errore se un timeframe non è ammesso per il provider."""
+    """Ritorna messaggi di errore se un timeframe non Ã¨ ammesso per il provider."""
     from app.core.timeframes import ALLOWED_TIMEFRAMES_SET
     from app.core.yahoo_finance_constants import YAHOO_ALLOWED_TIMEFRAMES_SET
 
@@ -876,15 +876,15 @@ def iter_scheduler_jobs(
     tag_filter: frozenset[str] | None = None,
 ) -> list[SchedulerPipelineJob]:
     """
-    Espande il registro in job (symbol × timeframe). Ordinati per priority, simbolo, TF.
+    Espande il registro in job (symbol Ã— timeframe). Ordinati per priority, simbolo, TF.
 
     ``tag_filter``: se non vuoto, **ogni** tag richiesto deve essere presente sulla voce
     (subset: ``tag_filter <= entry.tags``). Esempi:
 
-    - ``etf`` → solo strumenti con tag ``etf`` (ETF Yahoo, non gli stock).
-    - ``yahoo,etf`` → stesso effetto preciso per gli ETF US (entrambi richiesti).
-    - ``yahoo_etf`` → alias esplicito per una sola run solo ETF Yahoo.
-    - ``yahoo`` da solo → tutto ciò che ha tag ``yahoo`` (ETF + stock).
+    - ``etf`` â†’ solo strumenti con tag ``etf`` (ETF Yahoo, non gli stock).
+    - ``yahoo,etf`` â†’ stesso effetto preciso per gli ETF US (entrambi richiesti).
+    - ``yahoo_etf`` â†’ alias esplicito per una sola run solo ETF Yahoo.
+    - ``yahoo`` da solo â†’ tutto ciÃ² che ha tag ``yahoo`` (ETF + stock).
     """
     out: list[SchedulerPipelineJob] = []
     for entry in MARKET_UNIVERSE_REGISTRY:
@@ -908,3 +908,4 @@ def iter_scheduler_jobs(
             )
     out.sort(key=lambda j: (j.priority, j.symbol, j.timeframe))
     return out
+

@@ -13,11 +13,12 @@ from app.core.yahoo_finance_constants import YAHOO_ALLOWED_TIMEFRAMES_SET
 class MarketDataIngestRequest(BaseModel):
     """Manual trigger for OHLCV ingestion."""
 
-    provider: Literal["binance", "yahoo_finance"] = Field(
+    provider: Literal["binance", "yahoo_finance", "alpaca"] = Field(
         default="binance",
         description=(
             "binance: ccxt crypto spot (default). "
-            "yahoo_finance: US equities/ETFs via yfinance (see Yahoo MVP universe)."
+            "yahoo_finance: US equities/ETFs via yfinance (see Yahoo MVP universe). "
+            "alpaca: Alpaca Data API v2 US stocks/ETFs (storico 5m lungo, IEX o SIP feed)."
         ),
     )
     symbols: list[str] | None = Field(
@@ -45,10 +46,15 @@ class MarketDataIngestRequest(BaseModel):
     def _validate_timeframes_for_provider(self) -> MarketDataIngestRequest:
         if self.timeframes is None:
             return self
+        _ALPACA_TF = frozenset({"1m", "5m", "15m", "30m", "1h", "1d"})
         if self.provider == "binance":
             bad = set(self.timeframes) - ALLOWED_TIMEFRAMES_SET
             if bad:
                 raise ValueError(f"unsupported timeframes for Binance: {sorted(bad)}")
+        elif self.provider == "alpaca":
+            bad = set(self.timeframes) - _ALPACA_TF
+            if bad:
+                raise ValueError(f"unsupported timeframes for Alpaca: {sorted(bad)}")
         else:
             bad = set(self.timeframes) - YAHOO_ALLOWED_TIMEFRAMES_SET
             if bad:

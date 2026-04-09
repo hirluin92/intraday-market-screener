@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
@@ -20,7 +20,7 @@ class FeatureExtractRequest(BaseModel):
         default=None,
         description="Restrict to venue id (e.g. binance, YAHOO_US). Omit to include all venues.",
     )
-    provider: Literal["binance", "yahoo_finance"] | None = Field(
+    provider: Literal["binance", "yahoo_finance", "alpaca"] | None = Field(
         default=None,
         description="Restrict to data provider; combine with exchange for unambiguous Yahoo vs Binance.",
     )
@@ -28,7 +28,7 @@ class FeatureExtractRequest(BaseModel):
         default=None,
         description=(
             "Restrict to one timeframe; allowed values depend on provider/venue "
-            "(Binance: 1m,5m,15m,1h — Yahoo: 5m,15m,1h,1d). Omit for all timeframes."
+            "(Binance: 1m,5m,15m,1h â€” Yahoo: 5m,15m,1h,1d). Omit for all timeframes."
         ),
     )
     limit: int = Field(
@@ -85,3 +85,4 @@ class FeatureRow(BaseModel):
 class FeaturesListResponse(BaseModel):
     features: list[FeatureRow]
     count: int
+

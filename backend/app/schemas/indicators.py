@@ -1,4 +1,4 @@
-"""Schemi Pydantic per indicatori tecnici."""
+﻿"""Schemi Pydantic per indicatori tecnici."""
 
 from __future__ import annotations
 
@@ -16,13 +16,13 @@ class IndicatorExtractRequest(BaseModel):
 
     symbol: str | None = Field(default=None)
     exchange: str | None = Field(default=None)
-    provider: Literal["binance", "yahoo_finance"] | None = Field(default=None)
+    provider: Literal["binance", "yahoo_finance", "alpaca"] | None = Field(default=None)
     timeframe: str | None = Field(default=None)
     limit: int = Field(
         default=5000,
         ge=1,
         le=10_000,
-        description="Max candele più recenti per serie (calcolo in ordine cronologico oldest→newest).",
+        description="Max candele piÃ¹ recenti per serie (calcolo in ordine cronologico oldestâ†’newest).",
     )
 
     @model_validator(mode="after")
@@ -116,3 +116,4 @@ class IndicatorRow(BaseModel):
 class IndicatorsListResponse(BaseModel):
     indicators: list[IndicatorRow]
     count: int
+

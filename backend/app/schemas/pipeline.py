@@ -4,7 +4,7 @@ from typing import Literal, Self
 
 from pydantic import BaseModel, Field, model_validator
 
-from app.core.extract_scope import validate_extract_timeframe_for_scope
+from app.core.extract_scope import ALPACA_VENUE_LABEL, validate_extract_timeframe_for_scope
 from app.core.yahoo_finance_constants import YAHOO_VENUE_LABEL
 from app.schemas.context import ContextExtractResponse
 from app.schemas.features import FeatureExtractResponse
@@ -16,9 +16,9 @@ from app.schemas.patterns import PatternExtractResponse
 class PipelineRefreshRequest(BaseModel):
     """Run ingest → features → indicators → context → patterns with the same optional series filters."""
 
-    provider: Literal["binance", "yahoo_finance"] = Field(
+    provider: Literal["binance", "yahoo_finance", "alpaca"] = Field(
         default="binance",
-        description="binance: ccxt ingest. yahoo_finance: yfinance US equities/ETFs.",
+        description="binance: ccxt ingest. yahoo_finance: yfinance US equities/ETFs. alpaca: Alpaca Data API v2 (US stocks, storico 5m lungo).",
     )
     exchange: str | None = Field(
         default=None,
@@ -56,9 +56,12 @@ class PipelineRefreshRequest(BaseModel):
         if self.exchange is None or (
             isinstance(self.exchange, str) and not self.exchange.strip()
         ):
-            self.exchange = (
-                YAHOO_VENUE_LABEL if self.provider == "yahoo_finance" else "binance"
-            )
+            if self.provider == "yahoo_finance":
+                self.exchange = YAHOO_VENUE_LABEL
+            elif self.provider == "alpaca":
+                self.exchange = ALPACA_VENUE_LABEL
+            else:
+                self.exchange = "binance"
         validate_extract_timeframe_for_scope(self.timeframe, self.provider, self.exchange)
         return self
 

@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
@@ -46,7 +46,7 @@ class PatternExtractRequest(BaseModel):
         default=None,
         description="Restrict to venue id (e.g. binance, YAHOO_US). Omit to include all venues.",
     )
-    provider: Literal["binance", "yahoo_finance"] | None = Field(
+    provider: Literal["binance", "yahoo_finance", "alpaca"] | None = Field(
         default=None,
         description="Restrict to data provider; combine with exchange for unambiguous Yahoo vs Binance.",
     )
@@ -54,7 +54,7 @@ class PatternExtractRequest(BaseModel):
         default=None,
         description=(
             "Restrict to one timeframe; allowed values depend on provider/venue "
-            "(Binance: 1m,5m,15m,1h — Yahoo: 5m,15m,1h,1d). Omit for all timeframes."
+            "(Binance: 1m,5m,15m,1h â€” Yahoo: 5m,15m,1h,1d). Omit for all timeframes."
         ),
     )
     limit: int = Field(
@@ -84,3 +84,4 @@ class PatternExtractResponse(BaseModel):
     patterns_detected: int = Field(
         description="Number of (candle, pattern_name) detections before deduplication by upsert.",
     )
+

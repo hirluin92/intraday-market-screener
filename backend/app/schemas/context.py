@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from datetime import datetime
 from typing import Any, Literal, Self
@@ -19,7 +19,7 @@ class ContextExtractRequest(BaseModel):
         default=None,
         description="Restrict to venue id (e.g. binance, YAHOO_US). Omit for all venues.",
     )
-    provider: Literal["binance", "yahoo_finance"] | None = Field(
+    provider: Literal["binance", "yahoo_finance", "alpaca"] | None = Field(
         default=None,
         description="Restrict to data provider; combine with exchange for unambiguous Yahoo vs Binance.",
     )
@@ -27,7 +27,7 @@ class ContextExtractRequest(BaseModel):
         default=None,
         description=(
             "Restrict to one timeframe; allowed values depend on provider/venue "
-            "(Binance: 1m,5m,15m,1h — Yahoo: 5m,15m,1h,1d). Omit for all timeframes."
+            "(Binance: 1m,5m,15m,1h â€” Yahoo: 5m,15m,1h,1d). Omit for all timeframes."
         ),
     )
     limit: int = Field(
@@ -104,3 +104,4 @@ class LatestContextSnapshot(BaseModel):
 class LatestScreenerResponse(BaseModel):
     snapshots: list[LatestContextSnapshot]
     count: int
+
