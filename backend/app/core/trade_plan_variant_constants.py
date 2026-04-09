@@ -256,6 +256,16 @@ SCHEDULER_SYMBOLS_BINANCE_1H: list[tuple[str, str]] = [
     ("MATIC/USDT", "1h"),
 ]
 
+# Stessi simboli su 5m: lo scheduler esplicito aggiornava solo 1h → i 5m restavano indietro (prezzi/grafici vecchi).
+SCHEDULER_SYMBOLS_BINANCE_5M: list[tuple[str, str]] = [
+    ("ETH/USDT", "5m"),
+    ("DOGE/USDT", "5m"),
+    ("ADA/USDT", "5m"),
+    ("SOL/USDT", "5m"),
+    ("WLD/USDT", "5m"),
+    ("MATIC/USDT", "5m"),
+]
+
 # BTC/USDT giornaliero: solo filtro regime macro (EMA50 ±2%) per crypto — non è un TF operativo pattern.
 SCHEDULER_SYMBOLS_BINANCE_1D_REGIME: list[tuple[str, str]] = [
     ("BTC/USDT", "1d"),

@@ -41,7 +41,7 @@ class PipelineRefreshRequest(BaseModel):
     extract_limit: int = Field(
         default=5000,
         ge=1,
-        le=10_000,
+        le=50_000,
         description="Max barre per serie in feature/context/pattern extraction.",
     )
     lookback: int = Field(

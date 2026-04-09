@@ -38,3 +38,6 @@ def configure_application_logging() -> None:
     logging.getLogger("uvicorn").setLevel(logging.INFO)
     logging.getLogger("uvicorn.error").setLevel(logging.INFO)
     logging.getLogger("uvicorn.access").setLevel(logging.INFO)
+
+    # peewee usato internamente da alcune dipendenze — non rilevante per noi
+    logging.getLogger("peewee").setLevel(logging.WARNING)

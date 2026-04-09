@@ -1,9 +1,16 @@
 """
-Pattern–timeframe quality gate (MVP, no DB).
+Pattern–timeframe quality gate (v2).
 
 Uses the same backtest-derived ``pattern_quality_score`` already attached to opportunities
 (aggregate for ``(pattern_name, timeframe)``). Adjusts ``final_opportunity_score`` when historical
 evidence on *this* timeframe is weak, and exposes transparent flags for UI.
+
+Penalità ribilanciate in v2 per coerenza con la riduzione di ``_QUALITY_FROM_SCORE_MAX``
+in ``opportunity_final_score``:
+  - ``_PENALTY_MARGINAL``: 9 → 7  (qualità marginale meno punitiva)
+  - ``_PENALTY_POOR``:     20 → 16 (qualità scarsa meno catastrofica; evita che
+     la combinazione quality_bonus ridotto + penalty invariata crei score negativi
+     per pattern mediocri in mercati strutturalmente forti)
 
 Tune thresholds only here. No ML.
 """
@@ -17,8 +24,8 @@ _TF_OK_MIN = 45.0
 _TF_MARGINAL_MIN = 34.0
 
 # Penalties applied to ``final_opportunity_score`` after the base formula (subtractive).
-_PENALTY_MARGINAL = 9.0
-_PENALTY_POOR = 20.0
+_PENALTY_MARGINAL = 7.0   # era 9; ridotto per bilanciare quality_bonus max 14 (era 20)
+_PENALTY_POOR = 16.0      # era 20; ridotto per coerenza
 # No aggregate / insufficient backtest signal for this pattern+TF key.
 _PENALTY_UNKNOWN = 6.0
 

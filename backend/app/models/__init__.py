@@ -7,6 +7,7 @@ from app.models.candle_context import CandleContext
 from app.models.candle_feature import CandleFeature
 from app.models.candle_indicator import CandleIndicator
 from app.models.candle_pattern import CandlePattern
+from app.models.executed_signal import ExecutedSignal
 
 __all__ = [
     "AlertNotificationSent",
@@ -16,4 +17,5 @@ __all__ = [
     "CandleFeature",
     "CandleIndicator",
     "CandlePattern",
+    "ExecutedSignal",
 ]

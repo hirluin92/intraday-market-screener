@@ -1,5 +1,6 @@
 """Read stored `CandlePattern` rows from the database (MVP)."""
 
+from datetime import datetime, timedelta, timezone
 from sqlalchemy import and_, case, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -80,6 +81,7 @@ async def count_concurrent_patterns_per_series(
     provider: str | None = None,
     asset_type: str | None = None,
     timeframe: str | None,
+    since_hours: int = 168,
 ) -> dict[_SeriesKey, int]:
     """
     Per ogni (exchange, symbol, timeframe) ritorna il numero di pattern VALIDATI
@@ -92,9 +94,13 @@ async def count_concurrent_patterns_per_series(
     Conta solo pattern in VALIDATED_PATTERNS_OPERATIONAL (esclude bloccati e in
     sviluppo) per garantire che confluenza = più segnali di qualità, non pattern
     non validati che «inquinano» il conteggio.
+
+    `since_hours` limita la scansione per evitare full table scan su tabelle grandi.
     """
+    since_dt = datetime.now(timezone.utc) - timedelta(hours=since_hours)
     conditions: list = [
         CandlePattern.pattern_name.in_(list(VALIDATED_PATTERNS_OPERATIONAL)),
+        CandlePattern.timestamp >= since_dt,
     ]
     if exchange is not None:
         conditions.append(CandlePattern.exchange == exchange)
@@ -162,12 +168,17 @@ async def list_latest_pattern_per_series(
     provider: str | None = None,
     asset_type: str | None = None,
     timeframe: str | None,
+    since_hours: int = 168,
 ) -> list[CandlePattern]:
     """
     One row per (exchange, symbol, timeframe): the pattern row with latest `timestamp`,
     tie-breaking by stronger `pattern_strength` then `pattern_name` for determinism.
+
+    `since_hours` limits the scan window to avoid full table scans on large datasets.
+    168h (7 giorni) copre weekend + festivi per timeframe 1d; su 1h copre 7 giorni (168 barre).
     """
-    conditions = []
+    since_dt = datetime.now(timezone.utc) - timedelta(hours=since_hours)
+    conditions = [CandlePattern.timestamp >= since_dt]
     if exchange is not None:
         conditions.append(CandlePattern.exchange == exchange)
     if provider is not None:

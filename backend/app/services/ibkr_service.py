@@ -16,6 +16,49 @@ logger = logging.getLogger(__name__)
 
 IBKR_VERIFY_SSL = False
 
+# ── Circuit breaker per Client Portal Gateway ─────────────────────────────────
+# Dopo _CB_MAX_FAILURES errori consecutivi, smette di provare per _CB_COOLDOWN_S
+# secondi — evita il flood di "All connection attempts failed" quando il Gateway
+# non è in esecuzione.
+_CB_MAX_FAILURES = 3
+_CB_COOLDOWN_S = 600.0   # 10 minuti
+_cb_failures: int = 0
+_cb_open_since: float = 0.0
+
+
+def _cb_is_open() -> bool:
+    """Restituisce True se il circuit breaker è aperto (Gateway da considerare giù)."""
+    global _cb_failures, _cb_open_since
+    if _cb_failures < _CB_MAX_FAILURES:
+        return False
+    if time.monotonic() - _cb_open_since >= _CB_COOLDOWN_S:
+        # Cooldown scaduto: reset e riprova
+        _cb_failures = 0
+        _cb_open_since = 0.0
+        logger.info("IBKR Gateway circuit breaker reset — riprovo connessione")
+        return False
+    return True
+
+
+def _cb_record_failure(err: Exception) -> None:
+    global _cb_failures, _cb_open_since
+    _cb_failures += 1
+    if _cb_failures == _CB_MAX_FAILURES:
+        _cb_open_since = time.monotonic()
+        logger.warning(
+            "IBKR Gateway: %d errori consecutivi — circuit breaker aperto per %.0f min. "
+            "Gateway non raggiungibile (errore: %s). Riprovo tra %.0f min.",
+            _cb_failures, _CB_COOLDOWN_S / 60, err, _CB_COOLDOWN_S / 60,
+        )
+
+
+def _cb_record_success() -> None:
+    global _cb_failures, _cb_open_since
+    if _cb_failures > 0:
+        logger.info("IBKR Gateway: connessione ripristinata — circuit breaker chiuso")
+    _cb_failures = 0
+    _cb_open_since = 0.0
+
 
 def _parse_ibkr_numeric(val: Any) -> float | None:
     """Converte valori snapshot IBKR (stringhe con virgole, ecc.) in float."""
@@ -133,9 +176,18 @@ class IBKRService:
         sym_u = symbol.strip().upper()
         if not sym_u:
             return None
+        if _cb_is_open():
+            logger.debug("IBKR get_conid %s: circuit breaker aperto, skip", sym_u)
+            return None
         try:
             results = await self.search_contract(sym_u, name_search=False)
+            _cb_record_success()
         except Exception as e:
+            err_str = str(e)
+            # Conta come fallimento Gateway solo gli errori di connessione HTTP,
+            # non gli errori applicativi tipo "contratto non trovato" (Error 200 TWS)
+            if "connection" in err_str.lower() or "connect" in err_str.lower():
+                _cb_record_failure(e)
             logger.error("IBKR get_conid search failed per %s: %s", sym_u, e)
             return None
 
@@ -419,6 +471,77 @@ class IBKRService:
         )
         r.raise_for_status()
         return r.json()
+
+    async def get_spread_snapshot(self, conid: int) -> dict[str, float | None]:
+        """
+        Restituisce bid, ask, spread_pct e volume_live per un conid.
+
+        Campi IBKR richiesti:
+          84  = bid price
+          86  = ask price
+          31  = last price
+          7762 = bid size
+          7295 = ask size
+          87   = daily volume (numero di azioni/contratti scambiati oggi)
+
+        Restituisce un dict con chiavi:
+          bid, ask, last, spread_pct, volume_live
+        Tutti possono essere None se i dati non sono disponibili
+        (mercato chiuso, symbol non subscribed, gateway non autenticato).
+        """
+        try:
+            r = await self._client.get(
+                "/iserver/marketdata/snapshot",
+                params={
+                    "conids": str(conid),
+                    "fields": "31,84,86,87,7762,7295",
+                },
+            )
+            r.raise_for_status()
+            data = r.json()
+        except Exception as exc:
+            logger.warning("IBKR spread_snapshot conid=%s: %s", conid, exc)
+            return {"bid": None, "ask": None, "last": None, "spread_pct": None, "volume_live": None}
+
+        rows = data if isinstance(data, list) else ([data] if isinstance(data, dict) else [])
+        if not rows or not isinstance(rows[0], dict):
+            return {"bid": None, "ask": None, "last": None, "spread_pct": None, "volume_live": None}
+
+        item = rows[0]
+        bid = _parse_ibkr_numeric(item.get("84"))
+        ask = _parse_ibkr_numeric(item.get("86"))
+        last = _parse_ibkr_numeric(item.get("31")) or bid or ask
+        volume_live = _parse_ibkr_numeric(item.get("87"))
+
+        spread_pct: float | None = None
+        if bid and ask and ask > 0 and bid > 0:
+            mid = (bid + ask) / 2.0
+            spread_pct = round((ask - bid) / mid * 100.0, 4) if mid > 0 else None
+
+        return {
+            "bid": bid,
+            "ask": ask,
+            "last": last,
+            "spread_pct": spread_pct,
+            "volume_live": volume_live,
+        }
+
+    async def get_executions(self, days: int = 7) -> list[dict[str, Any]]:
+        """
+        Restituisce le esecuzioni recenti (fills) dell'account.
+        Endpoint: GET /iserver/account/trades
+        Ogni fill contiene: symbol, side, size, price, execution_time, order_ref, etc.
+        ``days`` è solo indicativo (IBKR ritorna le ultime esecuzioni disponibili).
+        """
+        try:
+            r = await self._client.get("/iserver/account/trades")
+            r.raise_for_status()
+            data = r.json()
+            trades = data if isinstance(data, list) else data.get("trades", []) or []
+            return [t for t in trades if isinstance(t, dict)]
+        except Exception as exc:
+            logger.warning("get_executions: %s", exc)
+            return []
 
     async def get_positions(self, account_id: str) -> list[dict[str, Any]]:
         r = await self._client.get(f"/portfolio/{account_id}/positions/0")

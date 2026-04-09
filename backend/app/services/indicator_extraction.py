@@ -52,7 +52,7 @@ _OR_BARS_5M = 6  # Opening range = prime 6 barre da 5m = 30 minuti
 _OR_BARS_15M = 2  # Opening range = prime 2 barre da 15m = 30 minuti
 _OR_BARS_1H = 1  # Opening range = prima barra da 1h = prima ora
 
-_UPSERT_CHUNK_SIZE = 500
+_UPSERT_CHUNK_SIZE = 300
 # Barre su ogni lato per swing high/low locale (5 → 5m ~25 min per lato, 1h ~5h per lato).
 _SWING_WINDOW = 5
 
@@ -878,16 +878,24 @@ async def _load_features_pct_return_by_candle(
     session: AsyncSession,
     candle_ids: list[int],
 ) -> dict[int, float | None]:
-    """pct_return_1 da candle_features per candle_id."""
+    """pct_return_1 da candle_features per candle_id.
+
+    Usa BETWEEN + filtro Python per evitare il limite asyncpg di 32767 parametri
+    bind quando candle_ids è molto grande (>30k per backfill storici).
+    """
     if not candle_ids:
         return {}
+    candle_id_set = set(candle_ids)
+    min_id = min(candle_ids)
+    max_id = max(candle_ids)
     stmt = select(CandleFeature.candle_id, CandleFeature.pct_return_1).where(
-        CandleFeature.candle_id.in_(candle_ids),
+        CandleFeature.candle_id.between(min_id, max_id),
     )
     result = await session.execute(stmt)
     return {
         int(r.candle_id): (float(r.pct_return_1) if r.pct_return_1 is not None else None)
         for r in result.all()
+        if r.candle_id in candle_id_set
     }
 
 

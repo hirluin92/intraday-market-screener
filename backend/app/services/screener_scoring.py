@@ -38,12 +38,20 @@ class ScoringResult:
 
 
 def _structural_points(snapshot: SnapshotForScoring) -> int:
-    """Shared 0–9: regime + volatility + expansion (no direction)."""
+    """Shared 0–9: regime + volatility + expansion (no direction).
+
+    market_regime scale: trend=3 > range=2 > neutral=1 > choppy/volatile=0.
+    «range» era 1 (uguale a «neutral» non esplicito): fix per garantire
+    trend > range > neutral > else, scala continua senza salti.
+    """
     points = 0
     if snapshot.market_regime == "trend":
         points += 3
     elif snapshot.market_regime == "range":
+        points += 2
+    elif snapshot.market_regime == "neutral":
         points += 1
+    # choppy, volatile, qualsiasi altro valore → 0
 
     if snapshot.volatility_regime == "high":
         points += 3

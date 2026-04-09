@@ -1,9 +1,19 @@
 """
-Opportunity ranking v1: derive *base* ``final_opportunity_score`` from ``screener_score`` plus
-alignment, pattern quality, and pattern strength.
+Opportunity ranking v2: ``final_opportunity_score`` da ``screener_score`` + allineamento
+segnale + qualità pattern + forza pattern.
 
-``list_opportunities`` then applies :mod:`app.services.pattern_timeframe_policy` to adjust the
-score using backtest evidence for the specific ``(pattern, timeframe)`` (no extra DB tables).
+``list_opportunities`` applica poi :mod:`app.services.pattern_timeframe_policy` per
+l'aggiustamento qualità/penalità su backtest (unica fonte di verità per pq).
+
+Modifiche v2 rispetto a v1:
+- ``_QUALITY_FROM_SCORE_MAX`` ridotto 20→14: quality bonus non doveva dominare
+  il 32% del range pratico; ridotto a ~25% — spread qualità 30→22 punti.
+- ``_QUALITY_BAND_BONUS`` ricalibrato coerentemente.
+- ``_ALIGNMENT_CONFLICTING`` -12→-10: simmetria con +10 aligned; il penalty
+  di -12 era eccessivo per pattern contrarian (es. engulfing_bullish in bear regime)
+  che il validator promuove correttamente a "execute".
+- ``_STRENGTH_MAX_BONUS`` 4→8: nel range operativo 0.70–1.0 la differenza era
+  solo 1.2 punti (rumore); ora 2.4 punti — più discriminante senza dominare.
 """
 
 from __future__ import annotations
@@ -18,20 +28,25 @@ _SCREENER_WEIGHT = 5.0  # max 60 points from headline score
 # Reward agreement on directional legs; penalize bullish vs bearish clash; neutral/missing → mixed.
 _ALIGNMENT_ALIGNED = 10.0
 _ALIGNMENT_MIXED = 0.0
-_ALIGNMENT_CONFLICTING = -12.0
+_ALIGNMENT_CONFLICTING = -10.0  # era -12; ridotto per simmetria e per non penalizzare eccessivamente
+                                 # i pattern contrarian (PATTERNS_BEAR_REGIME_ONLY) in bear regime.
 
 # --- Pattern quality: prefer numeric 0..100 backtest score; else fall back to quality band ---
-_QUALITY_FROM_SCORE_MAX = 20.0  # multiply (pq/100) * this
+# Ridotto 20→14: quality non deve da sola guidare il 30%+ del range pratico.
+# I penali per scarsa qualità sono in pattern_timeframe_policy (unica sorgente TF-specifica).
+_QUALITY_FROM_SCORE_MAX = 14.0  # multiply (pq/100) * this; max +14 per pq=100
 _QUALITY_BAND_BONUS = {
-    "high": 14.0,
-    "medium": 7.0,
-    "low": 3.0,
+    "high": 10.0,    # era 14
+    "medium": 5.0,   # era 7
+    "low": 2.0,      # era 3
     "unknown": 0.0,
     "insufficient": 0.0,
 }
 
 # --- Pattern strength: stored ~0..1 in MVP engine ---
-_STRENGTH_MAX_BONUS = 4.0  # strength 1.0 → +4
+# Aumentato 4→8: nel range operativo 0.70–1.0 il vecchio bonus era 1.2 pt (rumore).
+# Con 8 la differenza tra strength=0.70 e strength=1.0 è 2.4 pt — più discriminante.
+_STRENGTH_MAX_BONUS = 8.0  # strength 1.0 → +8
 
 SignalAlignment = Literal["aligned", "mixed", "conflicting"]
 
@@ -89,11 +104,16 @@ def compute_final_opportunity_score(
     """
     Single scalar for sorting: higher = better opportunity.
 
-    Formula (v1):
-      base = screener_score * SCREENER_WEIGHT
-      + alignment_bonus(aligned/mixed/conflicting)
-      + quality_bonus(pq score or band)
-      + strength_bonus(pattern_strength in 0..1)
+    Formula (v2):
+      base = screener_score * SCREENER_WEIGHT          (max 60)
+      + alignment_bonus(aligned/mixed/conflicting)     (±10)
+      + quality_bonus(pq score or band)                (max +14)
+      + strength_bonus(pattern_strength in 0..1)       (max +8)
+
+    Poi ``apply_pattern_timeframe_policy`` applica ulteriori penalità
+    per qualità bassa su quel TF specifico (non doppione: le penalità
+    riguardano il TF, il quality_bonus qui riguarda la qualità assoluta
+    del pattern su tutto lo storico).
     Floored at 0, rounded to 2 decimals.
     """
     alignment = compute_signal_alignment(score_direction, latest_pattern_direction)

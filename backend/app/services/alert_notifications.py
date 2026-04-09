@@ -21,7 +21,7 @@ from decimal import Decimal
 from urllib.parse import quote
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -178,7 +178,7 @@ def _telegram_configured() -> bool:
     return bool(settings.telegram_bot_token.strip()) and bool(settings.telegram_chat_id.strip())
 
 
-async def _already_sent(
+async def _try_claim_notification(
     session: AsyncSession,
     *,
     exchange: str,
@@ -186,18 +186,35 @@ async def _already_sent(
     timeframe: str,
     context_timestamp,
 ) -> bool:
-    stmt = (
-        select(AlertNotificationSent.id)
-        .where(
-            AlertNotificationSent.exchange == exchange,
-            AlertNotificationSent.symbol == symbol,
-            AlertNotificationSent.timeframe == timeframe,
-            AlertNotificationSent.context_timestamp == context_timestamp,
+    """
+    Tenta di registrare l'alert in modo atomico: INSERT ... ON CONFLICT DO NOTHING RETURNING id.
+    Ritorna True se la riga è stata inserita (= questo worker invia).
+    Ritorna False se era già presente (= alert già inviato, skip).
+
+    Sostituisce il pattern non-atomico SELECT + INSERT separati che esponeva a race condition
+    tra pipeline concorrenti o richieste HTTP simultanee sulla stessa serie.
+    In caso di errore DB fa fail-open (True) per non perdere alert.
+    """
+    try:
+        stmt = (
+            pg_insert(AlertNotificationSent)
+            .values(
+                exchange=exchange,
+                symbol=symbol,
+                timeframe=timeframe,
+                context_timestamp=context_timestamp,
+            )
+            .on_conflict_do_nothing(constraint="uq_alert_notification_sent_series_context")
+            .returning(AlertNotificationSent.id)
         )
-        .limit(1)
-    )
-    r = await session.execute(stmt)
-    return r.scalar_one_or_none() is not None
+        result = await session.execute(stmt)
+        await session.commit()
+        return result.scalar_one_or_none() is not None
+    except Exception as exc:
+        logger.warning(
+            "alert_notifications: dedupe DB claim failed — allow send (fail-open): %s", exc
+        )
+        return True
 
 
 def _response_body_snippet(response: httpx.Response | None, max_len: int = 500) -> str:
@@ -389,13 +406,14 @@ async def _notify_targeted_pipeline(
             "(ALERT_INCLUDE_MEDIA_PRIORITA=true; set false for alta-only)",
         )
 
-    if await _already_sent(
+    claimed = await _try_claim_notification(
         session,
         exchange=opp.exchange,
         symbol=opp.symbol,
         timeframe=opp.timeframe,
         context_timestamp=opp.context_timestamp,
-    ):
+    )
+    if not claimed:
         logger.info(
             "alert_notifications: notification skipped due to dedupe (already sent for this "
             "context) exchange=%s symbol=%s timeframe=%s context_timestamp=%s",
@@ -412,21 +430,12 @@ async def _notify_targeted_pipeline(
     if not ok_discord or not ok_tg:
         logger.warning(
             "alert_notifications: notification failed (one or more channels) discord_ok=%s "
-            "telegram_ok=%s; dedupe not recorded",
+            "telegram_ok=%s",
             ok_discord,
             ok_tg,
         )
         return
 
-    session.add(
-        AlertNotificationSent(
-            exchange=opp.exchange,
-            symbol=opp.symbol,
-            timeframe=opp.timeframe,
-            context_timestamp=opp.context_timestamp,
-        )
-    )
-    await session.commit()
     logger.info(
         "alert_notifications: notification sent successfully (all channels ok, dedupe recorded) "
         "tier=%s media_tier_test=%s exchange=%s symbol=%s timeframe=%s context_timestamp=%s",
@@ -511,13 +520,14 @@ async def _notify_global_pipeline(
     failed_send = 0
 
     for opp in alta_list:
-        if await _already_sent(
+        claimed = await _try_claim_notification(
             session,
             exchange=opp.exchange,
             symbol=opp.symbol,
             timeframe=opp.timeframe,
             context_timestamp=opp.context_timestamp,
-        ):
+        )
+        if not claimed:
             skipped_dedupe += 1
             logger.info(
                 "alert_notifications: global notification skipped due to dedupe "
@@ -536,7 +546,7 @@ async def _notify_global_pipeline(
             failed_send += 1
             logger.warning(
                 "alert_notifications: global notification failed (channels) discord_ok=%s telegram_ok=%s "
-                "exchange=%s symbol=%s timeframe=%s; dedupe not recorded for this series",
+                "exchange=%s symbol=%s timeframe=%s",
                 ok_discord,
                 ok_tg,
                 opp.exchange,
@@ -545,15 +555,6 @@ async def _notify_global_pipeline(
             )
             continue
 
-        session.add(
-            AlertNotificationSent(
-                exchange=opp.exchange,
-                symbol=opp.symbol,
-                timeframe=opp.timeframe,
-                context_timestamp=opp.context_timestamp,
-            )
-        )
-        await session.commit()
         sent += 1
         logger.info(
             "alert_notifications: global notification sent successfully (dedupe recorded) "

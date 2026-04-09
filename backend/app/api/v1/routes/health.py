@@ -16,6 +16,7 @@ from app.core.trade_plan_variant_constants import (
     SCHEDULER_SYMBOLS_BINANCE_1D_REGIME,
     SCHEDULER_SYMBOLS_BINANCE_1H,
     SCHEDULER_SYMBOLS_YAHOO_1H,
+    SIGNAL_MIN_STRENGTH,
 )
 from app.schemas.settings_public import PublicSettingsResponse
 
@@ -59,6 +60,8 @@ async def public_settings() -> PublicSettingsResponse:
         frontend_base_url=base_fe,
         scheduler_universe=scheduler_universe,
         cache_stats=cache_stats,
+        alert_min_strength=settings.alert_min_strength,
+        signal_min_strength=SIGNAL_MIN_STRENGTH,
     )
 
 

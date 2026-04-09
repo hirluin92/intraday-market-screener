@@ -27,11 +27,33 @@ CONFLICT_PENALTY: bool = True
 RANGE_BELOW_SWING: Decimal = Decimal("0.32")
 MIN_STOP_PCT_OF_PRICE: Decimal = Decimal("0.0012")  # 0.12% — floor su titoli liquidi
 
-# Take profit come multipli del rischio R = |entry - stop|
+# Take profit come multipli del rischio R = |entry - stop| (parametri DEFAULT)
 TP1_R_MULT: Decimal = Decimal("1.5")
 TP2_R_MULT: Decimal = Decimal("2.5")
 # In mercato laterale: target più conservativi (meno estensione attesa)
 TP2_R_MULT_IN_RANGE: Decimal = Decimal("2.0")
+
+# ---------------------------------------------------------------------------
+# Parametri SL/TP ottimizzati per-pattern (MAE/MFE walk-forward, aprile 2026).
+# Formato: pattern_name → (sl_buffer_mult, tp1_r, tp2_r)
+# Solo pattern con almeno 3 blocchi walk-forward positivi vengono inclusi.
+# - sl_buffer_mult: moltiplica il buffer strutturale calcolato da _stop_buffer
+# - tp1_r / tp2_r: sostituiscono TP1_R_MULT / TP2_R_MULT per questo pattern
+# Fonte: optimize_sl_tp.py — EV test positivo e coerente su train/val/test.
+# ---------------------------------------------------------------------------
+PATTERN_SL_TP_CONFIG: dict[str, tuple[float, float, float]] = {
+    # (sl_mult, tp1_r, tp2_r) — ottimizzati con MAE/MFE walk-forward, aprile 2026.
+    # Tutti i pattern hanno EV test positivo e robusto su train/val/test.
+    "macd_divergence_bull":                (1.25, 2.0, 3.5),  # EV test=+0.835R WR=47.5%
+    "rsi_divergence_bear":                 (0.90, 2.0, 3.5),  # EV test=+0.685R WR=38.9%
+    "double_top":                          (0.75, 1.8, 3.5),  # EV test=+0.649R WR=35.0%
+    "double_bottom":                       (1.00, 2.0, 3.5),  # EV test=+0.479R WR=35.7%
+    "rsi_divergence_bull":                 (1.25, 1.8, 3.5),  # EV test=+0.350R WR=37.0%
+    "compression_to_expansion_transition": (1.50, 1.8, 3.5),  # EV test=+0.347R WR=39.6%
+    "rsi_momentum_continuation":           (1.50, 1.5, 3.5),  # EV test=+0.312R WR=42.3%
+    "macd_divergence_bear":                (0.75, 2.0, 3.5),  # EV test=+0.240R WR=22.7%
+    "engulfing_bullish":                   (0.60, 2.0, 3.5),  # EV test=+0.034R WR=16.9%
+}
 
 # --- Varianti esecuzione (backtest confronto) — moltiplicatore sul buffer stop dopo _stop_buffer ---
 STOP_PROFILE_MULT: dict[str, Decimal] = {
@@ -235,6 +257,18 @@ def build_trade_plan_v1(
     buf = _stop_buffer(cl, hi, lo, volatility_regime)
     tp2_mult = _tp2_multiplier(market_regime)
 
+    # Parametri per-pattern ottimizzati (override defaults se disponibili)
+    _pn = (latest_pattern_name or "").lower()
+    _pat_cfg = PATTERN_SL_TP_CONFIG.get(_pn)
+    if _pat_cfg is not None:
+        _sl_mult, _tp1_r, _tp2_r = _pat_cfg
+        buf = buf * Decimal(str(_sl_mult))
+        tp1_override: Decimal | None = Decimal(str(_tp1_r))
+        tp2_override: Decimal | None = Decimal(str(_tp2_r))
+    else:
+        tp1_override = None
+        tp2_override = None
+
     if direction == "none":
         return TradePlanV1(
             trade_direction="none",
@@ -275,8 +309,10 @@ def build_trade_plan_v1(
                     "Stop non valido rispetto al prezzo di ingresso stimato; nessun piano numerico affidabile."
                 ),
             )
-        tp1 = entry + TP1_R_MULT * risk
-        tp2 = entry + tp2_mult * risk
+        _tp1_mult = tp1_override if tp1_override is not None else TP1_R_MULT
+        _tp2_mult = tp2_override if tp2_override is not None else tp2_mult
+        tp1 = entry + _tp1_mult * risk
+        tp2 = entry + _tp2_mult * risk
         reward = tp1 - entry
         rr = reward / risk
         inv = _format_invalidation_long(stop, notes)
@@ -316,8 +352,10 @@ def build_trade_plan_v1(
                 "Stop non valido rispetto al prezzo di ingresso stimato; nessun piano numerico affidabile."
             ),
         )
-    tp1 = entry - TP1_R_MULT * risk
-    tp2 = entry - tp2_mult * risk
+    _tp1_mult = tp1_override if tp1_override is not None else TP1_R_MULT
+    _tp2_mult = tp2_override if tp2_override is not None else tp2_mult
+    tp1 = entry - _tp1_mult * risk
+    tp2 = entry - _tp2_mult * risk
     reward = entry - tp1
     rr = reward / risk
     inv = _format_invalidation_short(stop, notes)

@@ -17,7 +17,7 @@ from app.schemas.features import (
     FeatureRow,
     FeaturesListResponse,
 )
-from app.schemas.indicators import IndicatorRow, IndicatorsListResponse
+from app.schemas.indicators import IndicatorExtractRequest, IndicatorExtractResponse, IndicatorRow, IndicatorsListResponse
 from app.schemas.patterns import (
     PatternExtractRequest,
     PatternExtractResponse,
@@ -36,6 +36,7 @@ from app.services.context_extraction import extract_context
 from app.services.context_query import list_stored_contexts
 from app.services.feature_extraction import extract_features
 from app.services.feature_query import list_stored_features
+from app.services.indicator_extraction import extract_indicators
 from app.services.indicator_query import list_stored_indicators
 from app.services.pattern_extraction import extract_patterns
 from app.services.pattern_query import list_stored_patterns
@@ -164,6 +165,14 @@ async def get_candle_indicators(
     )
     indicators = [IndicatorRow.model_validate(r) for r in rows]
     return IndicatorsListResponse(indicators=indicators, count=len(indicators))
+
+
+@router.post("/indicators/extract", response_model=IndicatorExtractResponse)
+async def extract_candle_indicators(
+    body: IndicatorExtractRequest,
+    session: AsyncSession = Depends(get_db_session),
+) -> IndicatorExtractResponse:
+    return await extract_indicators(session, body)
 
 
 @router.get("/context", response_model=ContextListResponse)

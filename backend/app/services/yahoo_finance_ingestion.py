@@ -20,6 +20,7 @@ import pandas as pd
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.retry import with_retry
 from app.core.yahoo_finance_constants import (
     ALLOWED_YAHOO_SYMBOLS,
     DEFAULT_YAHOO_SYMBOLS,
@@ -139,10 +140,16 @@ class YahooFinanceIngestionService:
                 else:
                     yf_interval, period = _YAHOO_TF_PARAMS[tf]
                 try:
-                    df = await asyncio.to_thread(_history_sync, symbol, yf_interval, period)
+                    df = await with_retry(
+                        lambda s=symbol, i=yf_interval, p=period: asyncio.to_thread(
+                            _history_sync, s, i, p
+                        ),
+                        label=f"yahoo_finance.history({symbol},{tf})",
+                        max_attempts=3,
+                    )
                 except Exception:
                     logger.exception(
-                        "yahoo_finance: fetch failed symbol=%s timeframe=%s",
+                        "yahoo_finance: fetch failed definitivamente symbol=%s timeframe=%s",
                         symbol,
                         tf,
                     )

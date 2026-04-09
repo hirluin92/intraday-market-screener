@@ -177,8 +177,9 @@ async def extract_features(
     candles_featured = 0
 
     for ex, sym, tf in series:
-        # Load one extra oldest candle so the first candle in the requested window can use
-        # pct_return_1 / volume_ratio_vs_prev vs the true prior bar (not only intra-window prev).
+        # Prende le N+1 candele PIÙ RECENTI (desc + reverse) così il pipeline
+        # elabora sempre dati freschi, non i più vecchi.
+        # +1 extra per avere la candela precedente come lookback per pct_return / volume_ratio.
         stmt = (
             select(Candle)
             .where(
@@ -186,11 +187,11 @@ async def extract_features(
                 Candle.symbol == sym,
                 Candle.timeframe == tf,
             )
-            .order_by(Candle.timestamp.asc())
+            .order_by(Candle.timestamp.desc())
             .limit(request.limit + 1)
         )
         result = await session.execute(stmt)
-        candles = list(result.scalars().all())
+        candles = list(reversed(list(result.scalars().all())))
         candles_read += len(candles)
 
         if not candles:

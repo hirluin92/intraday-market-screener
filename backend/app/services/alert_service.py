@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
 
 import httpx
-from sqlalchemy import delete, select
+from sqlalchemy import delete
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.core.config import settings
@@ -94,7 +94,7 @@ def _bar_hour_key(timestamp: datetime) -> str:
     return ts.strftime("%Y%m%d%H")
 
 
-async def _is_already_sent(
+async def _try_claim_alert(
     symbol: str,
     timeframe: str,
     provider: str,
@@ -102,41 +102,18 @@ async def _is_already_sent(
     direction: str,
     timestamp: datetime,
 ) -> bool:
-    """True se esiste già una riga per questa chiave (persistente tra restart)."""
-    bar_key = _bar_hour_key(timestamp)
-    try:
-        async with AsyncSessionLocal() as session:
-            stmt = (
-                select(AlertSent.id)
-                .where(
-                    AlertSent.symbol == symbol,
-                    AlertSent.timeframe == timeframe,
-                    AlertSent.provider == provider,
-                    AlertSent.pattern_name == pattern_name,
-                    AlertSent.direction == direction,
-                    AlertSent.bar_hour_utc == bar_key,
-                )
-                .limit(1)
-            )
-            result = await session.execute(stmt)
-            return result.scalar_one_or_none() is not None
-    except Exception as exc:
-        logger.warning("alert dedupe DB read failed — allow send: %s", exc)
-        return False
+    """
+    Gate atomico anti-duplicato: tenta un INSERT ... ON CONFLICT DO NOTHING RETURNING id.
 
+    Ritorna True  se la riga e' stata inserita (= questo worker ha acquisito il diritto di inviare).
+    Ritorna False se era gia' presente (= alert gia' inviato da un altro worker/chiamata).
 
-async def _mark_as_sent(
-    symbol: str,
-    timeframe: str,
-    provider: str,
-    pattern_name: str,
-    direction: str,
-    timestamp: datetime,
-    *,
-    telegram_ok: bool = False,
-    discord_ok: bool = False,
-) -> None:
-    """Registra dedup dopo il tentativo di invio (INSERT … ON CONFLICT DO NOTHING)."""
+    Non esiste una SELECT separata: la lettura e la scrittura avvengono in un'unica operazione
+    atomica DB, eliminando la race condition read-then-write.
+
+    In caso di errore DB logga un warning e ritorna True (fail-open: meglio un duplicato
+    occasionale che nessun alert).
+    """
     bar_key = _bar_hour_key(timestamp)
     try:
         async with AsyncSessionLocal() as session:
@@ -149,15 +126,19 @@ async def _mark_as_sent(
                     pattern_name=pattern_name,
                     direction=direction,
                     bar_hour_utc=bar_key,
-                    telegram_ok=telegram_ok,
-                    discord_ok=discord_ok,
+                    telegram_ok=False,
+                    discord_ok=False,
                 )
                 .on_conflict_do_nothing(constraint="uq_alert_sent_dedup")
+                .returning(AlertSent.id)
             )
-            await session.execute(stmt)
+            result = await session.execute(stmt)
             await session.commit()
+            inserted_id = result.scalar_one_or_none()
+            return inserted_id is not None
     except Exception as exc:
-        logger.warning("alert dedupe DB write failed: %s", exc)
+        logger.warning("alert dedupe DB claim failed — allow send (fail-open): %s", exc)
+        return True
 
 
 async def cleanup_old_alerts(days_to_keep: int = 7) -> int:
@@ -541,16 +522,17 @@ async def send_alert_deduped(
     if timestamp is None:
         timestamp = datetime.now(timezone.utc)
 
-    if await _is_already_sent(
+    claimed = await _try_claim_alert(
         symbol,
         timeframe,
         provider,
         pattern_name,
         direction,
         timestamp,
-    ):
+    )
+    if not claimed:
         logger.debug(
-            "Alert già inviato (DB): %s %s %s %s",
+            "Alert gia' inviato (DB gate atomico): %s %s %s %s",
             symbol,
             timeframe,
             pattern_name,
@@ -575,16 +557,5 @@ async def send_alert_deduped(
         funding_bias=funding_bias,
         timestamp=timestamp,
         exchange=exchange,
-    )
-
-    await _mark_as_sent(
-        symbol,
-        timeframe,
-        provider,
-        pattern_name,
-        direction,
-        timestamp,
-        telegram_ok=False,
-        discord_ok=False,
     )
     return True

@@ -193,6 +193,8 @@ async def extract_context(
     features_read = 0
 
     for ex, sym, tf in series:
+        # Prende le N feature PIÙ RECENTI (desc + reverse) per processare
+        # il contesto su dati freschi invece dei più vecchi.
         stmt = (
             select(CandleFeature)
             .where(
@@ -200,11 +202,11 @@ async def extract_context(
                 CandleFeature.symbol == sym,
                 CandleFeature.timeframe == tf,
             )
-            .order_by(CandleFeature.timestamp.asc())
+            .order_by(CandleFeature.timestamp.desc())
             .limit(request.limit)
         )
         result = await session.execute(stmt)
-        features = list(result.scalars().all())
+        features = list(reversed(list(result.scalars().all())))
         features_read += len(features)
 
         for i, feat in enumerate(features):

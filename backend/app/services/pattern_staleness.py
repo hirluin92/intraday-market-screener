@@ -16,7 +16,7 @@ STALE_THRESHOLD_BARS_BY_TIMEFRAME: dict[str, int] = {
     "1m": 10,
     "5m": 8,
     "15m": 5,
-    "1h": 3,
+    "1h": 8,   # 8h = copertura di un'intera sessione di trading (era 3h)
     "1d": 2,
 }
 # TF non in mappa (es. nuovi intervalli): usa questo default.

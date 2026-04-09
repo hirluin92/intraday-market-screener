@@ -4,6 +4,7 @@ Combine latest context snapshots with latest stored pattern per series (MVP, no 
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import UTC, datetime
 
@@ -25,7 +26,10 @@ from app.models.candle_pattern import CandlePattern
 from app.schemas.backtest import PatternBacktestAggregateRow
 from app.schemas.opportunities import OpportunityRow
 from app.schemas.screener import RankedScreenerRow
-from app.services.context_query import list_latest_context_per_series
+from app.services.context_query import (
+    dedupe_latest_contexts_prefer_freshest_candle,
+    list_latest_context_per_series,
+)
 from app.services.pattern_backtest import pattern_quality_lookup_by_name_tf
 from app.services.pattern_query import (
     count_concurrent_patterns_per_series,
@@ -43,7 +47,6 @@ from app.services.pattern_operational_ui import (
 )
 from app.services.pattern_quality import pattern_quality_label_from_score
 from app.services.screener_scoring import SnapshotForScoring, score_snapshot
-from app.services.candle_query import fetch_latest_candles_by_series_keys
 from app.services.trade_plan_backtest import trade_plan_backtest_lookup_by_bucket
 from app.services.trade_plan_live_adjustment import adjust_final_score_for_trade_plan_backtest
 from app.services.trade_plan_live_variant import (
@@ -320,6 +323,10 @@ async def list_opportunities(
         asset_type=asset_type,
         timeframe=timeframe,
     )
+    contexts, candle_map = await dedupe_latest_contexts_prefer_freshest_candle(
+        session,
+        contexts,
+    )
     latest_patterns: list[CandlePattern] = await list_latest_pattern_per_series(
         session,
         symbol=symbol,
@@ -467,6 +474,21 @@ async def list_opportunities(
             ctx.timeframe,
         )
         pat_stale_thresh = stale_threshold_bars(ctx.timeframe)
+
+        # Staleness score decay: abbassa il ranking dei segnali vecchi in modo proporzionale.
+        # Complementa la degradazione decisionale (execute→monitor) già esistente:
+        # anche all'interno del blocco "MONITOR", un segnale fresco precede uno stale
+        # perché ha score più alto.
+        # Formula: per ogni barra oltre la soglia, score scende del 20% massimo.
+        # Es: pattern 2 barre oltre soglia (age_beyond/thresh = 1.0) → -20%.
+        #     pattern 1 barra oltre soglia → -10%.
+        # Il label viene ricalcolato dopo il decay.
+        if pat_stale and age_bars is not None and pat_stale_thresh:
+            age_beyond = max(0, age_bars - pat_stale_thresh)
+            decay_ratio = min(1.0, age_beyond / max(1, pat_stale_thresh))
+            final = max(0.0, round(final * (1.0 - 0.20 * decay_ratio), 2))
+            final_lbl = final_opportunity_label_from_score(final)
+
         pat_val = pattern_is_validated_for_ui(pn, ctx.timeframe)
         pat_op = pattern_operational_status_for_ui(pn, ctx.timeframe, pq_label)
         # Confluence count: numero pattern validati distinti attivi nella stessa barra.
@@ -525,10 +547,6 @@ async def list_opportunities(
         )
 
     ranked = _pre_enrich_sort(out)
-    candle_keys = [
-        (r.provider, r.exchange, r.symbol, r.timeframe) for r in ranked
-    ]
-    candle_map = await fetch_latest_candles_by_series_keys(session, keys=candle_keys)
 
     var_key = opportunity_lookup_key(
         "var",
@@ -569,6 +587,20 @@ async def list_opportunities(
         regime_filter_yahoo = await load_regime_filter(session, provider="yahoo_finance")
     except Exception:
         logger.exception("list_opportunities: load_regime_filter (yahoo) failed; regime fields degraded")
+
+    # ── Prefetch spread IBKR in parallelo (evita 76 chiamate seriali a TWS) ──────
+    ibkr_spread_filter_active_global = (
+        settings.ibkr_enabled and settings.ibkr_max_spread_pct > 0.0
+    )
+    if ibkr_spread_filter_active_global:
+        spread_symbols = [
+            r.symbol for r in ranked
+            if r.latest_pattern_name and not any(
+                r.symbol.upper().endswith(s) for s in ("/USDT", "/BTC", "/ETH", "/BUSD", "/USD")
+            )
+        ]
+        if spread_symbols:
+            await asyncio.gather(*[_get_ibkr_spread(s) for s in spread_symbols], return_exceptions=True)
 
     enriched: list[OpportunityRow] = []
     for r in ranked:

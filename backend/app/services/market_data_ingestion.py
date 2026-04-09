@@ -10,6 +10,7 @@ from app.core.market_identity import (
     DEFAULT_ASSET_TYPE_CRYPTO,
     DEFAULT_PROVIDER_BINANCE,
 )
+from app.core.retry import with_retry
 from app.core.timeframes import ALLOWED_TIMEFRAMES as DEFAULT_TIMEFRAMES_TUPLE
 from app.models.candle import Candle
 from app.schemas.market_data import MarketDataIngestRequest, MarketDataIngestResponse
@@ -164,10 +165,12 @@ class MarketDataIngestionService:
         try:
             for symbol in symbols:
                 for timeframe in timeframes:
-                    batch = await exchange.fetch_ohlcv(
-                        symbol,
-                        timeframe,
-                        limit=request.limit,
+                    batch = await with_retry(
+                        lambda s=symbol, tf=timeframe: exchange.fetch_ohlcv(
+                            s, tf, limit=request.limit
+                        ),
+                        label=f"binance.fetch_ohlcv({symbol},{timeframe})",
+                        max_attempts=3,
                     )
                     if not batch:
                         continue

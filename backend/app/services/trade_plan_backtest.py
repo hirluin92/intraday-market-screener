@@ -508,14 +508,28 @@ async def run_trade_plan_backtest(
     )
 
     series_keys: set[tuple[str, str, str]] = set()
+    oldest_ts: datetime | None = None
     for p, _, _ in rows:
         series_keys.add((p.exchange, p.symbol, p.timeframe))
+        if oldest_ts is None or p.timestamp < oldest_ts:
+            oldest_ts = p.timestamp
+
+    # Limite temporale: carichiamo solo candle a partire dal pattern più vecchio
+    # meno un buffer conservativo (MAX_BARS_ENTRY_SCAN barre → approssimato a 2 giorni
+    # per coprire qualsiasi timeframe), così evitiamo di caricare l'intero storico.
+    from datetime import timedelta
+    candle_since: datetime | None = None
+    if oldest_ts is not None:
+        candle_since = oldest_ts - timedelta(days=2)
 
     or_parts = [
         and_(Candle.exchange == ex, Candle.symbol == sym, Candle.timeframe == tf)
         for ex, sym, tf in series_keys
     ]
-    c_stmt = select(Candle).where(or_(*or_parts)).order_by(
+    c_stmt = select(Candle).where(or_(*or_parts))
+    if candle_since is not None:
+        c_stmt = c_stmt.where(Candle.timestamp >= candle_since)
+    c_stmt = c_stmt.order_by(
         Candle.exchange,
         Candle.symbol,
         Candle.timeframe,

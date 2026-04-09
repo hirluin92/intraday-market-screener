@@ -1,0 +1,99 @@
+2026-04-09 12:11:40 === INIZIO ESTRAZIONE 2 ANNI ALPACA 5m (42000 barre/simbolo) ===
+2026-04-09 12:11:40 Candles gia presenti nel DB dal backfill 3 anni precedente.
+2026-04-09 12:11:40 FASE 2: Feature extraction (42000 barre per simbolo)...
+2026-04-09 12:12:03 FE OK GOOGL series=1 candles=42001
+2026-04-09 12:12:23 FE OK TSLA series=1 candles=42001
+2026-04-09 12:12:44 FE OK AMD series=1 candles=42001
+2026-04-09 12:13:04 FE OK META series=1 candles=42001
+2026-04-09 12:13:25 FE OK NVDA series=1 candles=42001
+2026-04-09 12:13:45 FE OK NFLX series=1 candles=42001
+2026-04-09 12:14:06 FE OK COIN series=1 candles=42001
+2026-04-09 12:14:26 FE OK MSTR series=1 candles=42001
+2026-04-09 12:14:45 FE OK HOOD series=1 candles=42001
+2026-04-09 12:15:02 FE OK SHOP series=1 candles=42001
+2026-04-09 12:15:17 FE OK SOFI series=1 candles=42001
+2026-04-09 12:15:37 FE OK ZS series=1 candles=42001
+2026-04-09 12:15:58 FE OK NET series=1 candles=42001
+2026-04-09 12:16:14 FE OK CELH series=1 candles=42001
+2026-04-09 12:16:35 FE OK RBLX series=1 candles=42001
+2026-04-09 12:17:16 FE OK PLTR series=1 candles=42001
+2026-04-09 12:17:36 FE OK MDB series=1 candles=42001
+2026-04-09 12:17:47 FE OK SMCI series=1 candles=42001
+2026-04-09 12:18:00 FE OK DELL series=1 candles=42001
+2026-04-09 12:18:14 FE OK NVO series=1 candles=42001
+2026-04-09 12:18:26 FE OK LLY series=1 candles=42001
+2026-04-09 12:18:39 FE OK MRNA series=1 candles=42001
+2026-04-09 12:18:53 FE OK NKE series=1 candles=42001
+2026-04-09 12:19:05 FE OK TGT series=1 candles=42001
+2026-04-09 12:19:18 FE OK SCHW series=1 candles=42001
+2026-04-09 12:19:31 FE OK WMT series=1 candles=42001
+2026-04-09 12:19:43 FE OK SPY series=1 candles=42001
+2026-04-09 12:19:56 FE OK AAPL series=1 candles=42001
+2026-04-09 12:20:10 FE OK AMZN series=1 candles=42001
+2026-04-09 12:20:21 FE OK MSFT series=1 candles=42001
+2026-04-09 12:20:21 FASE 2 completata: OK=30 FAIL=0
+2026-04-09 12:20:21 FASE 3: Context extraction (42000 barre per simbolo)...
+2026-04-09 12:20:38 CTX OK GOOGL features=42000 upserted=42000
+2026-04-09 12:20:56 CTX OK TSLA features=42000 upserted=42000
+2026-04-09 12:21:18 CTX OK AMD features=42000 upserted=42000
+2026-04-09 12:21:40 CTX OK META features=42000 upserted=42000
+2026-04-09 12:22:04 CTX OK NVDA features=42000 upserted=42000
+2026-04-09 12:22:25 CTX OK NFLX features=42000 upserted=42000
+2026-04-09 12:22:51 CTX OK COIN features=42000 upserted=42000
+2026-04-09 12:23:12 CTX OK MSTR features=42000 upserted=42000
+2026-04-09 12:23:37 CTX OK HOOD features=42000 upserted=42000
+2026-04-09 12:23:58 CTX OK SHOP features=42000 upserted=42000
+2026-04-09 12:24:23 CTX OK SOFI features=42000 upserted=42000
+2026-04-09 12:24:44 CTX OK ZS features=42000 upserted=42000
+2026-04-09 12:25:08 CTX OK NET features=42000 upserted=42000
+2026-04-09 12:25:30 CTX OK CELH features=42000 upserted=42000
+2026-04-09 12:25:54 CTX OK RBLX features=42000 upserted=42000
+2026-04-09 12:26:17 CTX OK PLTR features=42000 upserted=42000
+2026-04-09 12:26:39 CTX OK MDB features=42000 upserted=42000
+2026-04-09 12:27:00 CTX OK SMCI features=42000 upserted=42000
+2026-04-09 12:27:20 CTX OK DELL features=42000 upserted=42000
+2026-04-09 12:27:44 CTX OK NVO features=42000 upserted=42000
+2026-04-09 12:28:06 CTX OK LLY features=42000 upserted=42000
+2026-04-09 12:28:30 CTX OK MRNA features=42000 upserted=42000
+2026-04-09 12:28:50 CTX OK NKE features=42000 upserted=42000
+2026-04-09 12:29:14 CTX OK TGT features=42000 upserted=42000
+2026-04-09 12:30:02 CTX OK SCHW features=42000 upserted=42000
+2026-04-09 12:30:20 CTX OK WMT features=42000 upserted=42000
+2026-04-09 12:30:37 CTX OK SPY features=42000 upserted=42000
+2026-04-09 12:30:55 CTX OK AAPL features=42000 upserted=42000
+2026-04-09 12:31:18 CTX OK AMZN features=42000 upserted=42000
+2026-04-09 12:31:44 CTX OK MSFT features=42000 upserted=42000
+2026-04-09 12:31:44 FASE 3 completata: OK=30 FAIL=0
+2026-04-09 12:31:44 FASE 4: Pattern extraction (42000 barre per simbolo)...
+2026-04-09 12:31:46 PAT FAIL GOOGL Errore del server remoto: (500) Errore interno del server.
+2026-04-09 12:31:47 PAT FAIL TSLA Errore del server remoto: (500) Errore interno del server.
+2026-04-09 12:31:49 PAT FAIL AMD Errore del server remoto: (500) Errore interno del server.
+2026-04-09 12:31:50 PAT FAIL META Errore del server remoto: (500) Errore interno del server.
+2026-04-09 12:31:51 PAT FAIL NVDA Errore del server remoto: (500) Errore interno del server.
+2026-04-09 12:31:52 PAT FAIL NFLX Errore del server remoto: (500) Errore interno del server.
+2026-04-09 12:31:53 PAT FAIL COIN Errore del server remoto: (500) Errore interno del server.
+2026-04-09 12:31:54 PAT FAIL MSTR Errore del server remoto: (500) Errore interno del server.
+2026-04-09 12:31:56 PAT FAIL HOOD Errore del server remoto: (500) Errore interno del server.
+2026-04-09 12:31:57 PAT FAIL SHOP Errore del server remoto: (500) Errore interno del server.
+2026-04-09 12:31:59 PAT FAIL SOFI Errore del server remoto: (500) Errore interno del server.
+2026-04-09 12:32:00 PAT FAIL ZS Errore del server remoto: (500) Errore interno del server.
+2026-04-09 12:32:01 PAT FAIL NET Errore del server remoto: (500) Errore interno del server.
+2026-04-09 12:32:02 PAT FAIL CELH Errore del server remoto: (500) Errore interno del server.
+2026-04-09 12:32:04 PAT FAIL RBLX Errore del server remoto: (500) Errore interno del server.
+2026-04-09 12:32:05 PAT FAIL PLTR Errore del server remoto: (500) Errore interno del server.
+2026-04-09 12:32:06 PAT FAIL MDB Errore del server remoto: (500) Errore interno del server.
+2026-04-09 12:32:07 PAT FAIL SMCI Errore del server remoto: (500) Errore interno del server.
+2026-04-09 12:32:09 PAT FAIL DELL Errore del server remoto: (500) Errore interno del server.
+2026-04-09 12:32:10 PAT FAIL NVO Errore del server remoto: (500) Errore interno del server.
+2026-04-09 12:32:11 PAT FAIL LLY Errore del server remoto: (500) Errore interno del server.
+2026-04-09 12:32:13 PAT FAIL MRNA Errore del server remoto: (500) Errore interno del server.
+2026-04-09 12:32:14 PAT FAIL NKE Errore del server remoto: (500) Errore interno del server.
+2026-04-09 12:32:16 PAT FAIL TGT Errore del server remoto: (500) Errore interno del server.
+2026-04-09 12:32:17 PAT FAIL SCHW Errore del server remoto: (500) Errore interno del server.
+2026-04-09 12:32:18 PAT FAIL WMT Errore del server remoto: (500) Errore interno del server.
+2026-04-09 12:32:20 PAT FAIL SPY Errore del server remoto: (500) Errore interno del server.
+2026-04-09 12:32:21 PAT FAIL AAPL Errore del server remoto: (500) Errore interno del server.
+2026-04-09 12:32:22 PAT FAIL AMZN Errore del server remoto: (500) Errore interno del server.
+2026-04-09 12:32:23 PAT FAIL MSFT Errore del server remoto: (500) Errore interno del server.
+2026-04-09 12:32:23 FASE 4 completata: OK=0 FAIL=30
+2026-04-09 12:32:23 === PIPELINE ESTRAZIONE COMPLETATO ===

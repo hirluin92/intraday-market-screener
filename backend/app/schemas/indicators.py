@@ -1,4 +1,4 @@
-﻿"""Schemi Pydantic per indicatori tecnici."""
+"""Schemi Pydantic per indicatori tecnici."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ class IndicatorExtractRequest(BaseModel):
     limit: int = Field(
         default=5000,
         ge=1,
-        le=10_000,
+        le=50_000,
         description="Max candele piÃ¹ recenti per serie (calcolo in ordine cronologico oldestâ†’newest).",
     )
 

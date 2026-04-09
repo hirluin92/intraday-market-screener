@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
 
@@ -20,28 +21,69 @@ router = APIRouter(prefix="/screener", tags=["screener"])
 opportunities_alias_router = APIRouter(tags=["screener"])
 
 
+@dataclass
+class OpportunityQueryParams:
+    """Parametri condivisi tra /screener/opportunities e /opportunities (alias).
+
+    Usato come Depends() per evitare la duplicazione dei 13 parametri Query
+    nei due handler. FastAPI espone correttamente i parametri nello schema OpenAPI.
+    """
+
+    symbol: str | None = Query(
+        default=None,
+        description="Filter by trading pair. Omit for all series.",
+    )
+    exchange: str | None = Query(
+        default=None,
+        description="Filter by venue (e.g. binance, YAHOO_US). Omit for all venues.",
+    )
+    provider: str | None = Query(
+        default=None,
+        description="Filter by data provider (binance, yahoo_finance). Omit for all.",
+    )
+    asset_type: str | None = Query(
+        default=None,
+        description="Filter by asset class (crypto, stock, etf, index). Omit for all.",
+    )
+    timeframe: OptionalAllMarketsTimeframe = Query(
+        default=None,
+        description="Filter by timeframe. Omit for all timeframes.",
+    )
+    limit: int = Query(default=100, ge=1, le=1000)
+    decision: str | None = Query(
+        default=None,
+        description=(
+            "Filtro semaforo: execute | monitor | discard, oppure IT "
+            "(operabile, da_monitorare, scartare). Alias: operable → execute."
+        ),
+    )
+    min_confluence: int | None = Query(
+        default=None,
+        ge=1,
+        le=10,
+        description=(
+            "Override soglia confluenza: numero minimo di pattern validati distinti "
+            "nella stessa barra per promuovere il segnale a 'execute'. "
+            "Default: valore globale SIGNAL_MIN_CONFLUENCE (attualmente 2). "
+            "Usa 1 per disabilitare il filtro."
+        ),
+    )
+
+
 async def _opportunities_response(
     session: AsyncSession,
-    *,
-    symbol: str | None,
-    exchange: str | None,
-    provider: str | None,
-    asset_type: str | None,
-    timeframe: OptionalAllMarketsTimeframe,
-    limit: int,
-    decision: str | None,
-    min_confluence: int | None = None,
+    params: OpportunityQueryParams,
 ) -> OpportunitiesResponse:
     rows = await list_opportunities(
         session,
-        symbol=symbol,
-        exchange=exchange,
-        provider=provider,
-        asset_type=asset_type,
-        timeframe=timeframe,
-        limit=limit,
-        decision=decision,
-        min_confluence_patterns=min_confluence,
+        symbol=params.symbol,
+        exchange=params.exchange,
+        provider=params.provider,
+        asset_type=params.asset_type,
+        timeframe=params.timeframe,
+        limit=params.limit,
+        decision=params.decision,
+        min_confluence_patterns=params.min_confluence,
     )
     return OpportunitiesResponse(opportunities=rows, count=len(rows))
 
@@ -121,114 +163,18 @@ async def get_ranked_screener(
 
 @router.get("/opportunities", response_model=OpportunitiesResponse)
 async def get_opportunities(
-    symbol: str | None = Query(
-        default=None,
-        description="Filter by trading pair. Omit for all series.",
-    ),
-    exchange: str | None = Query(
-        default=None,
-        description="Filter by venue. Omit for all venues.",
-    ),
-    provider: str | None = Query(
-        default=None,
-        description="Filter by data provider (binance, yahoo_finance). Omit for all.",
-    ),
-    asset_type: str | None = Query(
-        default=None,
-        description="Filter by asset class (crypto, stock, etf, index). Omit for all.",
-    ),
-    timeframe: OptionalAllMarketsTimeframe = Query(
-        default=None,
-        description="Filter by timeframe. Omit for all timeframes.",
-    ),
-    limit: int = Query(default=100, ge=1, le=1000),
-    decision: str | None = Query(
-        default=None,
-        description=(
-            "Filtro semaforo: execute | monitor | discard, oppure IT "
-            "(operabile, da_monitorare, scartare). Alias: operable → execute."
-        ),
-    ),
-    min_confluence: int | None = Query(
-        default=None,
-        ge=1,
-        le=10,
-        description=(
-            "Override soglia confluenza: numero minimo di pattern validati distinti "
-            "nella stessa barra per promuovere il segnale a 'execute'. "
-            "Default: valore globale SIGNAL_MIN_CONFLUENCE (attualmente 2). "
-            "Usa 1 per disabilitare il filtro."
-        ),
-    ),
+    params: OpportunityQueryParams = Depends(),
     session: AsyncSession = Depends(get_db_session),
 ) -> OpportunitiesResponse:
-    return await _opportunities_response(
-        session,
-        symbol=symbol,
-        exchange=exchange,
-        provider=provider,
-        asset_type=asset_type,
-        timeframe=timeframe,
-        limit=limit,
-        decision=decision,
-        min_confluence=min_confluence,
-    )
+    return await _opportunities_response(session, params)
 
 
 @opportunities_alias_router.get("/opportunities", response_model=OpportunitiesResponse)
 async def get_opportunities_short_path(
-    symbol: str | None = Query(
-        default=None,
-        description="Filter by trading pair. Omit for all series.",
-    ),
-    exchange: str | None = Query(
-        default=None,
-        description="Filter by venue. Omit for all venues.",
-    ),
-    provider: str | None = Query(
-        default=None,
-        description="Filter by data provider (binance, yahoo_finance). Omit for all.",
-    ),
-    asset_type: str | None = Query(
-        default=None,
-        description="Filter by asset class (crypto, stock, etf, index). Omit for all.",
-    ),
-    timeframe: OptionalAllMarketsTimeframe = Query(
-        default=None,
-        description="Filter by timeframe. Omit for all timeframes.",
-    ),
-    limit: int = Query(default=100, ge=1, le=1000),
-    decision: str | None = Query(
-        default=None,
-        description=(
-            "Filtro semaforo: execute | monitor | discard, oppure IT "
-            "(operabile, da_monitorare, scartare). Alias: operable → execute."
-        ),
-    ),
-    min_confluence: int | None = Query(
-        default=None,
-        ge=1,
-        le=10,
-        description=(
-            "Override soglia confluenza: numero minimo di pattern validati distinti "
-            "nella stessa barra per promuovere il segnale a 'execute'. "
-            "Default: valore globale SIGNAL_MIN_CONFLUENCE (attualmente 2). "
-            "Usa 1 per disabilitare il filtro."
-        ),
-    ),
+    params: OpportunityQueryParams = Depends(),
     session: AsyncSession = Depends(get_db_session),
 ) -> OpportunitiesResponse:
-    return await _opportunities_response(
-        session,
-        symbol=symbol,
-        exchange=exchange,
-        provider=provider,
-        asset_type=asset_type,
-        timeframe=timeframe,
-        limit=limit,
-        decision=decision,
-        min_confluence=min_confluence,
-    )
+    return await _opportunities_response(session, params)
 
 # ── Executed signals ──────────────────────────────────────────────────────────
 

@@ -202,6 +202,26 @@ export function SignalCard({
         ? "text-[var(--accent-bull)]"
         : "text-[var(--text-secondary)]";
 
+  const scoreInt = Math.round(row.final_opportunity_score ?? 0);
+  const scoreLabel = row.final_opportunity_label ?? "minimal";
+  const scoreLabelIT: Record<string, string> = {
+    strong: "forte",
+    moderate: "buono",
+    weak: "debole",
+    minimal: "scarso",
+  };
+  const scoreLabelDisplay = scoreLabelIT[scoreLabel] ?? scoreLabel;
+  const scorePillCls =
+    scoreLabel === "strong"
+      ? "bg-emerald-500/20 text-emerald-300"
+      : scoreLabel === "moderate"
+        ? "bg-amber-500/20 text-amber-300"
+        : scoreLabel === "weak"
+          ? "bg-slate-600/30 text-slate-300"
+          : "bg-slate-700/20 text-slate-500";
+
+  const topRationale = (row.decision_rationale ?? [])[0] ?? null;
+
   return (
     <article
       id={`card-${cardId}`}
@@ -229,6 +249,12 @@ export function SignalCard({
           </span>
           <span className="font-[family-name:var(--font-trader-mono)] text-xs font-semibold text-[var(--text-secondary)]">
             {dirLabel} {short ? "↓" : "↑"} · {row.timeframe}
+          </span>
+          <span
+            className={`rounded-md px-2 py-0.5 font-[family-name:var(--font-trader-mono)] text-xs font-bold tabular-nums ${scorePillCls}`}
+            title={`Score: ${row.final_opportunity_score}`}
+          >
+            {scoreInt} · {scoreLabelDisplay}
           </span>
         </div>
         <div className="flex items-center gap-2">
@@ -306,6 +332,11 @@ export function SignalCard({
                 style={{ width: `${strPct}%` }}
               />
             </div>
+            {topRationale && !expanded && (
+              <p className="mt-1.5 truncate font-[family-name:var(--font-trader-sans)] text-[10px] italic text-[var(--text-muted)]">
+                {topRationale}
+              </p>
+            )}
           </div>
         </>
       )}

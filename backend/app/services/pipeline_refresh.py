@@ -8,6 +8,8 @@ Ingest: Binance (ccxt) o Yahoo Finance (yfinance) in base a ``PipelineRefreshReq
 from __future__ import annotations
 
 import logging
+from datetime import UTC, timedelta
+from datetime import datetime as _datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -30,8 +32,6 @@ from app.services.yahoo_finance_ingestion import YahooFinanceIngestionService
 
 logger = logging.getLogger(__name__)
 
-_legacy_skip_logged_once = False
-
 
 async def execute_pipeline_refresh(
     session: AsyncSession,
@@ -46,7 +46,6 @@ async def execute_pipeline_refresh(
       - "alpaca"        → AlpacaIngestionService (incrementale: ultime ~50 barre)
       - default         → MarketDataIngestionService (Binance ccxt)
     """
-    global _legacy_skip_logged_once
 
     symbols = [body.symbol] if body.symbol else None
     timeframes = [body.timeframe] if body.timeframe else None
@@ -67,9 +66,7 @@ async def execute_pipeline_refresh(
         ingest_out = await yahoo.ingest(session, ingest_req)
 
     elif body.provider == "alpaca":
-        from datetime import UTC, timedelta
-
-        from app.services.alpaca_ingestion import AlpacaIngestionService
+        from app.services.alpaca_ingestion import AlpacaIngestionService  # noqa: PLC0415
 
         alpaca = AlpacaIngestionService()
         ingest_req = MarketDataIngestRequest(
@@ -80,7 +77,7 @@ async def execute_pipeline_refresh(
         # Aggiornamento incrementale: ultime 2 ore (5m) o 24h (1h) per il ciclo live
         _tf = body.timeframe or "5m"
         _window = timedelta(hours=2) if _tf == "5m" else timedelta(hours=26)
-        _now = __import__("datetime").datetime.now(UTC)
+        _now = _datetime.now(UTC)
         ingest_out = await alpaca.ingest(
             session,
             ingest_req,
@@ -148,12 +145,6 @@ async def execute_pipeline_refresh(
             "alert legacy disabilitato (ALERT_LEGACY_ENABLED=false) — "
             "solo alert pattern via alert_service / pattern_pipeline_alerts"
         )
-        if not _legacy_skip_logged_once:
-            logger.info(
-                "alert legacy disabilitato (ALERT_LEGACY_ENABLED=false); "
-                "skipped maybe_notify_after_pipeline_refresh — uso solo alert pattern"
-            )
-            _legacy_skip_logged_once = True
 
     await invalidate_opportunity_lookups_after_pipeline(
         provider=body.provider,

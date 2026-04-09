@@ -96,11 +96,12 @@ class TTLCache:
             return value
 
     async def invalidate_keys_containing(self, needle: str) -> None:
-        """Rimuove tutte le chiavi che contengono ``needle``."""
+        """Rimuove tutte le chiavi che contengono ``needle``, inclusi i lock associati."""
         async with self._global_lock:
             to_del = [k for k in list(self._store.keys()) if needle in k]
             for k in to_del:
                 self._store.pop(k, None)
+                self._locks.pop(k, None)
         if to_del:
             logger.info("Cache: invalidate_keys_containing %r — rimosse %d chiavi", needle, len(to_del))
 
@@ -108,6 +109,7 @@ class TTLCache:
         async with self._global_lock:
             n = len(self._store)
             self._store.clear()
+            self._locks.clear()
         logger.info("Cache svuotata completamente (%d chiavi)", n)
 
     def stats(self) -> dict[str, Any]:

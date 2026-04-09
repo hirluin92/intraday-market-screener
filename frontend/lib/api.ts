@@ -6,6 +6,34 @@ import { publicEnv } from "./env";
 
 const base = publicEnv.apiUrl.replace(/\/$/, "");
 
+/** fetch con timeout e retry automatico su ERR_CONNECTION_RESET / network error */
+async function fetchWithRetry(
+  input: string,
+  options: RequestInit = {},
+  timeoutMs = 25000,
+  retries = 2,
+): Promise<Response> {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetch(input, { ...options, signal: controller.signal });
+      clearTimeout(timer);
+      return res;
+    } catch (err: unknown) {
+      clearTimeout(timer);
+      const isLast = attempt === retries;
+      const isRetryable =
+        err instanceof TypeError || // network error / ERR_CONNECTION_RESET
+        (err instanceof DOMException && err.name === "AbortError");
+      if (isLast || !isRetryable) throw err;
+      // Attesa esponenziale: 1s, 2s prima di riprovare
+      await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
+    }
+  }
+  throw new Error("fetchWithRetry: unreachable");
+}
+
 /** Piano trade v1 (API /api/v1/screener/opportunities) */
 export type TradePlanV1 = {
   trade_direction: "long" | "short" | "none";
@@ -153,11 +181,48 @@ export async function fetchOpportunities(params: {
   if (params.decision?.trim()) {
     url.searchParams.set("decision", params.decision.trim());
   }
-  const res = await fetch(url.toString(), { cache: "no-store" });
+  const res = await fetchWithRetry(url.toString(), { cache: "no-store" });
   if (!res.ok) {
     const text = await res.text();
     throw new Error(text || `${res.status} ${res.statusText}`);
   }
+  return res.json();
+}
+
+/** Executed signal row from GET /api/v1/screener/executed-signals */
+export type ExecutedSignalRow = {
+  id: number;
+  symbol: string;
+  timeframe: string;
+  provider: string;
+  exchange: string;
+  direction: string;
+  pattern_name: string;
+  pattern_strength: number | null;
+  opportunity_score: number | null;
+  entry_price: number;
+  stop_price: number;
+  take_profit_1: number | null;
+  take_profit_2: number | null;
+  quantity_tp1: number | null;
+  entry_order_id: number | null;
+  tp_order_id: number | null;
+  sl_order_id: number | null;
+  tws_status: string;
+  error: string | null;
+  executed_at: string;
+};
+
+export type ExecutedSignalsResponse = {
+  signals: ExecutedSignalRow[];
+  count: number;
+};
+
+export async function fetchExecutedSignals(limit = 50): Promise<ExecutedSignalsResponse> {
+  const res = await fetchWithRetry(`${base}/api/v1/screener/executed-signals?limit=${limit}`, {
+    cache: "no-store",
+  });
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
   return res.json();
 }
 
@@ -177,7 +242,7 @@ export type IbkrStatus = {
 
 export async function fetchIbkrStatus(): Promise<IbkrStatus | null> {
   try {
-    const res = await fetch(`${base}/api/v1/ibkr/status`, { cache: "no-store" });
+    const res = await fetchWithRetry(`${base}/api/v1/ibkr/status`, { cache: "no-store" });
     if (!res.ok) return null;
     return res.json();
   } catch {
@@ -256,7 +321,10 @@ export type SimulationEquityPoint = {
 };
 
 export type SimulationTradeRow = {
+  /** Barra del segnale (entry). */
   timestamp: string;
+  /** Con track_capital: barra di accredito PnL (uscita). */
+  exit_timestamp?: string | null;
   symbol: string;
   pattern_name: string;
   direction: string;
@@ -296,6 +364,17 @@ export type BacktestSimulationResponse = {
   regime_filter_active?: boolean;
   cooldown_bars_used?: number;
   trades_skipped_by_cooldown?: number;
+  track_capital?: boolean;
+  max_concurrent_positions?: number;
+  avg_capital_utilization?: number | null;
+  trades_skipped_by_capital?: number;
+  /** Anti-leakage IS: lookup qualità con cutoff al primo segnale. */
+  use_temporal_quality?: boolean;
+  quality_lookup_dt_to?: string | null;
+  /** Variante filtro regime SPY 1d effettiva (solo Yahoo + use_regime_filter). */
+  regime_variant_used?: string | null;
+  trades_skipped_by_hour?: number;
+  allowed_hours_utc?: number[] | null;
   note: string | null;
 };
 
@@ -323,6 +402,9 @@ export type OOSResult = {
     | "degradazione_moderata"
     | "possibile_overfitting";
   pattern_names_used: string[];
+  /** Default API true: simulazione con track_capital. */
+  track_capital?: boolean;
+  note_oos?: string;
 };
 
 export type SimulationParams = {
@@ -348,6 +430,17 @@ export type SimulationParams = {
   include_hours?: number[];
   exclude_symbols?: string[];
   include_symbols?: string[];
+  /** Capitale impegnato fino alla chiusura (default API true). */
+  track_capital?: boolean;
+  /** Lookup qualità anti-leakage IS (default API true). */
+  use_temporal_quality?: boolean;
+  /** ema50 | ema9_20 | momentum5d | ema50_rsi (solo con use_regime_filter). */
+  regime_variant?: string;
+  /**
+   * Solo ora UTC della barra di segnale; omesso = tutte.
+   * Non filtra uscite o ore con posizione aperta — può dare metriche diverse da analisi statica per fascia.
+   */
+  allowed_hours_utc?: number[];
 };
 
 export async function fetchBacktestSimulation(
@@ -395,6 +488,23 @@ export async function fetchBacktestSimulation(
   }
   if (params.cooldown_bars != null) {
     url.searchParams.set("cooldown_bars", String(params.cooldown_bars));
+  }
+  if (params.track_capital !== undefined) {
+    url.searchParams.set("track_capital", String(params.track_capital));
+  }
+  if (params.use_temporal_quality !== undefined) {
+    url.searchParams.set(
+      "use_temporal_quality",
+      String(params.use_temporal_quality),
+    );
+  }
+  if (params.regime_variant?.trim()) {
+    url.searchParams.set("regime_variant", params.regime_variant.trim());
+  }
+  if (params.allowed_hours_utc?.length) {
+    for (const h of params.allowed_hours_utc) {
+      url.searchParams.append("allowed_hours_utc", String(h));
+    }
   }
   if (params.exclude_hours?.length) {
     for (const h of params.exclude_hours) {
@@ -444,6 +554,10 @@ export type OutOfSampleParams = {
   max_simultaneous?: number;
   include_trades?: boolean;
   use_regime_filter?: boolean;
+  /** Default API true: simulazione con track_capital. */
+  track_capital?: boolean;
+  /** Default API true: use_temporal_quality (override lookup solo se passato). */
+  use_temporal_quality?: boolean;
 };
 
 export type WalkForwardFoldRow = {
@@ -480,6 +594,8 @@ export type WalkForwardResult = {
     | "possibile_overfitting";
   date_range_start: string;
   date_range_end: string;
+  /** Default API true: simulazione con track_capital. */
+  track_capital?: boolean;
 };
 
 export type WalkForwardParams = {
@@ -498,6 +614,10 @@ export type WalkForwardParams = {
   include_symbols?: string[];
   /** Timeout ms (default 120000). */
   timeoutMs?: number;
+  /** Default API true: simulazione con track_capital. */
+  track_capital?: boolean;
+  /** Default API true: use_temporal_quality. */
+  use_temporal_quality?: boolean;
 };
 
 export async function fetchWalkForward(
@@ -553,6 +673,15 @@ export async function fetchWalkForward(
       if (t) url.searchParams.append("include_symbols", t);
     }
   }
+  if (params.track_capital !== undefined) {
+    url.searchParams.set("track_capital", String(params.track_capital));
+  }
+  if (params.use_temporal_quality !== undefined) {
+    url.searchParams.set(
+      "use_temporal_quality",
+      String(params.use_temporal_quality),
+    );
+  }
   const timeoutMs = params.timeoutMs ?? 120_000;
   const ctrl = new AbortController();
   const tid = setTimeout(() => ctrl.abort(), timeoutMs);
@@ -603,6 +732,15 @@ export async function fetchOutOfSample(
     url.searchParams.set(
       "use_regime_filter",
       String(params.use_regime_filter),
+    );
+  }
+  if (params.track_capital !== undefined) {
+    url.searchParams.set("track_capital", String(params.track_capital));
+  }
+  if (params.use_temporal_quality !== undefined) {
+    url.searchParams.set(
+      "use_temporal_quality",
+      String(params.use_temporal_quality),
     );
   }
   const res = await fetch(url.toString(), { cache: "no-store" });

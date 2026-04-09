@@ -284,7 +284,7 @@ class TradePlanVariantStatusCounts(BaseModel):
 
 
 class SimulationEquityPoint(BaseModel):
-    """Punto della curva equity (timestamp barra segnale / aggiornamento saldo)."""
+    """Punto della curva equity: barra di aggiornamento saldo (segnale se legacy, uscita se ``track_capital``)."""
 
     timestamp: datetime
     equity: float
@@ -293,7 +293,16 @@ class SimulationEquityPoint(BaseModel):
 class SimulationTradeRow(BaseModel):
     """Dettaglio singolo trade simulato (opzionale, solo con ``include_trades=true``)."""
 
-    timestamp: datetime
+    timestamp: datetime = Field(
+        description="Timestamp della barra di segnale (entry).",
+    )
+    exit_timestamp: datetime | None = Field(
+        default=None,
+        description=(
+            "Solo con track_capital=true: barra in cui si accredita il PnL (uscita trade plan). "
+            "Omesso con track_capital=false (PnL alla barra del segnale)."
+        ),
+    )
     symbol: str
     pattern_name: str
     direction: str
@@ -312,6 +321,51 @@ class SimulationTradeRow(BaseModel):
         description="win/loss da segno del forward %; flat se movimento nullo.",
     )
     capital_after: float
+    candle_pattern_id: int | None = Field(
+        default=None,
+        description="ID riga ``candle_patterns`` (CandlePattern.id) per join con dataset ML.",
+    )
+
+
+class PatternSimulationAuditRow(BaseModel):
+    """Stato esecuzione simulazione per singolo ``candle_pattern_id`` (anti-leakage: solo IS)."""
+
+    candle_pattern_id: int
+    executed: bool = Field(description="True se il segnale è stato effettivamente tradato nella simulazione.")
+    skip_reason: str | None = Field(
+        default=None,
+        description=(
+            "Se non eseguito: motivo (es. regime_filter, capital_constraint, hour_filter, cooldown, "
+            "trade_plan_not_triggered). Null se eseguito."
+        ),
+    )
+    pnl_r: float | None = Field(
+        default=None,
+        description="R del trade plan se eseguito; altrimenti None.",
+    )
+    open_positions_at_signal: int = Field(
+        default=0,
+        description="Posizioni ancora aperte (track_capital) alla barra del segnale, dopo uscite su quella barra.",
+    )
+    capital_available_pct: float = Field(
+        default=0.0,
+        description="(equity − capitale impegnato) / equity × 100 alla barra del segnale.",
+    )
+
+
+class DailySessionStats(BaseModel):
+    """Statistiche per sessione giornaliera (data UTC di uscita trade; R netti sommati)."""
+
+    n_giorni_trading: int
+    n_giorni_positivi: int
+    n_giorni_negativi: int
+    pct_giorni_positivi: float
+    peggior_giorno_r: float
+    peggior_giorno_data: str
+    miglior_giorno_r: float
+    miglior_giorno_data: str
+    avg_giorno_r: float
+    max_perdita_rolling_5d_r: float
 
 
 class BacktestSimulationResponse(BaseModel):
@@ -401,7 +455,103 @@ class BacktestSimulationResponse(BaseModel):
         default=0,
         description="Segnali esclusi per anti-overlap sulla stessa serie (symbol+timeframe+provider).",
     )
+    track_capital: bool = Field(
+        default=True,
+        description="Se true (default API), capitale impegnato fino all'uscita e PnL realizzato alla chiusura (simulazione più realistica).",
+    )
+    max_concurrent_positions: int = Field(
+        default=0,
+        description="Massimo numero di posizioni aperte contemporaneamente osservato (solo track_capital=true).",
+    )
+    avg_capital_utilization: float | None = Field(
+        default=None,
+        description="Media (capitale impegnato / equity) sulle barre segnale con track_capital=true.",
+    )
+    trades_skipped_by_capital: int = Field(
+        default=0,
+        description="Segnali non tradati per slot esauriti o capitale disponibile insufficiente (solo track_capital=true).",
+    )
+    use_temporal_quality: bool = Field(
+        default=True,
+        description=(
+            "Richiesta lookup qualità senza leakage: se attivo (default) e senza quality_lookup_override, "
+            "il lookup usa solo pattern con timestamp ≤ primo segnale della simulazione."
+        ),
+    )
+    quality_lookup_dt_to: str | None = Field(
+        default=None,
+        description="Cutoff ISO UTC effettivo per pattern_quality (None se lookup completo o override).",
+    )
+    regime_variant_used: str | None = Field(
+        default=None,
+        description=(
+            "Variante filtro regime SPY 1d applicata (ema50, ema9_20, momentum5d, ema50_rsi). "
+            "None se use_regime_filter=false o provider diverso da Yahoo."
+        ),
+    )
+    trades_skipped_by_hour: int = Field(
+        default=0,
+        description=(
+            "Segnali esclusi: ora UTC (solo barra segnale) non in whitelist; non riflette ore di holding o uscita."
+        ),
+    )
+    allowed_hours_utc: list[int] | None = Field(
+        default=None,
+        description=(
+            "Whitelist ore UTC (0–23) sulla barra del segnale; None = filtro disattivo. "
+            "Non equivale a classificare il PnL per fascia oraria di uscita."
+        ),
+    )
+    daily_stats: DailySessionStats | None = Field(
+        default=None,
+        description=(
+            "Solo con include_trades=true e track_capital=true: somma R netti per giorno UTC "
+            "(data exit_timestamp), peggior/miglior giorno, rolling 5 giorni."
+        ),
+    )
+    pattern_simulation_audit: list[PatternSimulationAuditRow] = Field(
+        default_factory=list,
+        description=(
+            "Solo con include_pattern_audit=true nella richiesta simulazione: uno snapshot per ogni "
+            "CandlePattern processato (eseguito o saltato con motivo)."
+        ),
+    )
     note: str | None = None
+
+
+class MonteCarloDrawdownStats(BaseModel):
+    """Distribuzione drawdown massimo (bootstrap su R netti)."""
+
+    median_pct: float
+    p95_pct: float
+    p99_pct: float
+    max_ever_pct: float
+
+
+class MonteCarloRendimentoStats(BaseModel):
+    """Distribuzione rendimento finale % sul capitale."""
+
+    median_pct: float
+    p5_pct: float
+    p95_pct: float
+
+
+class MonteCarloProbabilitaStats(BaseModel):
+    """Frazioni di simulazioni per esiti aggregati."""
+
+    pct_positive: float
+    pct_ruin_50pct_dd: float
+
+
+class MonteCarloResponse(BaseModel):
+    """Risultato Monte Carlo bootstrap su trade storici da simulazione backtest."""
+
+    n_trades_storici: int
+    n_simulations: int
+    n_trades_per_sim: int
+    drawdown: MonteCarloDrawdownStats
+    rendimento: MonteCarloRendimentoStats
+    probabilita: MonteCarloProbabilitaStats
 
 
 class OOSSetMetrics(BaseModel):
@@ -448,6 +598,10 @@ class OOSValidationResponse(BaseModel):
         default="",
         description="Nota sulla metodologia OOS (anti-leakage).",
     )
+    track_capital: bool = Field(
+        default=True,
+        description="Se true, stessa logica di GET /backtest/simulation con track_capital (default OOS).",
+    )
 
 
 class WalkForwardFoldResponse(BaseModel):
@@ -489,6 +643,10 @@ class WalkForwardResponse(BaseModel):
     ]
     date_range_start: str
     date_range_end: str
+    track_capital: bool = Field(
+        default=True,
+        description="Se true, stessa logica di GET /backtest/simulation con track_capital (default walk-forward).",
+    )
 
 
 class TradePlanVariantBestResponse(BaseModel):

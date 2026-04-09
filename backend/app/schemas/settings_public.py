@@ -33,3 +33,9 @@ class PublicSettingsResponse(BaseModel):
         default_factory=dict,
         description="Statistiche cache lookup opportunità (pattern_quality, trade_plan_backtest, variant_best).",
     )
+    alert_min_strength: float = Field(
+        description="Soglia strength alert (Settings.alert_min_strength / ALERT_MIN_STRENGTH).",
+    )
+    signal_min_strength: float = Field(
+        description="Soglia strength execute/validator (trade_plan_variant_constants.SIGNAL_MIN_STRENGTH).",
+    )
