@@ -574,6 +574,14 @@ async def get_out_of_sample(
             "1 = nessun filtro (default). 2 = confluenza richiesta (2+ pattern concordano)."
         ),
     ),
+    only_regime: str | None = Query(
+        default=None,
+        description=(
+            "Filtra le barre per regime SPY: 'bull', 'bear' o 'neutral'. "
+            "Richiede use_regime_filter=true. Utile per testare l'edge di un pattern "
+            "solo in un regime specifico (es. resistance_rejection solo in bear)."
+        ),
+    ),
     session: AsyncSession = Depends(get_db_session),
 ) -> OOSValidationResponse:
     """
@@ -599,6 +607,7 @@ async def get_out_of_sample(
         min_confluence_patterns=min_confluence_patterns,
         symbol=symbol,
         exchange=exchange,
+        only_regime=only_regime,
     )
 
 

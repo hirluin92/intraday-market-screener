@@ -305,7 +305,13 @@ async def run_simulation(
     include_pattern_audit: bool = False,
     pattern_timestamp_order: Literal["asc", "desc"] = "asc",
     min_confluence_patterns: int = 1,
+    only_regime: str | None = None,
 ) -> BacktestSimulationResponse:
+    """
+    only_regime: se fornito ('bull'|'bear'|'neutral'), esclude le barre in cui il regime SPY
+    non corrisponde. Richiede use_regime_filter=True e provider in (yahoo_finance, alpaca).
+    Utile per testare l'edge di un pattern in un regime specifico.
+    """
     _ = seed  # compat API: simulazione deterministica, seed ignorato
 
     # Crypto 24/7: nessun filtro orario. Yahoo: nessun default implicito; solo
@@ -344,7 +350,7 @@ async def run_simulation(
     _regime_vf = normalize_regime_variant(regime_variant)
     regime_variant_used: str | None = (
         _regime_vf
-        if (use_regime_filter and (provider or "").strip().lower() == "yahoo_finance")
+        if (use_regime_filter and (provider or "").strip().lower() in ("yahoo_finance", "alpaca"))
         else None
     )
 
@@ -601,8 +607,10 @@ async def run_simulation(
 
     regime_filter = None
     regime_filter_active = False
-    # Filtro regime solo Yahoo (SPY 1d). Binance: use_regime_filter ignorato — edge indipendente da BTC.
-    if use_regime_filter and (provider or "").strip().lower() == "yahoo_finance":
+    # Filtro regime SPY 1d: Yahoo (nativo) e Alpaca US stocks (riutilizza dati SPY Yahoo 1d).
+    # Binance: ignorato — edge crypto indipendente da SPY.
+    _prov_lower = (provider or "").strip().lower()
+    if use_regime_filter and _prov_lower in ("yahoo_finance", "alpaca"):
         regime_filter = await load_regime_filter(
             session,
             dt_from=dt_from,
@@ -727,6 +735,26 @@ async def run_simulation(
                 sorted(hours_set),
                 ts_bar.tzinfo,
             )
+
+        # Filtro only_regime: salta le barre dove il regime SPY non corrisponde al target.
+        if only_regime and regime_filter is not None:
+            _bar_regime = regime_filter.get_regime_label(ts_bar)
+            _only_low = only_regime.strip().lower()
+            if _only_low in ("bull", "bullish"):
+                if _bar_regime not in ("bull", "bullish"):
+                    skipped += len(group_rows)
+                    trades_skipped_by_regime += len(group_rows)
+                    continue
+            elif _only_low in ("bear", "bearish"):
+                if _bar_regime not in ("bear", "bearish"):
+                    skipped += len(group_rows)
+                    trades_skipped_by_regime += len(group_rows)
+                    continue
+            elif _only_low in ("neutral", "sideways"):
+                if _bar_regime not in ("neutral", "sideways", "ranging"):
+                    skipped += len(group_rows)
+                    trades_skipped_by_regime += len(group_rows)
+                    continue
 
         skip_bar = False
         if _include:
@@ -863,9 +891,8 @@ async def run_simulation(
             )
 
             # PATTERNS_BEAR_REGIME_ONLY: applicare il filtro SOLO se il regime filter è
-            # caricato (provider yahoo_finance con use_regime_filter=True). Per provider
-            # senza dati SPY (alpaca, binance) regime_filter=None → skip non applicato:
-            # l'edge di questi pattern sarà valutato senza vincolo di regime.
+            # caricato (yahoo_finance o alpaca con use_regime_filter=True). Per binance
+            # regime_filter=None → skip non applicato.
             if pat.pattern_name in PATTERNS_BEAR_REGIME_ONLY and regime_filter is not None:
                 if _regime_label_now not in ("bear", "bearish"):
                     trades_skipped_by_regime += 1

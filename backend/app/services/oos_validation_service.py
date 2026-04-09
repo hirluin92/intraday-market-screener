@@ -62,6 +62,7 @@ async def run_oos_validation(
     min_confluence_patterns: int = 1,
     symbol: str | None = None,
     exchange: str | None = None,
+    only_regime: str | None = None,
 ) -> OOSValidationResponse:
     train_end, test_start = _split_cutoff_utc(cutoff_date)
 
@@ -97,6 +98,7 @@ async def run_oos_validation(
         min_confluence_patterns=min_confluence_patterns,
         symbol=symbol,
         exchange=exchange,
+        only_regime=only_regime,
     )
 
     test_result = await run_backtest_simulation(
@@ -120,6 +122,7 @@ async def run_oos_validation(
         min_confluence_patterns=min_confluence_patterns,
         symbol=symbol,
         exchange=exchange,
+        only_regime=only_regime,
     )
 
     train_exp = train_result.expectancy_r
