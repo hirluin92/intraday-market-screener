@@ -87,7 +87,7 @@ async def _chunked_upsert_candles(
         chunk = rows[i : i + _UPSERT_CHUNK_SIZE]
         stmt = insert(Candle).values(chunk)
         stmt = stmt.on_conflict_do_nothing(
-            constraint="uq_candles_exchange_symbol_timeframe_timestamp",
+            constraint="uq_candles_provider_exchange_symbol_timeframe_timestamp",
         )
         result = await session.execute(stmt)
         rc = result.rowcount

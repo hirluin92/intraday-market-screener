@@ -24,9 +24,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import UTC, datetime, timezone
+from datetime import UTC, datetime, time, timezone
 from decimal import Decimal
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -49,22 +50,23 @@ _YAHOO_1H_SYMBOLS: list[str] = [sym for sym, tf in SCHEDULER_SYMBOLS_YAHOO_1H if
 # Quante barre storiche richiedere per ogni simbolo (2 = ultima completata + corrente)
 _BARS_TO_FETCH: int = 2
 
-# Ore mercato US: 9:30-16:00 ET = 13:30-20:00 UTC
-_MARKET_OPEN_UTC_H: int = 13
-_MARKET_OPEN_UTC_M: int = 30
-_MARKET_CLOSE_UTC_H: int = 20
-_MARKET_CLOSE_UTC_M: int = 0
+# Timezone US/Eastern — gestisce automaticamente EST (UTC-5) ed EDT (UTC-4).
+_TZ_ET = ZoneInfo("America/New_York")
+_MARKET_OPEN_ET = time(9, 30)
+_MARKET_CLOSE_ET = time(16, 0)
 
 
 def _is_market_hours() -> bool:
-    """True se siamo durante le ore di mercato US (Mon-Fri, 09:30-16:00 ET)."""
-    now = datetime.now(tz=timezone.utc)
-    if now.weekday() >= 5:  # Sabato=5, Domenica=6
+    """True se siamo durante le ore di mercato NYSE (Mon-Fri, 09:30-16:00 ET).
+
+    Usa zoneinfo per gestire correttamente EST/EDT senza costanti UTC hardcoded
+    che richiederebbero aggiornamento manuale a ogni cambio ora legale.
+    """
+    now_et = datetime.now(tz=_TZ_ET)
+    if now_et.weekday() >= 5:  # Sabato=5, Domenica=6
         return False
-    open_minutes = _MARKET_OPEN_UTC_H * 60 + _MARKET_OPEN_UTC_M
-    close_minutes = _MARKET_CLOSE_UTC_H * 60 + _MARKET_CLOSE_UTC_M
-    now_minutes = now.hour * 60 + now.minute
-    return open_minutes <= now_minutes < close_minutes
+    t = now_et.time()
+    return _MARKET_OPEN_ET <= t < _MARKET_CLOSE_ET
 
 
 async def _upsert_live_candles(session: AsyncSession, rows: list[dict[str, Any]]) -> int:
@@ -91,7 +93,7 @@ async def _upsert_live_candles(session: AsyncSession, rows: list[dict[str, Any]]
         chunk = complete_rows[i : i + chunk_size]
         stmt = insert(Candle).values(chunk)
         stmt = stmt.on_conflict_do_nothing(
-            constraint="uq_candles_exchange_symbol_timeframe_timestamp",
+            constraint="uq_candles_provider_exchange_symbol_timeframe_timestamp",
         )
         result = await session.execute(stmt)
         rc = result.rowcount
@@ -103,7 +105,7 @@ async def _upsert_live_candles(session: AsyncSession, rows: list[dict[str, Any]]
         chunk = partial_rows[i : i + chunk_size]
         stmt = insert(Candle).values(chunk)
         stmt = stmt.on_conflict_do_update(
-            constraint="uq_candles_exchange_symbol_timeframe_timestamp",
+            constraint="uq_candles_provider_exchange_symbol_timeframe_timestamp",
             set_={
                 "open": stmt.excluded.open,
                 "high": stmt.excluded.high,

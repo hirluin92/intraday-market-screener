@@ -292,7 +292,7 @@ def _calc_vwap_and_session_levels(
     Calcola VWAP, livelli di sessione e opening range.
 
     Per crypto (provider=binance): VWAP rolling 24h (nessuna sessione fissa).
-    Per Yahoo (ETF/stock): VWAP per sessione US (reset ogni apertura 14:30 UTC).
+    Per Yahoo (ETF/stock): VWAP per sessione US (reset ogni apertura NYSE, 09:30 ET).
 
     Opening range: prime _OR_BARS barre della sessione.
     """
