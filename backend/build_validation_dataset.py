@@ -78,22 +78,24 @@ from app.models.candle import Candle
 from app.models.candle_context import CandleContext
 from app.models.candle_feature import CandleFeature
 from app.models.candle_pattern import CandlePattern
+from app.services.opportunity_final_score import (
+    compute_final_opportunity_score,
+    compute_signal_alignment,
+    final_opportunity_label_from_score,
+)
 from app.services.pattern_backtest import pattern_quality_lookup_by_name_tf
-from app.services.pattern_quality import compute_pattern_quality_score
+from app.services.pattern_quality import pattern_quality_label_from_score
+from app.services.pattern_timeframe_policy import apply_pattern_timeframe_policy
 from app.services.screener_scoring import SnapshotForScoring, score_snapshot
 from app.services.trade_plan_backtest import (
     MAX_BARS_AFTER_ENTRY,
     MAX_BARS_ENTRY_SCAN,
+    TradePlanExecutionResult,
+    build_trade_plan_v1_for_stored_pattern,
+    compute_trade_plan_execution_from_pattern_row,
     _entry_scan_start_idx,
     _find_entry_bar,
-    _simulate_long_after_entry,
-    _simulate_short_after_entry,
 )
-from app.services.trade_plan_engine import build_trade_plan_v1
-from app.services.opportunity_final_score import (
-    compute_final_opportunity_score,
-)
-from app.services.pattern_timeframe_policy import apply_pattern_timeframe_policy
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)s  %(message)s")
 logger = logging.getLogger(__name__)
@@ -153,35 +155,40 @@ async def _load_candidate_patterns(
     return list(result.all())
 
 
-async def _load_forward_candles(
+async def _load_series_candles(
     session: AsyncSession,
     patterns: list[tuple[CandlePattern, Candle, CandleContext]],
 ) -> dict[tuple[str, str, str, str], list[Candle]]:
     """
-    Carica le candele forward per ogni serie (provider, exchange, symbol, timeframe)
-    necessarie alla simulazione.
+    Per ogni serie (provider, exchange, symbol, timeframe), carica le candele
+    da [min_ts - buffer] a [max_ts + forward_window].
+
+    Lo stesso approccio di run_trade_plan_backtest ma con chiave a 4 colonne
+    (include provider dopo il fix A3).
     """
-    oldest_by_series: dict[tuple[str, str, str, str], datetime] = {}
-    for pat, candle, _ in patterns:
-        key = (pat.provider, pat.exchange, pat.symbol, pat.timeframe)
+    oldest: dict[tuple[str, str, str, str], datetime] = {}
+    newest: dict[tuple[str, str, str, str], datetime] = {}
+
+    for _, candle, _ in patterns:
+        key = (candle.provider, candle.exchange, candle.symbol, candle.timeframe)
         ts = candle.timestamp
         if ts.tzinfo is None:
             ts = ts.replace(tzinfo=timezone.utc)
-        if key not in oldest_by_series or ts < oldest_by_series[key]:
-            oldest_by_series[key] = ts
+        if key not in oldest or ts < oldest[key]:
+            oldest[key] = ts
+        if key not in newest or ts > newest[key]:
+            newest[key] = ts
 
-    if not oldest_by_series:
+    if not oldest:
         return {}
 
-    # Raggruppa per (provider, exchange, timeframe) per efficienza della query
-    all_candles: dict[tuple[str, str, str, str], list[Candle]] = defaultdict(list)
+    all_candles: dict[tuple[str, str, str, str], list[Candle]] = {}
 
-    # Carica in batch per serie
-    for (prov, exch, sym, tf), oldest_ts in oldest_by_series.items():
-        since = oldest_ts - timedelta(days=2)
-        # Forward window: MAX_BARS_ENTRY_SCAN + MAX_BARS_AFTER_ENTRY barre
-        # Per sicurezza carichiamo fino a 30 giorni dopo il pattern più vecchio
-        until = oldest_ts + timedelta(days=30)
+    for key in oldest:
+        prov, exch, sym, tf = key
+        since = oldest[key] - timedelta(days=2)
+        # forward: MAX_BARS_ENTRY_SCAN + MAX_BARS_AFTER_ENTRY barre su 1h = ~3 giorni; usiamo 5 per sicurezza
+        until = newest[key] + timedelta(days=5)
 
         stmt = (
             select(Candle)
@@ -198,10 +205,9 @@ async def _load_forward_candles(
             .order_by(Candle.timestamp.asc())
         )
         result = await session.execute(stmt)
-        candles = list(result.scalars().all())
-        all_candles[(prov, exch, sym, tf)].extend(candles)
+        all_candles[key] = list(result.scalars().all())
 
-    return dict(all_candles)
+    return all_candles
 
 
 def _balance_sample(
@@ -265,9 +271,9 @@ async def build_dataset(
         )
         logger.info("Lookup pronto: %d (pattern_name, timeframe) unici", len(pq_lookup))
 
-        # Carica candele forward in bulk
-        logger.info("Caricamento candele forward…")
-        forward_candles = await _load_forward_candles(session, balanced)
+        # Carica candele per serie (include buffer backward + forward window)
+        logger.info("Caricamento candele per serie…")
+        forward_candles = await _load_series_candles(session, balanced)
         logger.info(
             "Serie caricate: %d, totale candele: %d",
             len(forward_candles),
@@ -279,116 +285,100 @@ async def build_dataset(
     skipped = 0
     opp_id = 0
 
+    # Pre-build id_to_index per serie — stessa logica di run_trade_plan_backtest
+    id_to_index: dict[tuple[str, str, str, str], dict[int, int]] = {}
+    for key, clist in forward_candles.items():
+        id_to_index[key] = {c.id: i for i, c in enumerate(clist)}
+
     for pat, candle, ctx in balanced:
         opp_id += 1
-        key = (pat.provider, pat.exchange, pat.symbol, pat.timeframe)
+        key = (candle.provider, candle.exchange, candle.symbol, candle.timeframe)
         series = forward_candles.get(key, [])
+        idx_map = id_to_index.get(key, {})
 
-        # Costruisci trade plan
-        try:
-            plan = build_trade_plan_v1(
-                candle=candle,
-                pattern=pat,
-                context=ctx,
-            )
-        except Exception as exc:
-            logger.debug("build_trade_plan_v1 fallito (symbol=%s pattern=%s): %s",
-                         pat.symbol, pat.pattern_name, exc)
-            skipped += 1
-            continue
-
-        if plan is None:
-            skipped += 1
-            continue
-
-        entry = _d(plan.entry_price)
-        stop = _d(plan.stop_loss)
-        tp1 = _d(plan.take_profit_1) if plan.take_profit_1 else entry
-        tp2 = _d(plan.take_profit_2) if plan.take_profit_2 else tp1
-
-        if stop <= 0 or entry <= 0 or entry == stop:
-            skipped += 1
-            continue
-
-        risk_pct = abs(float(entry - stop)) / float(entry) * 100.0
-
-        # Indice della barra del pattern nella serie
-        pat_ts = candle.timestamp
-        if pat_ts.tzinfo is None:
-            pat_ts = pat_ts.replace(tzinfo=timezone.utc)
-
-        # Trova la barra corrispondente nella serie
-        pat_idx: int | None = None
-        for i, c in enumerate(series):
-            c_ts = c.timestamp
-            if c_ts.tzinfo is None:
-                c_ts = c_ts.replace(tzinfo=timezone.utc)
-            if c_ts == pat_ts:
-                pat_idx = i
-                break
-
+        # Posizione del candle del pattern nella serie
+        pat_idx = idx_map.get(candle.id)
         if pat_idx is None:
             skipped += 1
             continue
 
-        # Pattern quality score
+        # Pattern quality score dal lookup
         pq_agg = pq_lookup.get((pat.pattern_name, pat.timeframe))
         pq_score: float | None = pq_agg.pattern_quality_score if pq_agg else None
 
-        # Screener score (proxy senza tutte le serie, solo context)
-        snapshot = SnapshotForScoring(
+        # Trade plan: usa la funzione già testata in produzione
+        try:
+            plan = build_trade_plan_v1_for_stored_pattern(pat, candle, ctx, pq_lookup)
+        except Exception as exc:
+            logger.debug("build_trade_plan_v1_for_stored_pattern failed (symbol=%s pattern=%s): %s",
+                         pat.symbol, pat.pattern_name, exc)
+            skipped += 1
+            continue
+
+        # Screener score — stessa pipeline di build_trade_plan_v1_for_stored_pattern
+        snap = SnapshotForScoring(
+            exchange=ctx.exchange,
+            symbol=ctx.symbol,
+            timeframe=ctx.timeframe,
+            timestamp=ctx.timestamp,
             market_regime=ctx.market_regime or "neutral",
             volatility_regime=ctx.volatility_regime or "normal",
-            candle_expansion=float(ctx.candle_expansion or 0.0),
+            candle_expansion=ctx.candle_expansion or "normal",
             direction_bias=ctx.direction_bias or "neutral",
-            signal_alignment=ctx.signal_alignment or "neutral",
-            pattern_strength=float(pat.pattern_strength),
-            pattern_direction=pat.direction,
         )
-        scr_score = score_snapshot(snapshot)
+        scored = score_snapshot(snap)
 
-        # Final opportunity score
-        final_score = compute_final_opportunity_score(
-            screener_score=scr_score,
-            pattern_strength=float(pat.pattern_strength),
+        # Final score — identica formula di production
+        pq_label = pattern_quality_label_from_score(pq_score)
+        base_final = compute_final_opportunity_score(
+            screener_score=scored.screener_score,
+            score_direction=scored.score_direction,
+            latest_pattern_direction=pat.direction,
             pattern_quality_score=pq_score,
-            signal_alignment=ctx.signal_alignment or "neutral",
+            pattern_quality_label=pq_label,
+            latest_pattern_strength=pat.pattern_strength,
         )
-        final_score_after_policy = apply_pattern_timeframe_policy(
-            final_score,
-            pattern_name=pat.pattern_name,
-            timeframe=pat.timeframe,
-            pq_score=pq_score,
+        final_score_val, _tf_ok, tf_gate, _tf_f = apply_pattern_timeframe_policy(
+            has_pattern=True,
+            pattern_quality_score=pq_score,
+            _pattern_quality_label=pq_label,
+            base_final_opportunity_score=base_final,
+        )
+        signal_alignment = compute_signal_alignment(scored.score_direction, pat.direction)
+
+        # Simulazione forward: riusa compute_trade_plan_execution_from_pattern_row
+        exec_result: TradePlanExecutionResult | None = compute_trade_plan_execution_from_pattern_row(
+            pat, candle, ctx, series, pat_idx, pq_lookup, cost_rate,
         )
 
-        # Simulazione forward
-        is_long = pat.direction.lower() == "bullish"
-        scan_start = _entry_scan_start_idx(pat_idx, plan.entry_strategy or "close")
+        entry_px = plan.entry_price
+        stop_px = plan.stop_loss
+        tp1_px = plan.take_profit_1
+        tp2_px = plan.take_profit_2
 
-        entry_idx = _find_entry_bar(series, scan_start, entry, MAX_BARS_ENTRY_SCAN)
+        if entry_px is None or stop_px is None:
+            skipped += 1
+            continue
 
-        if entry_idx is None:
+        entry = _d(entry_px)
+        stop = _d(stop_px)
+        tp1 = _d(tp1_px) if tp1_px else entry
+        tp2 = _d(tp2_px) if tp2_px else tp1
+
+        risk_pct = abs(float(entry - stop)) / float(entry) * 100.0 if float(entry) > 0 else 0.0
+
+        if exec_result is None:
             outcome = "no_entry"
             pnl_r = 0.0
             bars_to_entry = None
             bars_to_exit = None
+            entry_filled = False
         else:
-            bars_to_entry = entry_idx - pat_idx
-
-            sim_fn = _simulate_long_after_entry if is_long else _simulate_short_after_entry
-            outcome_raw, pnl_r_raw, exit_idx = sim_fn(
-                series,
-                entry_idx,
-                entry=entry,
-                stop=stop,
-                tp1=tp1,
-                tp2=tp2,
-                max_bars=MAX_BARS_AFTER_ENTRY,
-                cost_rate=cost_rate,
-            )
-            outcome = outcome_raw
-            pnl_r = pnl_r_raw
-            bars_to_exit = exit_idx - entry_idx
+            outcome = exec_result.outcome
+            pnl_r = exec_result.pnl_r
+            bars_to_entry = exec_result.entry_bar_index - pat_idx
+            bars_to_exit = exec_result.exit_bar_index - exec_result.entry_bar_index
+            entry_filled = True
 
         records.append({
             "opportunity_id": opp_id,
@@ -406,13 +396,14 @@ async def build_dataset(
             "risk_pct": round(risk_pct, 4),
             "pattern_strength": round(float(pat.pattern_strength), 4),
             "pattern_quality_score": pq_score,
-            "screener_score": round(scr_score, 2),
-            "final_score": round(final_score_after_policy, 2),
+            "screener_score": scored.screener_score,
+            "signal_alignment": signal_alignment,
+            "final_score": round(final_score_val, 2),
             "outcome": outcome,
             "pnl_r": round(pnl_r, 4),
             "bars_to_entry": bars_to_entry,
             "bars_to_exit": bars_to_exit,
-            "entry_filled": entry_idx is not None,
+            "entry_filled": entry_filled,
         })
 
     logger.info(
