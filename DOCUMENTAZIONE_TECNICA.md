@@ -1965,4 +1965,72 @@ Per capire come una riga della UI viene generata, ecco il percorso completo:
 
 ---
 
+## Appendice B — Limitazioni note e decisioni consapevoli
+
+Questa sezione documenta le limitazioni conosciute del sistema che sono state valutate e accettate intenzionalmente. Lo scopo è evitare che vengano riscoperte e debuggate come bug ignoti in futuro.
+
+### B.1 Festività US nel calcolo VWAP e sessione
+
+**Limitazione:** `_is_us_session()` e `_session_date()` in `indicator_extraction.py`, e `_is_market_hours()` in `tws_live_candle_service.py`, gestiscono correttamente il cambio ora legale EST/EDT tramite `zoneinfo`, ma **non gestiscono le festività USA** (Thanksgiving, Memorial Day, Independence Day, Christmas, mezze giornate di chiusura anticipata alle 13:00 ET).
+
+**Effetto pratico:** nei giorni festivi NYSE, il VWAP di sessione viene calcolato su dati assenti o scarsissimi (volume quasi zero), producendo valori numericamente non significativi. Il live candle updater potrebbe tentare di girare anche in giorni di mercato chiuso. Non genera errori — produce semplicemente indicatori irrilevanti per quella giornata.
+
+**Perché non è stato fixato:** richiederebbe la dipendenza `exchange_calendars` o `pandas_market_calendars`. Il costo in complessità supera il beneficio per uso personale intraday (le festività sono rare e facilmente riconoscibili visivamente sul grafico).
+
+**Fix futuro:** integrare `exchange_calendars.get_calendar("XNYS")` in `_is_us_session()` e `_is_market_hours()` per escludere i giorni di chiusura NYSE.
+
+---
+
+### B.2 Correlazione temporale nel campione di backtest
+
+**Limitazione:** `run_pattern_backtest()` tratta ogni occorrenza storica di un pattern come osservazione indipendente. Due occorrenze dello stesso pattern sullo stesso simbolo a 3 giorni di distanza durante lo stesso trend macro sono altamente correlate — ma il sistema le conta come 2 osservazioni indipendenti.
+
+**Effetto pratico:** gli intervalli di confidenza Wilson mostrati nella pagina backtest sono sistematicamente troppo stretti. La significatività statistica (`***`, `**`, `*`) è probabilmente sovrastimata. Pattern classificati come "statisticamente significativi" potrebbero non esserlo dopo decorrelazione.
+
+**Stesso problema cross-simbolo:** se 10 tech stocks scattano `bull_flag` lo stesso giorno, il backtest vede 10 osservazioni ma è un solo evento macro.
+
+**Fix futuro:** introdurre un gap minimo di N barre tra osservazioni dello stesso pattern/simbolo prima di includerle nel campione, e/o clustering per evento temporale.
+
+---
+
+### B.3 Pesi del sistema di scoring non derivati statisticamente
+
+**Limitazione:** le costanti numeriche che governano il `final_opportunity_score` (quality bonus max, strength bonus, penalità alignment, penalità policy) sono state calibrate qualitativamente, non su un dataset di validazione con esito noto.
+
+**Effetto pratico:** i pesi riflettono giudizio intuitivo ("il quality score dominava troppo") più che ottimizzazione empirica. Possono essere modificati in sessioni successive senza convergenza verso un ottimo misurabile.
+
+**Fix futuro:** costruire un dataset di 100-300 opportunità storiche con esito verificato (TP raggiunto, SL toccato, limbo) e usarlo come baseline per misurare l'effetto di ogni modifica ai pesi prima di applicarla.
+
+---
+
+### B.4 Quality score non stop-aware
+
+**Limitazione:** `run_pattern_backtest()` calcola il win rate confrontando il forward return all'orizzonte primario con zero, senza simulare se lo stop-loss avrebbe interrotto il trade prima. Un trade che scende del 3% (sotto lo stop tipico) ma recupera e chiude positivo viene contato come "win".
+
+**Effetto pratico:** il quality score e il pattern WR tendono a essere ottimistici rispetto alla performance operativa reale. Il sistema sovrastima la qualità dei pattern con alta volatilità intraday.
+
+**Fix futuro:** unificare la logica di `trade_plan_backtest` (stop-aware) con `pattern_backtest` (forward return), oppure aggiungere una penalità basata sulla frequenza di drawdown intraday superiore alla distanza stop tipica.
+
+---
+
+### B.5 ML scorer strutturalmente unidirezionale
+
+**Limitazione:** il ML scorer (`ml_signal_scorer.py`) può solo degradare decisioni `execute → monitor`, mai promuovere `monitor → execute`. È addestrato su dati già filtrati dal validator.
+
+**Effetto pratico:** il modello non può recuperare opportunità che il validator ha scartato anche se statisticamente valide. Il suo valore atteso si limita al filtraggio di falsi positivi. Se il modello tende ad approvare sempre, il suo contributo netto è zero.
+
+**Decisione consapevole:** approccio conservativo accettato per ora. Da valutare empiricamente misurando la frequenza con cui il modello cambia effettivamente la decisione rispetto al suo input.
+
+---
+
+### B.6 Notifiche Telegram/Discord non differenziate per canale
+
+**Limitazione:** gli alert di mercato (nuovi segnali) e gli alert operativi (errori TWS, skip auto-execute, degradi di sistema) usano lo stesso canale Telegram/Discord senza distinzione.
+
+**Effetto pratico:** un errore operativo critico ("TWS non connesso, ordini saltati") appare nella stessa notifica dei segnali di trading normali, con priorità percepita identica.
+
+**Fix futuro:** aggiungere un prefisso `🚨 SYSTEM:` o un canale separato per gli alert operativi, permettendo di distinguere i "segnali di mercato da valutare" dagli "errori di sistema che richiedono intervento".
+
+---
+
 *Documento generato da analisi automatica del codice sorgente. Per aggiornamenti, rilanciare l'analisi dopo modifiche significative alla codebase.*
