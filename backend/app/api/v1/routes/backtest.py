@@ -480,11 +480,23 @@ async def get_daily_session_stats(
 async def get_out_of_sample(
     provider: str = Query(
         ...,
-        description="Provider dati (es. yahoo_finance, binance).",
+        description="Provider dati (es. yahoo_finance, binance, alpaca).",
     ),
     timeframe: str = Query(
         ...,
         description="Timeframe (es. 1h, 5m).",
+    ),
+    symbol: str | None = Query(
+        default=None,
+        description=(
+            "Filtra per simbolo singolo (es. AAPL, SPY). "
+            "Raccomandato per 5m Alpaca: riduce il volume dati da 5.8M a ~200k candele per simbolo "
+            "e rende l'OOS ~30x più veloce."
+        ),
+    ),
+    exchange: str | None = Query(
+        default=None,
+        description="Venue (es. ALPACA_US, YAHOO_US, binance). Usare insieme a symbol per massima precisione.",
     ),
     pattern_names: list[str] = Query(
         default=[],
@@ -585,6 +597,8 @@ async def get_out_of_sample(
         track_capital=track_capital,
         use_temporal_quality=use_temporal_quality,
         min_confluence_patterns=min_confluence_patterns,
+        symbol=symbol,
+        exchange=exchange,
     )
 
 

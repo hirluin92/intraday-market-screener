@@ -856,7 +856,11 @@ async def run_simulation(
                 else "neutral"
             )
 
-            if pat.pattern_name in PATTERNS_BEAR_REGIME_ONLY:
+            # PATTERNS_BEAR_REGIME_ONLY: applicare il filtro SOLO se il regime filter è
+            # caricato (provider yahoo_finance con use_regime_filter=True). Per provider
+            # senza dati SPY (alpaca, binance) regime_filter=None → skip non applicato:
+            # l'edge di questi pattern sarà valutato senza vincolo di regime.
+            if pat.pattern_name in PATTERNS_BEAR_REGIME_ONLY and regime_filter is not None:
                 if _regime_label_now not in ("bear", "bearish"):
                     trades_skipped_by_regime += 1
                     skipped += 1

@@ -60,14 +60,16 @@ async def run_oos_validation(
     track_capital: bool = True,
     use_temporal_quality: bool = True,
     min_confluence_patterns: int = 1,
+    symbol: str | None = None,
+    exchange: str | None = None,
 ) -> OOSValidationResponse:
     train_end, test_start = _split_cutoff_utc(cutoff_date)
 
     # Quality lookup solo su pattern ≤ train_end — stesse "regole" per train e test (no leakage).
     train_quality_lookup = await pattern_quality_lookup_by_name_tf(
         session,
-        symbol=None,
-        exchange=None,
+        symbol=symbol,
+        exchange=exchange,
         provider=provider,
         asset_type=None,
         timeframe=timeframe,
@@ -93,6 +95,8 @@ async def run_oos_validation(
         track_capital=track_capital,
         use_temporal_quality=use_temporal_quality,
         min_confluence_patterns=min_confluence_patterns,
+        symbol=symbol,
+        exchange=exchange,
     )
 
     test_result = await run_backtest_simulation(
@@ -114,6 +118,8 @@ async def run_oos_validation(
         track_capital=track_capital,
         use_temporal_quality=use_temporal_quality,
         min_confluence_patterns=min_confluence_patterns,
+        symbol=symbol,
+        exchange=exchange,
     )
 
     train_exp = train_result.expectancy_r
