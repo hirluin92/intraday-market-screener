@@ -103,6 +103,15 @@ def _score_v2(row: dict) -> float:
     return scr + qb + sb + ab
 
 
+def _wilson_ci(wins: int, n: int, z: float = 1.96) -> tuple[float, float]:
+    if n == 0:
+        return 0.0, 100.0
+    p = wins / n
+    center = (p + z**2 / (2 * n)) / (1 + z**2 / n)
+    margin = z * ((p * (1 - p) / n + z**2 / (4 * n**2)) ** 0.5) / (1 + z**2 / n)
+    return round(max(0.0, center - margin) * 100, 1), round(min(1.0, center + margin) * 100, 1)
+
+
 def load_dataset(path: Path) -> list[dict]:
     with path.open(encoding="utf-8") as f:
         return list(csv.DictReader(f))
@@ -113,17 +122,19 @@ def win_rate_by_threshold(
     score_col: str,
     thresholds: list[float],
 ) -> None:
-    print(f"\n{'Threshold':>10} {'n':>6} {'WR%':>7} {'AvgR':>8} {'Prec@K':>8}")
-    print("-" * 45)
+    print(f"\n{'Threshold':>10} {'n':>6} {'WR%':>7} {'AvgR':>8}  {'CI 95%':>14}")
+    print("-" * 55)
     for thr in thresholds:
         subset = [r for r in rows if r["entry_filled"] == "True" and float(r.get(score_col) or 0) >= thr]
         if not subset:
-            print(f"{thr:>10.0f} {'0':>6} {'—':>7} {'—':>8} {'—':>8}")
+            print(f"{thr:>10.0f} {'0':>6} {'—':>7} {'—':>8}  {'—':>14}")
             continue
         wins = sum(1 for r in subset if float(r["pnl_r"]) > 0)
         avg_r = sum(float(r["pnl_r"]) for r in subset) / len(subset)
         wr = wins / len(subset) * 100
-        print(f"{thr:>10.0f} {len(subset):>6} {wr:>6.1f}% {avg_r:>8.3f}R")
+        ci_lo, ci_hi = _wilson_ci(wins, len(subset))
+        ci_str = f"[{ci_lo:.1f}%-{ci_hi:.1f}%]"
+        print(f"{thr:>10.0f} {len(subset):>6} {wr:>6.1f}% {avg_r:>8.3f}R  {ci_str:>14}")
 
 
 def compare_v1_v2(rows: list[dict], thresholds: list[float]) -> None:
@@ -182,28 +193,47 @@ def compare_v1_v2(rows: list[dict], thresholds: list[float]) -> None:
 
 
 def cliff_analysis(rows: list[dict]) -> None:
-    """Analisi del cliff a pq=34: win rate per bucket di quality score."""
-    print("\n" + "=" * 60)
-    print("ANALISI CLIFF pq=34 — WR per bucket quality score")
-    print("=" * 60)
-    buckets = [(0, 20), (20, 34), (34, 45), (45, 60), (60, 80), (80, 101)]
-    print(f"{'PQ bucket':>12} {'n':>6} {'WR%':>7} {'AvgR':>8}")
-    print("-" * 38)
-    for lo, hi in buckets:
+    """Cliff analysis a step 5 sul quality score — verifica se il salto a pq=34 è reale."""
+    print("\n" + "=" * 72)
+    print("CLIFF ANALYSIS pq — step 5 (cerca salti: se smooth → cliff arbitrario)")
+    print("=" * 72)
+    print(f"  {'PQ bucket':14s}  {'n':>5}  {'WR%':>7}  {'AvgR':>8}  {'CI 95%':>14}")
+    print("  " + "-" * 55)
+    for lo in range(0, 100, 5):
+        hi = lo + 5
         subset = [
             r for r in rows
             if r["entry_filled"] == "True"
             and r.get("pattern_quality_score") not in (None, "", "None")
             and lo <= float(r["pattern_quality_score"]) < hi
         ]
-        if not subset:
-            print(f"  [{lo:3d}-{hi:3d}): {'0':>6} {'—':>7} {'—':>8}")
+        n = len(subset)
+        if n == 0:
+            print(f"  [{lo:2d}-{hi:2d}):         {'0':>5}  {'—':>7}  {'—':>8}  {'—':>14}")
             continue
         wins = sum(1 for r in subset if float(r["pnl_r"]) > 0)
-        avg_r = sum(float(r["pnl_r"]) for r in subset) / len(subset)
-        wr = wins / len(subset) * 100
-        marker = " ← cliff" if lo == 34 else ""
-        print(f"  [{lo:3d}-{hi:3d}): {len(subset):>6} {wr:>6.1f}% {avg_r:>8.3f}R{marker}")
+        wr = wins / n * 100
+        avg_r = sum(float(r["pnl_r"]) for r in subset) / n
+        ci_lo_v, ci_hi_v = _wilson_ci(wins, n)
+        ci_str = f"[{ci_lo_v:.1f}%-{ci_hi_v:.1f}%]"
+        marker = "  ← soglia policy" if lo == 30 else ""
+        print(f"  [{lo:2d}-{hi:2d}):         {n:>5}  {wr:>6.1f}%  {avg_r:>8.3f}R  {ci_str:>14}{marker}")
+
+    # Correlazione Pearson r(pq, outcome)
+    pq_rows = [r for r in rows if r["entry_filled"] == "True"
+               and r.get("pattern_quality_score") not in (None, "", "None")]
+    if pq_rows:
+        pq_vals = [float(r["pattern_quality_score"]) for r in pq_rows]
+        wr_vals = [1.0 if float(r["pnl_r"]) > 0 else 0.0 for r in pq_rows]
+        n_pq = len(pq_vals)
+        mean_pq = sum(pq_vals) / n_pq
+        mean_wr = sum(wr_vals) / n_pq
+        cov = sum((p - mean_pq) * (w - mean_wr) for p, w in zip(pq_vals, wr_vals)) / n_pq
+        std_pq = (sum((p - mean_pq) ** 2 for p in pq_vals) / n_pq) ** 0.5
+        std_wr = (sum((w - mean_wr) ** 2 for w in wr_vals) / n_pq) ** 0.5
+        r = cov / (std_pq * std_wr) if std_pq > 0 and std_wr > 0 else 0.0
+        print(f"\n  Pearson r(pq, win) = {r:.3f}  (n={n_pq})")
+        print(f"  → {'segnale forte (|r|>0.15): pq ha potere predittivo reale' if abs(r) > 0.15 else 'segnale debole: pq non predice il win — C1 è urgente'}")
 
 
 def main(args: argparse.Namespace) -> None:

@@ -437,6 +437,28 @@ def write_parquet(records: list[dict], path: Path) -> None:
         logger.info("pandas non disponibile — solo CSV generato.")
 
 
+def _wilson_ci(wins: int, n: int, z: float = 1.96) -> tuple[float, float]:
+    """Wilson score interval 95%. Ritorna (lower%, upper%)."""
+    if n == 0:
+        return 0.0, 100.0
+    p = wins / n
+    center = (p + z**2 / (2 * n)) / (1 + z**2 / n)
+    margin = z * ((p * (1 - p) / n + z**2 / (4 * n**2)) ** 0.5) / (1 + z**2 / n)
+    return round(max(0.0, center - margin) * 100, 1), round(min(1.0, center + margin) * 100, 1)
+
+
+def _bucket_row(subset: list[dict], label: str) -> str:
+    if not subset:
+        return f"  {label:14s}: {'—':>5} {'—':>7} {'—':>8} {'—':>14}"
+    n = len(subset)
+    wins = sum(1 for r in subset if r["pnl_r"] > 0)
+    wr = wins / n * 100
+    avg = sum(r["pnl_r"] for r in subset) / n
+    lo, hi = _wilson_ci(wins, n)
+    ci_str = f"[{lo:.1f}%-{hi:.1f}%]"
+    return f"  {label:14s}: {n:>5}  {wr:>6.1f}%  {avg:>8.3f}R  {ci_str:>14}"
+
+
 def print_summary(records: list[dict]) -> None:
     if not records:
         return
@@ -444,47 +466,76 @@ def print_summary(records: list[dict]) -> None:
     from collections import Counter
 
     total = len(records)
-    filled = sum(1 for r in records if r["entry_filled"])
+    filled = [r for r in records if r["entry_filled"]]
     outcomes = Counter(r["outcome"] for r in records)
-    wins = sum(1 for r in records if r["pnl_r"] > 0 and r["entry_filled"])
-    pnl_values = [r["pnl_r"] for r in records if r["entry_filled"]]
+    wins = sum(1 for r in filled if r["pnl_r"] > 0)
+    pnl_values = [r["pnl_r"] for r in filled]
     avg_pnl = sum(pnl_values) / len(pnl_values) if pnl_values else 0.0
-    win_rate = wins / filled * 100 if filled else 0.0
+    win_rate = wins / len(filled) * 100 if filled else 0.0
+    ci_lo, ci_hi = _wilson_ci(wins, len(filled))
 
-    print("\n" + "=" * 60)
+    print("\n" + "=" * 72)
     print("VALIDATION DATASET — SOMMARIO")
-    print("=" * 60)
-    print(f"  Pattern totali:          {total}")
-    print(f"  Entry fill rate:         {filled}/{total} ({filled/total*100:.1f}%)")
-    print(f"  Win rate (su filled):    {win_rate:.1f}%")
-    print(f"  Avg PnL (su filled):     {avg_pnl:.3f}R")
-    print(f"  Outcome distribution:    {dict(outcomes)}")
-    print()
+    print("=" * 72)
+    print(f"  Pattern totali:      {total}")
+    print(f"  Entry fill rate:     {len(filled)}/{total} ({len(filled)/total*100:.1f}%)")
+    print(f"  Win rate globale:    {win_rate:.1f}%  CI 95% [{ci_lo}%-{ci_hi}%]")
+    print(f"  Avg PnL globale:     {avg_pnl:.3f}R")
+    print(f"  Outcome:             {dict(outcomes)}")
 
-    # Per timeframe
+    # ── Per timeframe ──────────────────────────────────────────────────────
+    print()
     by_tf: dict[str, list] = defaultdict(list)
-    for r in records:
-        if r["entry_filled"]:
-            by_tf[r["timeframe"]].append(r["pnl_r"])
+    for r in filled:
+        by_tf[r["timeframe"]].append(r)
+    print(f"  {'Timeframe':14s}  {'n':>5}  {'WR%':>7}  {'AvgR':>8}  {'CI 95%':>14}")
+    print("  " + "-" * 55)
+    for tf, rows in sorted(by_tf.items()):
+        print(_bucket_row(rows, tf))
 
-    print("  Per timeframe:")
-    for tf, vals in sorted(by_tf.items()):
-        wr = sum(1 for v in vals if v > 0) / len(vals) * 100
-        avg = sum(vals) / len(vals)
-        print(f"    {tf:6s}: n={len(vals):4d}  WR={wr:.1f}%  avg={avg:.3f}R")
-
-    # Per score bucket
+    # ── Per bucket final_score con CI ─────────────────────────────────────
     print()
-    print("  Win rate per bucket di final_score:")
-    buckets = [(0, 40), (40, 50), (50, 60), (60, 70), (70, 100)]
-    for lo, hi in buckets:
-        subset = [r for r in records if r["entry_filled"] and lo <= r["final_score"] < hi]
-        if not subset:
-            continue
-        wr = sum(1 for r in subset if r["pnl_r"] > 0) / len(subset) * 100
-        avg = sum(r["pnl_r"] for r in subset) / len(subset)
-        print(f"    [{lo:3d}-{hi:3d}): n={len(subset):4d}  WR={wr:.1f}%  avg={avg:.3f}R")
-    print("=" * 60)
+    print(f"  {'Score bucket':14s}  {'n':>5}  {'WR%':>7}  {'AvgR':>8}  {'CI 95%':>14}")
+    print("  " + "-" * 55)
+    for lo, hi in [(0, 40), (40, 50), (50, 60), (60, 70), (70, 80), (80, 101)]:
+        subset = [r for r in filled if lo <= r["final_score"] < hi]
+        print(_bucket_row(subset, f"[{lo}-{hi})"))
+
+    # ── Cliff analysis pq a step 5 ────────────────────────────────────────
+    print()
+    print("  Cliff analysis pattern_quality_score (step 5, solo entry filled)")
+    print(f"  {'PQ bucket':14s}  {'n':>5}  {'WR%':>7}  {'AvgR':>8}  {'CI 95%':>14}")
+    print("  " + "-" * 55)
+    for lo in range(0, 100, 5):
+        hi = lo + 5
+        subset = [
+            r for r in filled
+            if r.get("pattern_quality_score") not in (None, "", "None")
+            and lo <= float(r["pattern_quality_score"]) < hi
+        ]
+        marker = " ← cliff?" if lo == 30 else ""
+        row = _bucket_row(subset, f"[{lo:2d}-{hi:2d})")
+        print(row + marker)
+
+    # ── Correlazione pq → WR (10 bin) ────────────────────────────────────
+    print()
+    print("  Correlazione pattern_quality_score → WR (bin da 10):")
+    pq_rows = [r for r in filled if r.get("pattern_quality_score") not in (None, "", "None")]
+    if pq_rows:
+        pq_vals = [float(r["pattern_quality_score"]) for r in pq_rows]
+        wr_vals = [1.0 if r["pnl_r"] > 0 else 0.0 for r in pq_rows]
+        # Pearson r semplice (pq vs outcome binario)
+        n_pq = len(pq_vals)
+        mean_pq = sum(pq_vals) / n_pq
+        mean_wr = sum(wr_vals) / n_pq
+        cov = sum((p - mean_pq) * (w - mean_wr) for p, w in zip(pq_vals, wr_vals)) / n_pq
+        std_pq = (sum((p - mean_pq) ** 2 for p in pq_vals) / n_pq) ** 0.5
+        std_wr = (sum((w - mean_wr) ** 2 for w in wr_vals) / n_pq) ** 0.5
+        r = cov / (std_pq * std_wr) if std_pq > 0 and std_wr > 0 else 0.0
+        print(f"    Pearson r(pq, win) = {r:.3f}  (n={n_pq})")
+        print(f"    Interpretazione: {'segnale forte (|r|>0.15)' if abs(r) > 0.15 else 'segnale debole — pq ha basso potere predittivo'}")
+
+    print("=" * 72)
 
 
 async def main(args: argparse.Namespace) -> None:
