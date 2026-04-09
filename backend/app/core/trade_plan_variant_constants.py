@@ -412,3 +412,53 @@ VALIDATED_SYMBOLS_BINANCE: frozenset[str] = frozenset(
 )
 
 VALIDATED_TIMEFRAMES: frozenset[str] = frozenset({"1h", "5m"})
+
+# ─── Pattern validati per provider+timeframe specifico ────────────────────────
+#
+# OOS Alpaca 5m (cutoff 2026-02-01, 30 simboli, 7 mesi di dati):
+#   double_top              WR=69.5% EV=+0.583R PF=2.37 N=643  ★★★ migliora in OOS
+#   macd_divergence_bear    WR=64.4% EV=+0.586R PF=2.20 N=592  ★★★ robusto
+#   macd_divergence_bull    WR=56.4% EV=+0.451R PF=1.82 N=489  ★★★ robusto
+#   double_bottom           WR=57.0% EV=+0.401R PF=1.69 N=582  ★★  buono
+#   rsi_momentum_continuation  WR=42.9% EV=+0.069R PF=1.13 N=515  ★  marginale
+#   compression_to_expansion_transition  WR=44.4% EV=+0.056R PF=1.09 N=714  ★  marginale
+#
+PATTERNS_VALIDATED_ALPACA_5M: frozenset[str] = frozenset(
+    {
+        "double_top",                           # WR=69.5% EV=+0.583R — il migliore su 5m
+        "macd_divergence_bear",                 # WR=64.4% EV=+0.586R — short divergenza MACD
+        "macd_divergence_bull",                 # WR=56.4% EV=+0.451R — long divergenza MACD
+        "double_bottom",                        # WR=57.0% EV=+0.401R — reversal su supporto
+        "rsi_momentum_continuation",            # WR=42.9% EV=+0.069R — marginale, monitorare
+        "compression_to_expansion_transition",  # WR=44.4% EV=+0.056R — marginale, monitorare
+    }
+)
+
+# Pattern con EV negativo confermato su Alpaca 5m — bloccati solo per questo scope.
+# (Non includere quelli già in PATTERNS_BLOCKED globale per evitare duplicati.)
+PATTERNS_BLOCKED_ALPACA_5M: frozenset[str] = frozenset(
+    {
+        # Testati esplicitamente su Alpaca 5m OOS — EV negativo
+        "engulfing_bullish",                    # WR=40.5% EV=-0.144R
+        "trend_continuation_pullback",          # WR=47.7% EV=-0.078R
+        "support_bounce",                       # WR=43.2% EV=-0.276R
+        "resistance_rejection",                 # WR=50.8% EV=-0.074R
+        "hammer_reversal",                      # WR=41.8% EV=-0.343R
+        "shooting_star_reversal",               # WR=47.6% EV=-0.186R
+        "ema_pullback_to_support",              # WR=46.0% EV=-0.205R
+        "ema_pullback_to_resistance",           # WR=45.9% EV=-0.198R
+        "fvg_retest_bull",                      # WR=41.2% EV=-0.416R
+        "fvg_retest_bear",                      # WR=46.2% EV=-0.272R
+        "vwap_bounce_bull",                     # WR=46.9% EV=-0.205R
+        "morning_star",                         # WR=46.1% EV=-0.188R
+        "ob_retest_bull",                       # WR=43.8% EV=-0.246R
+        "ob_retest_bear",                       # WR=46.8% EV=-0.177R
+    }
+)
+
+# Mappa (provider, timeframe) → frozenset di pattern bloccati per quel contesto.
+# Usata da simulation_service in sostituzione di PATTERNS_BLOCKED quando esiste
+# una entry per il provider+timeframe corrente.
+PATTERNS_BLOCKED_BY_SCOPE: dict[tuple[str, str], frozenset[str]] = {
+    ("alpaca", "5m"): PATTERNS_BLOCKED_ALPACA_5M | PATTERNS_BLOCKED,
+}

@@ -30,6 +30,7 @@ from app.core.trade_plan_variant_constants import (
     MAX_SIMULTANEOUS_TRADES,
     PATTERNS_BEAR_REGIME_ONLY,
     PATTERNS_BLOCKED,
+    PATTERNS_BLOCKED_BY_SCOPE,
 )
 from app.models.candle import Candle
 from app.models.candle_context import CandleContext
@@ -593,6 +594,11 @@ async def run_simulation(
     # usano ancora pq_lookup (es. statistiche aggregate post-sim).
     pq_lookup = _global_pq
 
+    # Blocklist provider+timeframe specifica (es. Alpaca 5m) sovrascrive quella globale.
+    # Contiene già PATTERNS_BLOCKED unito alla lista specifica del contesto.
+    _prov_key = ((provider or "").strip().lower(), (timeframe or "").strip().lower())
+    _patterns_blocked_effective = PATTERNS_BLOCKED_BY_SCOPE.get(_prov_key, PATTERNS_BLOCKED)
+
     regime_filter = None
     regime_filter_active = False
     # Filtro regime solo Yahoo (SPY 1d). Binance: use_regime_filter ignorato — edge indipendente da BTC.
@@ -832,8 +838,8 @@ async def run_simulation(
 
             # ── Filtri per-pattern: stessa logica dell'opportunity_validator live ──
 
-            # Pattern bloccati permanentemente — esclusi prima di qualsiasi altro check
-            if pat.pattern_name in PATTERNS_BLOCKED:
+            # Pattern bloccati: usa lista specifica provider+timeframe se disponibile.
+            if pat.pattern_name in _patterns_blocked_effective:
                 skipped += 1
                 _audit(
                     pat,
