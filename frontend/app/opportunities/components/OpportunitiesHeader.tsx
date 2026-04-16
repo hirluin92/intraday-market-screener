@@ -71,7 +71,10 @@ export function OpportunitiesHeader({
   const ibkrError = !!ibkr.error && !ibkr.isLoading;
 
   return (
-    <header className="sticky top-0 z-20 border-b border-line bg-canvas/95 backdrop-blur-md">
+    <header
+      className="sticky top-0 z-20 glass"
+      style={{ borderRadius: 0, borderLeft: "none", borderRight: "none", borderTop: "none", borderBottom: "1px solid var(--glass-border)" }}
+    >
       {/* ── Main row ─────────────────────────────────────────────────── */}
       <div className="mx-auto flex max-w-[1440px] items-center justify-between gap-3 px-4 py-2 sm:px-6">
         {/* Left: FilterPills (decision filter compact) + TF/Dir below on mobile */}

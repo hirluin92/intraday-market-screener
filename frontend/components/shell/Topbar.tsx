@@ -21,20 +21,16 @@ const ROUTE_LABELS: Record<string, string> = {
 
 function getBreadcrumb(pathname: string): string {
   if (pathname in ROUTE_LABELS) return ROUTE_LABELS[pathname];
-
-  // Dynamic routes: /opportunities/AAPL/1h → "AAPL · 1h"
   const oppMatch = pathname.match(/^\/opportunities\/([^/]+)\/([^/]+)/);
   if (oppMatch) {
     const sym = decodeURIComponent(oppMatch[1]).toUpperCase();
-    const tf = decodeURIComponent(oppMatch[2]);
+    const tf  = decodeURIComponent(oppMatch[2]);
     return `${sym} · ${tf}`;
   }
-
   return "";
 }
 
 interface TopbarProps {
-  /** Regime SPY — passed from layout/page when available. Falls back gracefully. */
   regime?: string | null;
 }
 
@@ -49,19 +45,25 @@ export function Topbar({ regime }: TopbarProps) {
       <header
         className={cn(
           "sticky top-0 z-30 flex h-12 shrink-0 items-center",
-          "border-b border-line bg-canvas/95 backdrop-blur-md",
+          "glass border-b-[var(--glass-border)]",
           "px-4 sm:px-6",
         )}
+        style={{
+          borderRadius: 0,
+          borderLeft: "none",
+          borderRight: "none",
+          borderTop: "none",
+        }}
       >
-        {/* Left: hamburger (mobile) + breadcrumb */}
+        {/* Left */}
         <div className="flex flex-1 items-center gap-3">
-          {/* Hamburger — mobile only */}
           <button
             type="button"
             onClick={() => setDrawerOpen(true)}
             className={cn(
-              "rounded-md p-1.5 text-fg-2 hover:bg-surface-3 hover:text-fg transition-colors",
-              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral/50",
+              "rounded-md p-1.5 text-fg-2 hover:text-fg transition-colors",
+              "hover:bg-[var(--glass-bg-hover)]",
+              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50",
               "lg:hidden",
             )}
             aria-label="Apri menu navigazione"
@@ -70,16 +72,16 @@ export function Topbar({ regime }: TopbarProps) {
             <Menu className="h-5 w-5" aria-hidden />
           </button>
 
-          {/* Logo link — mobile only (desktop logo is in Sidebar) */}
+          {/* Logo mobile */}
           <Link
             href="/"
             className="font-sans text-sm font-bold text-fg lg:hidden"
-            aria-label="IMS Dashboard"
+            style={{ textShadow: "0 0 20px hsla(265 80% 62% / 0.3)" }}
           >
             IMS
           </Link>
 
-          {/* Breadcrumb — desktop */}
+          {/* Breadcrumb desktop */}
           {breadcrumb && (
             <span className="hidden font-mono text-xs text-fg-2 lg:inline">
               {breadcrumb}
@@ -94,8 +96,9 @@ export function Topbar({ regime }: TopbarProps) {
           <button
             type="button"
             className={cn(
-              "rounded-md p-1.5 text-fg-2 hover:bg-surface-3 hover:text-fg transition-colors",
-              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral/50",
+              "rounded-md p-1.5 text-fg-2 hover:text-fg transition-colors",
+              "hover:bg-[var(--glass-bg-hover)]",
+              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50",
             )}
             aria-label="Impostazioni"
             title="Impostazioni (coming soon)"
@@ -105,7 +108,6 @@ export function Topbar({ regime }: TopbarProps) {
         </div>
       </header>
 
-      {/* Mobile drawer — co-located with Topbar to share drawer open state */}
       <MobileDrawer open={drawerOpen} onClose={() => setDrawerOpen(false)} />
     </>
   );

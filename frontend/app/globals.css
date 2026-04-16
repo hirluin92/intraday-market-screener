@@ -1,42 +1,52 @@
 @import "tailwindcss";
 
 /* ════════════════════════════════════════════════════════════
-   INTRADAY MARKET SCREENER — GLOBAL DESIGN SYSTEM
-   Tailwind v4 CSS-based config.
-   Token source: promoted from trader-theme.css (was scoped to
-   .trader-dashboard). All pages share the same dark-first theme.
+   INTRADAY MARKET SCREENER — DESIGN SYSTEM v2
+   Glassmorphism + Glow Trading Terminal
    ════════════════════════════════════════════════════════════ */
 
-/* ── Semantic color tokens & typography in @theme ──────────
-   Tailwind v4: @theme{} generates both CSS variables AND
-   utility classes (bg-bull, text-bear, border-line, etc.)
-   ───────────────────────────────────────────────────────── */
+/* ── Semantic color tokens → Tailwind utility classes ─────────────────
+   @theme{} generates bg-bull, text-bear, etc.
+   ────────────────────────────────────────────────────────────── */
 @theme {
-  /* ── Accent / semantic ───────────────────────────────── */
-  --color-bull:     hsl(168 100% 42%);   /* #00d4aa  teal-green  */
-  --color-bull-dim: hsl(168 100% 42% / 0.15);
-  --color-bear:     hsl(349 100% 63%);   /* #ff4466  red-pink    */
-  --color-bear-dim: hsl(349 100% 63% / 0.15);
-  --color-neutral:  hsl(229  57% 63%);   /* #6b7fd7  blue-purple */
-  --color-warn:     hsl( 38  92% 60%);   /* #f5a623  amber       */
-  --color-warn-dim: hsl( 38  92% 60% / 0.15);
+  /* ── Accent colors ─────────────────────────────────────── */
+  --color-bull:          hsl(168 100% 45%);   /* teal-green vivido  */
+  --color-bull-dim:      hsl(168 100% 45% / 0.15);
+  --color-bear:          hsl(349 100% 65%);   /* rosa/magenta vivido */
+  --color-bear-dim:      hsl(349 100% 65% / 0.15);
+  --color-neutral:       hsl(229  57% 63%);   /* blue-purple        */
+  --color-warn:          hsl( 38  92% 60%);   /* amber              */
+  --color-warn-dim:      hsl( 38  92% 60% / 0.15);
 
-  /* ── Canvas / surface layers (dark → light) ──────────── */
-  --color-canvas:    hsl(246 24%  6%);   /* #0a0a0f  darkest bg  */
-  --color-surface:   hsl(245 22%  8%);   /* #111118  card bg     */
-  --color-surface-2: hsl(244 20% 10%);   /* #16161f  input bg    */
-  --color-surface-3: hsl(243 18% 13%);   /* #1c1c28  hover bg    */
+  /* ── Accent primario — viola/indigo (glow, bordi attivi) ─ */
+  --color-accent:        hsl(265 80% 62%);
+  --color-accent-subtle: hsl(265 80% 40%);
+  --color-accent-dim:    hsl(265 80% 62% / 0.12);
+
+  /* ── Info — cyan (link, info) ─────────────────────────── */
+  --color-info:          hsl(200 80% 60%);
+  --color-info-dim:      hsl(200 80% 60% / 0.12);
+
+  /* ── Canvas / surface layers ──────────────────────────── */
+  --color-canvas:    hsl(228 15%  7%);   /* #101118 — fondo pagina     */
+  --color-elevated:  hsl(228 15% 10%);   /* #161822 — card surface     */
+  --color-hover:     hsl(228 15% 13%);   /* #1c1f2e — hover bg         */
+  --color-surface:   hsl(228 15% 10%);   /* alias → elevated           */
+  --color-surface-2: hsl(228 15% 13%);   /* alias → hover              */
+  --color-surface-3: hsl(228 15% 16%);   /* input active/focus         */
 
   /* ── Borders ─────────────────────────────────────────── */
-  --color-line:    hsl(240 24% 14%);     /* #1e1e2e  default border */
-  --color-line-hi: hsl(240 20% 20%);     /* #2a2a3e  focus/hover    */
+  --color-line:    hsl(228 20% 16%);     /* bordo default              */
+  --color-line-hi: hsl(228 20% 22%);     /* bordo focus/hover          */
 
-  /* ── Foreground / text scale ─────────────────────────── */
-  --color-fg:   hsl(240 13% 96%);        /* #f0f0f8  primary text   */
-  --color-fg-2: hsl(240 15% 48%);        /* #6b6b8a  secondary text */
-  --color-fg-3: hsl(240 18% 27%);        /* #3a3a52  muted / ghost  */
+  /* ── Foreground / text ───────────────────────────────── */
+  --color-fg:       hsl(  0  0% 95%);   /* quasi bianco               */
+  --color-fg-2:     hsl(228 15% 55%);   /* grigio medio               */
+  --color-fg-3:     hsl(228 15% 35%);   /* grigio tenue               */
+  --color-fg-muted: hsl(228 15% 55%);   /* alias → fg-2               */
+  --color-fg-faint: hsl(228 15% 35%);   /* alias → fg-3               */
 
-  /* ── Border radius scale ─────────────────────────────── */
+  /* ── Border radius ───────────────────────────────────── */
   --radius-xs:   3px;
   --radius-sm:   4px;
   --radius-md:   8px;
@@ -46,119 +56,108 @@
   --radius-full: 9999px;
 }
 
-/* ── Font family (references Next.js CSS vars injected
-   by next/font — must be @theme inline, not @theme,
-   because values are resolved at runtime) ──────────────── */
+/* ── Font family (Next.js next/font vars injected at runtime) ─────── */
 @theme inline {
-  --font-sans: var(--font-trader-sans), var(--font-geist-sans),
-               "Inter", system-ui, sans-serif;
-  --font-mono: var(--font-trader-mono), var(--font-geist-mono),
+  --font-sans: var(--font-geist-sans), "Plus Jakarta Sans", system-ui, sans-serif;
+  --font-mono: var(--font-jetbrains-mono), var(--font-geist-mono),
                "JetBrains Mono", ui-monospace, monospace;
 
-  /* ── shadcn/ui compatibility map ───────────────────────
-     shadcn components use Tailwind classes bg-background,
-     bg-primary, border-border, bg-muted, etc.
-     All map to our semantic design tokens.
-     ──────────────────────────────────────────────────── */
+  /* shadcn/ui compatibility */
   --color-background:          var(--color-canvas);
   --color-foreground:          var(--color-fg);
-
-  --color-card:                var(--color-surface);
+  --color-card:                var(--color-elevated);
   --color-card-foreground:     var(--color-fg);
-
-  --color-popover:             var(--color-surface);
+  --color-popover:             var(--color-elevated);
   --color-popover-foreground:  var(--color-fg);
-
-  /* primary = neutral/blue (generic CTA) */
-  --color-primary:             var(--color-neutral);
+  --color-primary:             var(--color-accent);
   --color-primary-foreground:  var(--color-canvas);
-
   --color-secondary:           var(--color-surface-2);
   --color-secondary-foreground: var(--color-fg);
-
   --color-muted:               var(--color-surface-2);
   --color-muted-foreground:    var(--color-fg-2);
-
-  --color-accent:              var(--color-surface-3);
+  --color-accent-ui:           var(--color-surface-3);
   --color-accent-foreground:   var(--color-fg);
-
-  /* destructive = bear (danger, stop, error) */
   --color-destructive:         var(--color-bear);
   --color-destructive-foreground: var(--color-canvas);
-
   --color-border:              var(--color-line);
   --color-input:               var(--color-line);
-  --color-ring:                var(--color-neutral);
-  --color-sidebar:             var(--color-surface);
+  --color-ring:                var(--color-accent);
+  --color-sidebar:             var(--color-elevated);
   --color-sidebar-foreground:  var(--color-fg);
   --color-sidebar-border:      var(--color-line);
-  --color-sidebar-ring:        var(--color-neutral);
+  --color-sidebar-ring:        var(--color-accent);
 }
 
 /* ════════════════════════════════════════════════════════════
-   LEGACY ALIASES
-   Keep existing var(--accent-bull), var(--bg-surface) etc.
-   working so no existing component breaks during migration.
-   Phase 3 will progressively replace these with new tokens.
+   GLASS & GLOW TOKENS  (CSS vars only — not Tailwind utilities)
    ════════════════════════════════════════════════════════════ */
 :root {
-  /* Accents */
+  color-scheme: dark;
+
+  /* ── Glass surfaces ─────────────────────────────────── */
+  --glass-bg:           hsla(228 20% 14% / 0.55);
+  --glass-bg-hover:     hsla(228 20% 18% / 0.65);
+  --glass-bg-heavy:     hsla(228 20% 12% / 0.70);
+  --glass-border:       hsla(  0  0% 100% / 0.07);
+  --glass-border-hover: hsla(  0  0% 100% / 0.14);
+  --glass-blur:         20px;
+  --glass-blur-heavy:   40px;
+
+  /* ── Glow box-shadows ───────────────────────────────── */
+  --glow-bull:   0 0 24px hsla(168 100% 45% / 0.30), 0 0  8px hsla(168 100% 45% / 0.15);
+  --glow-bear:   0 0 24px hsla(349 100% 65% / 0.30), 0 0  8px hsla(349 100% 65% / 0.15);
+  --glow-accent: 0 0 24px hsla(265  80% 62% / 0.30), 0 0  8px hsla(265  80% 62% / 0.15);
+  --glow-info:   0 0 24px hsla(200  80% 60% / 0.25);
+  --glow-subtle: 0 0 60px hsla(265  80% 40% / 0.08);
+
+  /* ── Gradient borders ───────────────────────────────── */
+  --grad-border-bull:   linear-gradient(135deg, hsla(168 100% 45% / 0.6), hsla(168 100% 45% / 0.1));
+  --grad-border-bear:   linear-gradient(135deg, hsla(349 100% 65% / 0.6), hsla(349 100% 65% / 0.1));
+  --grad-border-accent: linear-gradient(135deg, hsla(265  80% 62% / 0.6), hsla(200  80% 60% / 0.1));
+
+  /* ── Legacy aliases (backward compat) ──────────────── */
   --accent-bull:    var(--color-bull);
   --accent-bear:    var(--color-bear);
   --accent-neutral: var(--color-neutral);
-
-  /* Surfaces */
-  --bg-base:      var(--color-canvas);
-  --bg-surface:   var(--color-surface);
-  --bg-surface-2: var(--color-surface-2);
-
-  /* Borders */
-  --border:        var(--color-line);
-  --border-active: var(--color-line-hi);
-
-  /* Text */
+  --bg-base:        var(--color-canvas);
+  --bg-surface:     var(--color-elevated);
+  --bg-surface-2:   var(--color-surface-2);
+  --border:         var(--color-line);
+  --border-active:  var(--color-line-hi);
   --text-primary:   var(--color-fg);
   --text-secondary: var(--color-fg-2);
   --text-muted:     var(--color-fg-3);
-
-  /* Glows */
-  --glow-bull: 0 0 20px hsl(168 100% 42% / 0.18);
-  --glow-bear: 0 0 20px hsl(349 100% 63% / 0.18);
-
-  /* shadcn radius (maps to our md) */
-  --radius: var(--radius-md);
+  --radius:         var(--radius-md);
 }
 
 /* ════════════════════════════════════════════════════════════
    BASE STYLES
    ════════════════════════════════════════════════════════════ */
-:root {
-  color-scheme: dark;
-}
-
 *,
 *::before,
-*::after {
-  box-sizing: border-box;
-}
+*::after { box-sizing: border-box; }
 
-html {
-  height: 100%;
-}
+html { height: 100%; }
 
 body {
   min-height: 100%;
-  background-color: var(--color-canvas);
-  color: var(--color-fg);
   font-family: var(--font-sans);
   font-size: 14px;
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+
+  /* Background: quasi-nero + mesh gradient atmosfera */
+  background-color: var(--color-canvas);
+  color: var(--color-fg);
+
+  background-image:
+    radial-gradient(ellipse at 20%   0%, hsla(265 80% 40% / 0.08) 0%, transparent 50%),
+    radial-gradient(ellipse at 80% 100%, hsla(168 80% 40% / 0.06) 0%, transparent 50%);
+  background-attachment: fixed;
 }
 
-/* Tabular numbers for all monetary / price / numeric output.
-   Applied via .font-mono or .tabular-nums utility. */
+/* Tabular numbers */
 .tabular-nums,
 [data-numeric] {
   font-variant-numeric: tabular-nums;
@@ -166,8 +165,137 @@ body {
 }
 
 /* ════════════════════════════════════════════════════════════
-   ANIMATION KEYFRAMES
-   Promoted from trader-theme.css — now globally available.
+   UTILITY CLASSES — GLASS & GLOW
+   ════════════════════════════════════════════════════════════ */
+
+/* ── Glass surfaces ──────────────────────────────────────── */
+.glass {
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-lg);
+}
+
+.glass-heavy {
+  background: var(--glass-bg-heavy);
+  backdrop-filter: blur(var(--glass-blur-heavy));
+  -webkit-backdrop-filter: blur(var(--glass-blur-heavy));
+  border: 1px solid var(--glass-border);
+}
+
+.glass-hover:hover {
+  background: var(--glass-bg-hover);
+  border-color: var(--glass-border-hover);
+}
+
+/* ── Glow modifiers ──────────────────────────────────────── */
+.glow-bull {
+  box-shadow: var(--glow-bull);
+  border-color: hsla(168 100% 45% / 0.3) !important;
+}
+
+.glow-bear {
+  box-shadow: var(--glow-bear);
+  border-color: hsla(349 100% 65% / 0.3) !important;
+}
+
+.glow-accent {
+  box-shadow: var(--glow-accent);
+  border-color: hsla(265 80% 62% / 0.3) !important;
+}
+
+.glow-info {
+  box-shadow: var(--glow-info);
+  border-color: hsla(200 80% 60% / 0.3) !important;
+}
+
+/* ── Gradient border (pseudo-element trick) ──────────────── */
+.gradient-border {
+  position: relative;
+}
+.gradient-border::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1px;
+  background: var(--grad-border-accent);
+  -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.gradient-border-bull::before { background: var(--grad-border-bull); }
+.gradient-border-bear::before { background: var(--grad-border-bear); }
+
+/* ════════════════════════════════════════════════════════════
+   TYPOGRAPHY UTILITIES
+   ════════════════════════════════════════════════════════════ */
+
+/* KPI value — grande, bold, mono */
+.kpi-value {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+  font-size: 2rem;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: -0.02em;
+}
+
+/* KPI label — piccolo, uppercase, spaziato */
+.kpi-label {
+  font-family: var(--font-sans);
+  font-size: 0.65rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--color-fg-muted);
+}
+
+/* Gradient line section heading */
+.section-heading {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  font-size: 0.65rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--color-fg-muted);
+}
+.section-heading::before,
+.section-heading::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--glass-border));
+}
+.section-heading::after {
+  background: linear-gradient(90deg, var(--glass-border), transparent);
+}
+
+/* ════════════════════════════════════════════════════════════
+   SKELETON SHIMMER
+   ════════════════════════════════════════════════════════════ */
+.skeleton,
+.skeleton-shimmer {
+  background: linear-gradient(
+    90deg,
+    hsla(228 20% 14% / 0.6) 25%,
+    hsla(228 20% 22% / 0.8) 50%,
+    hsla(228 20% 14% / 0.6) 75%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.5s ease-in-out infinite;
+  border-radius: var(--radius-md);
+}
+
+/* ════════════════════════════════════════════════════════════
+   KEYFRAME ANIMATIONS
    ════════════════════════════════════════════════════════════ */
 @keyframes pulse-live {
   0%, 100% { opacity: 1;   transform: scale(1);    }
@@ -176,12 +304,17 @@ body {
 
 @keyframes glow-execute {
   0%, 100% { box-shadow: var(--glow-bull); }
-  50%       { box-shadow: 0 0 28px hsl(168 100% 42% / 0.28); }
+  50%       { box-shadow: 0 0 36px hsla(168 100% 45% / 0.45); }
 }
 
-@keyframes slide-in {
-  from { opacity: 0; transform: translateY(8px); }
-  to   { opacity: 1; transform: translateY(0);   }
+@keyframes glow-pulse {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.5; }
+}
+
+@keyframes slide-up-fade {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: translateY(0);    }
 }
 
 @keyframes fade-in {
@@ -189,58 +322,52 @@ body {
   to   { opacity: 1; }
 }
 
-@keyframes skeleton-shimmer {
-  0%   { background-position: -200% center; }
-  100% { background-position:  200% center; }
+@keyframes shimmer {
+  from { background-position: -200% 0; }
+  to   { background-position:  200% 0; }
 }
 
-/* ── Animation utility classes ──────────────────────────── */
-.animate-pulse-live {
-  animation: pulse-live 1.4s ease-in-out infinite;
+@keyframes slide-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0);   }
 }
 
-.animate-glow-execute {
-  animation: glow-execute 3.2s ease-in-out infinite;
-}
+/* ── Animation utility classes ─────────────────────────── */
+.animate-pulse-live   { animation: pulse-live   1.4s ease-in-out infinite; }
+.animate-glow-execute { animation: glow-execute 3.2s ease-in-out infinite; }
+.animate-glow-pulse   { animation: glow-pulse   2.0s ease-in-out infinite; }
+.animate-slide-up     { animation: slide-up-fade 0.4s ease-out both; }
+.animate-slide-in     { animation: slide-in 0.35s ease-out both; }
+.animate-fade-in      { animation: fade-in 0.25s ease-out both; }
 
-.animate-slide-in {
-  animation: slide-in 0.35s ease-out both;
-}
+/* Staggered entry for card grids */
+.animate-stagger > * { animation: slide-up-fade 0.4s ease-out both; }
+.animate-stagger > *:nth-child(1)  { animation-delay:   0ms; }
+.animate-stagger > *:nth-child(2)  { animation-delay:  60ms; }
+.animate-stagger > *:nth-child(3)  { animation-delay: 120ms; }
+.animate-stagger > *:nth-child(4)  { animation-delay: 180ms; }
+.animate-stagger > *:nth-child(5)  { animation-delay: 240ms; }
+.animate-stagger > *:nth-child(6)  { animation-delay: 300ms; }
+.animate-stagger > *:nth-child(7)  { animation-delay: 360ms; }
+.animate-stagger > *:nth-child(8)  { animation-delay: 420ms; }
 
-.animate-fade-in {
-  animation: fade-in 0.25s ease-out both;
-}
+/* ── Reduced motion ─────────────────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; }
 
-/* ── Skeleton shimmer ──────────────────────────────────── */
-.skeleton {
-  background: linear-gradient(
-    90deg,
-    var(--color-surface)   0%,
-    var(--color-surface-2) 50%,
-    var(--color-surface)   100%
-  );
-  background-size: 200% 100%;
-  animation: skeleton-shimmer 1.6s ease-in-out infinite;
-  border-radius: var(--radius-md);
+  .animate-glow-pulse,
+  .animate-pulse-live,
+  .animate-glow-execute { animation: none; }
+
+  .glow-bull, .glow-bear, .glow-accent { box-shadow: none; }
 }
 
 /* ════════════════════════════════════════════════════════════
-   SCROLLBAR (webkit) — dark, subtle
+   SCROLLBAR (webkit)
    ════════════════════════════════════════════════════════════ */
-::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
-}
-
-::-webkit-scrollbar-track {
-  background: var(--color-canvas);
-}
-
-::-webkit-scrollbar-thumb {
-  background: var(--color-line-hi);
-  border-radius: var(--radius-full);
-}
-
-::-webkit-scrollbar-thumb:hover {
-  background: var(--color-fg-3);
-}
+::-webkit-scrollbar              { width: 5px; height: 5px; }
+::-webkit-scrollbar-track        { background: var(--color-canvas); }
+::-webkit-scrollbar-thumb        { background: var(--color-line-hi); border-radius: var(--radius-full); }
+::-webkit-scrollbar-thumb:hover  { background: var(--color-fg-3); }

@@ -36,12 +36,10 @@ function Section({
   className?: string;
 }) {
   return (
-    <section className={cn("space-y-3", className)}>
-      <div className="flex items-center justify-between">
-        <h2 className="font-sans text-xs font-semibold uppercase tracking-widest text-fg-2">
-          {title}
-        </h2>
-        {action}
+    <section className={cn("space-y-4", className)}>
+      <div className="flex items-center gap-3">
+        <h2 className="section-heading flex-shrink-0">{title}</h2>
+        {action && <div className="ml-auto">{action}</div>}
       </div>
       {children}
     </section>
@@ -83,14 +81,14 @@ export function HomeDashboard() {
     useDashboardData();
 
   return (
-    <div className="mx-auto max-w-6xl space-y-8 px-4 py-6 sm:px-6">
+    <div className="mx-auto max-w-6xl space-y-8 px-4 py-6 sm:px-6 animate-stagger">
       {/* ── ROW 1 — Status ──────────────────────────────────────────────── */}
       <ErrorBoundary label="Status">
         <Section title="Status sistema">
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
             {/* IBKR */}
             <div
-              className="flex flex-col gap-2 rounded-lg border border-line bg-surface p-4"
+              className="glass glass-hover rounded-xl p-4 flex flex-col gap-2"
               role="article"
               aria-label="Stato connessione IBKR"
             >
@@ -108,7 +106,7 @@ export function HomeDashboard() {
 
             {/* Pipeline */}
             <div
-              className="flex flex-col gap-2 rounded-lg border border-line bg-surface p-4"
+              className="glass glass-hover rounded-xl p-4 flex flex-col gap-2"
               role="article"
               aria-label="Stato pipeline"
             >
@@ -126,7 +124,7 @@ export function HomeDashboard() {
 
             {/* Regime SPY */}
             <div
-              className="flex flex-col gap-2 rounded-lg border border-line bg-surface p-4"
+              className="glass glass-hover rounded-xl p-4 flex flex-col gap-2"
               role="article"
               aria-label={`Regime SPY: ${regime.value ?? "non disponibile"}`}
             >
@@ -142,7 +140,7 @@ export function HomeDashboard() {
 
             {/* Market clock */}
             <div
-              className="flex flex-col gap-2 rounded-lg border border-line bg-surface p-4"
+              className="glass glass-hover rounded-xl p-4 flex flex-col gap-2"
               role="article"
               aria-label="Orario mercato"
             >
@@ -217,7 +215,7 @@ export function HomeDashboard() {
               onRetry={() => activity.refetch()}
             />
           ) : (
-            <div className="rounded-lg border border-line bg-surface px-2 py-2">
+            <div className="glass rounded-xl px-2 py-2">
               <ActivityFeed
                 items={activity.items}
                 loading={activity.isLoading}

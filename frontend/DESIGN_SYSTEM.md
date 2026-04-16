@@ -1,11 +1,95 @@
 # Design System — Intraday Market Screener
 
-> Versione: Fase 2 — approvazione pre-implementazione  
-> Dark mode first. Ispirazione: Bloomberg Terminal / TradingView.
+> Versione: Step 4.5 — Glassmorphism + Glow Trading Terminal  
+> Identità visiva: Linear.app meets Bloomberg Terminal. Dark luxury, premium.  
+> Ispirazione: Linear, Arc, Vercel, Apple Vision Pro UI.
 
 ---
 
-## 0. Architettura token
+## 0. Architettura token + Glass system
+
+### Nuovi token Step 4.5
+
+**Colori più vivaci** (saturazione alzata vs v1):
+- `--color-bull: hsl(168 100% 45%)` — teal-green vivido
+- `--color-bear: hsl(349 100% 65%)` — rosa/magenta vivido
+- `--color-accent: hsl(265 80% 62%)` — viola/indigo (attivo, focus, glow)
+- `--color-info: hsl(200 80% 60%)` — cyan (info, link)
+
+**Background** — non più piatto:
+- Body: `hsl(228 15% 7%)` con mesh gradient radiale (viola 8% + teal 6%, `fixed`)
+- Canvas: `--color-canvas` aggiornato a 228° (più "spaziale")
+
+**Glass system** (CSS vars, non Tailwind):
+```css
+--glass-bg:           hsla(228 20% 14% / 0.55)
+--glass-bg-heavy:     hsla(228 20% 12% / 0.70)
+--glass-border:       hsla(  0  0% 100% / 0.07)
+--glass-blur:         20px
+--glass-blur-heavy:   40px
+```
+
+**Glow effects**:
+```css
+--glow-bull:   0 0 24px hsla(168 100% 45% / 0.30) + halo 8px
+--glow-bear:   0 0 24px hsla(349 100% 65% / 0.30) + halo 8px
+--glow-accent: 0 0 24px hsla(265  80% 62% / 0.30) + halo 8px
+```
+
+**Gradient borders** (pseudo-element):
+```css
+--grad-border-bull:   linear-gradient(135deg, bull/60%, bull/10%)
+--grad-border-accent: linear-gradient(135deg, accent/60%, info/10%)
+```
+
+### Regole performance glassmorphism
+
+| Elemento | blur | glow | note |
+|----------|------|------|------|
+| Sidebar | 40px (heavy) | NO | hero element |
+| Topbar | 20px | NO | hero element |
+| KPI cards (Row 1) | 20px | SÌ (bull/bear/accent) | max 4 per viewport |
+| Dialog / Sheet | 20px | NO | overlay |
+| SignalCard | **NO blur** | solo execute | lista lunga → performance |
+| ActivityFeed items | NO | NO | lista dinamica |
+| Backtest rows | NO | NO | virtualizzata |
+
+**Regola glow**: max 6-8 elementi con box-shadow colorato per viewport.
+
+### Utility classes glass
+
+```
+.glass           → bg semi-trasparente + backdrop-filter blur(20px) + border
+.glass-heavy     → blur 40px, più opaco
+.glass-hover:hover → bg più chiaro + border più visibile
+.glow-bull       → box-shadow bull + border bull
+.glow-bear       → box-shadow bear + border bear
+.glow-accent     → box-shadow accent + border accent
+.gradient-border → ::before con gradient mask (1px border gradient)
+.gradient-border-bull / .gradient-border-bear → varianti colore
+```
+
+### Typography upgrade
+
+- **Numeri/KPI**: `JetBrains Mono` (Google Fonts, caricato in `layout.tsx`)
+- **UI/Heading**: `Geist Sans` (già presente)
+- `.kpi-value`: `font-size: 2rem; font-weight: 700; letter-spacing: -0.02em`
+- `.kpi-label`: `font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.07em`
+
+### Section headings
+
+```css
+.section-heading {
+  /* gradient line left · TITLE · gradient line right */
+  display: flex; align-items: center; gap: 0.75rem;
+}
+.section-heading::before { background: linear-gradient(90deg, transparent, glass-border); }
+.section-heading::after  { background: linear-gradient(90deg, glass-border, transparent); }
+```
+
+---
+
+## 0bis. Architettura token Tailwind v4
 
 Il progetto usa **Tailwind CSS v4**, che sostituisce `tailwind.config.ts` con configurazione **CSS-based**.  
 I token sono definiti in `app/globals.css` via blocco `@theme {}`.

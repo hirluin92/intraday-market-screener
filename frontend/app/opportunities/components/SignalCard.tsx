@@ -257,15 +257,22 @@ function SignalCardInner({
       aria-labelledby={`${cardId}-title`}
       aria-label={`Segnale ${row.symbol} ${row.timeframe} ${dirLabel} — score ${scoreInt}`}
       className={cn(
-        "animate-fade-in cursor-pointer rounded-xl border bg-surface",
+        "animate-slide-up cursor-pointer rounded-xl",
         "outline-none transition-all duration-150",
-        "hover:border-line-hi hover:shadow-md",
-        "focus-visible:ring-2 focus-visible:ring-neutral/50",
+        // NOTE: NO backdrop-filter here — lista lunga, performance critica
+        // Usa bg-elevated senza blur
+        "bg-elevated border",
         isExecute
-          ? "border-bull/30 border-l-4 border-l-bull animate-glow-execute"
+          ? [
+              "border-bull/30",
+              "gradient-border-bull",
+              "glow-bull",
+            ].join(" ")
           : isMonitor
-            ? "border-warn/30 border-l-4 border-l-warn"
+            ? "border-warn/30"
             : "border-line",
+        "hover:border-opacity-60 hover:bg-hover",
+        "focus-visible:ring-2 focus-visible:ring-accent/50",
       )}
       onClick={handleCardActivate}
       onKeyDown={handleKeyDown}
@@ -393,9 +400,16 @@ function SignalCardInner({
             <div
               className={cn(
                 "h-full rounded-full transition-all",
-                isBull ? "bg-gradient-to-r from-neutral to-bull" : "bg-gradient-to-r from-neutral to-bear",
+                isBull
+                  ? "bg-gradient-to-r from-accent to-bull"
+                  : "bg-gradient-to-r from-accent to-bear",
               )}
-              style={{ width: `${strPct}%` }}
+              style={{
+                width: `${strPct}%`,
+                boxShadow: isBull
+                  ? "0 0 10px hsla(168 100% 45% / 0.4)"
+                  : "0 0 10px hsla(349 100% 65% / 0.4)",
+              }}
             />
           </div>
           {topRationale && !expanded && (
