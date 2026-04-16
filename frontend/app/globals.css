@@ -148,13 +148,12 @@ body {
   -moz-osx-font-smoothing: grayscale;
   color: var(--color-fg);
 
-  /* ── Background: dark + VISIBLE mesh gradient ── */
-  /* Aloni colorati percepibili, non solo colore piatto */
-  background-color: hsl(228 15% 6%);
+  /* ── Background: dark + VERY VISIBLE mesh gradient ── */
+  background-color: #0b0d14;
   background-image:
-    radial-gradient(ellipse 80% 50% at 20% -10%, hsla(265 80% 35% / 0.18) 0%, transparent 60%),
-    radial-gradient(ellipse 60% 40% at 85% 110%, hsla(168 80% 35% / 0.14) 0%, transparent 55%),
-    radial-gradient(ellipse 40% 30% at 60%  50%, hsla(200 80% 35% / 0.05) 0%, transparent 50%);
+    radial-gradient(ellipse 90% 60% at 15% -5%,  rgba(120, 60, 220, 0.22) 0%, transparent 55%),
+    radial-gradient(ellipse 70% 50% at 88% 105%, rgba(0,  180, 140, 0.18) 0%, transparent 50%),
+    radial-gradient(ellipse 50% 35% at 55%  50%, rgba(0,  120, 200, 0.07) 0%, transparent 50%);
   background-attachment: fixed;
 }
 
