@@ -536,12 +536,6 @@ export async function fetchBacktestSimulation(
   return res.json();
 }
 
-/** Alias per la simulazione equity (stesso endpoint). */
-export async function runSimulation(
-  params: SimulationParams,
-): Promise<BacktestSimulationResponse> {
-  return fetchBacktestSimulation(params);
-}
 
 export type OutOfSampleParams = {
   provider: string;

@@ -1,25 +1,37 @@
 "use client";
 
+import { useMemo } from "react";
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { Activity, BarChart2, CheckCircle2, Target } from "lucide-react";
+
+import { Badge } from "@/components/ui/badge";
+import { Skeleton } from "@/components/ui/skeleton";
 import {
-  fetchBacktestPatterns,
-  fetchOpportunities,
-  seriesDetailHref,
-  type BacktestAggregateRow,
-  type OpportunityRow,
-} from "@/lib/api";
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import { ErrorBoundary } from "@/components/ErrorBoundary";
+import { KPICard } from "@/components/trading/KPICard";
+import { SignalCardCompact } from "@/components/trading/SignalCardCompact";
+import { useDiagnosticPatterns, useDiagnosticOpportunities } from "@/hooks/useDiagnosticData";
 import {
   computeSignalAlignment,
   displayFinalOpportunityLabel,
   displayTechnicalLabel,
 } from "@/lib/displayLabels";
+import type { BacktestAggregateRow, OpportunityRow } from "@/lib/api";
+import { cn } from "@/lib/utils";
 
-const FETCH_LIMIT = 500;
+// ── Business logic (unchanged from original) ──────────────────────────────────
+
 const TOP_N_PER_TF = 4;
-const TOP_OPPS = 12;
+const TOP_OPPS = 6;
 
-function groupBestWorstByTimeframe(rows: BacktestAggregateRow[]) {
+function groupBestByTimeframe(rows: BacktestAggregateRow[]) {
   const withScore = rows.filter((r) => r.pattern_quality_score != null);
   const byTf = new Map<string, BacktestAggregateRow[]>();
   for (const r of withScore) {
@@ -28,370 +40,246 @@ function groupBestWorstByTimeframe(rows: BacktestAggregateRow[]) {
     byTf.set(r.timeframe, list);
   }
   const timeframes = [...byTf.keys()].sort();
-  const best: { tf: string; rows: BacktestAggregateRow[] }[] = [];
-  const worst: { tf: string; rows: BacktestAggregateRow[] }[] = [];
-  for (const tf of timeframes) {
+  return timeframes.map((tf) => {
     const list = byTf.get(tf)!;
-    const sortedDesc = [...list].sort(
-      (a, b) =>
-        (b.pattern_quality_score ?? 0) - (a.pattern_quality_score ?? 0),
-    );
-    const sortedAsc = [...list].sort(
-      (a, b) =>
-        (a.pattern_quality_score ?? 0) - (b.pattern_quality_score ?? 0),
-    );
-    best.push({ tf, rows: sortedDesc.slice(0, TOP_N_PER_TF) });
-    worst.push({ tf, rows: sortedAsc.slice(0, TOP_N_PER_TF) });
-  }
-  return { best, worst, timeframes };
+    const sortedDesc = [...list].sort((a, b) => (b.pattern_quality_score ?? 0) - (a.pattern_quality_score ?? 0));
+    return { tf, rows: sortedDesc.slice(0, TOP_N_PER_TF) };
+  });
 }
 
 function countAlignment(opps: OpportunityRow[]) {
-  let allineato = 0;
-  let misto = 0;
-  let conflittuale = 0;
+  let aligned = 0, mixed = 0, conflicting = 0;
   for (const r of opps) {
-    const a = computeSignalAlignment(
-      r.score_direction,
-      r.latest_pattern_direction,
-    );
-    if (a === "aligned") allineato++;
-    else if (a === "mixed") misto++;
-    else conflittuale++;
+    const a = computeSignalAlignment(r.score_direction, r.latest_pattern_direction);
+    if (a === "aligned") aligned++;
+    else if (a === "mixed") mixed++;
+    else conflicting++;
   }
-  return { allineato, misto, conflittuale };
+  return { aligned, mixed, conflicting, total: opps.length };
 }
 
-function countTfOk(opps: OpportunityRow[]) {
-  let ok = 0;
-  let nonOk = 0;
-  let na = 0;
-  for (const r of opps) {
-    if (r.pattern_timeframe_quality_ok === null) na++;
-    else if (r.pattern_timeframe_quality_ok === true) ok++;
-    else nonOk++;
-  }
-  return { ok, nonOk, na };
+// ── Section skeleton ──────────────────────────────────────────────────────────
+
+function RowSkeleton({ cols = 4 }: { cols?: number }) {
+  return (
+    <TableRow>
+      {Array.from({ length: cols }).map((_, i) => (
+        <TableCell key={i}><Skeleton className="h-4 w-full" /></TableCell>
+      ))}
+    </TableRow>
+  );
 }
+
+// ── Main page ─────────────────────────────────────────────────────────────────
 
 export default function DiagnosticaPage() {
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [aggregates, setAggregates] = useState<BacktestAggregateRow[]>([]);
-  const [patternsEvaluated, setPatternsEvaluated] = useState(0);
-  const [opportunities, setOpportunities] = useState<OpportunityRow[]>([]);
-  const [oppCount, setOppCount] = useState(0);
-  const [failedSections, setFailedSections] = useState<string[]>([]);
+  const patterns = useDiagnosticPatterns();
+  const opps = useDiagnosticOpportunities();
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    setFailedSections([]);
-    try {
-      const [btResult, opResult] = await Promise.allSettled([
-        fetchBacktestPatterns({ limit: FETCH_LIMIT }),
-        fetchOpportunities({ limit: FETCH_LIMIT }),
-      ]);
+  // ── Derived KPIs ─────────────────────────────────────────────────────────
+  const kpis = useMemo(() => {
+    const patRows = patterns.data?.aggregates ?? [];
+    const oppRows = opps.data?.opportunities ?? [];
+    const alignment = oppRows.length ? countAlignment(oppRows) : null;
+    const executeCount = oppRows.filter((r) => r.operational_decision === "execute").length;
+    const validatedPatterns = patRows.filter((r) => (r.pattern_quality_score ?? 0) >= 50).length;
+    return {
+      totalPatterns: patRows.length,
+      validatedPatterns,
+      executeSignals: executeCount,
+      alignmentPct: alignment
+        ? Math.round((alignment.aligned / Math.max(alignment.total, 1)) * 100)
+        : null,
+      alignment,
+    };
+  }, [patterns.data, opps.data]);
 
-      if (btResult.status === "fulfilled") {
-        setAggregates(btResult.value.aggregates);
-        setPatternsEvaluated(btResult.value.patterns_evaluated);
-      }
-      if (opResult.status === "fulfilled") {
-        setOpportunities(opResult.value.opportunities);
-        setOppCount(opResult.value.count);
-      }
-      // Se entrambe falliscono, propaga il primo errore (mostra blocco errore)
-      if (btResult.status === "rejected" && opResult.status === "rejected") {
-        throw btResult.reason;
-      }
-      // Se solo una fallisce, la pagina è parzialmente utilizzabile → mostra banner
-      const failed: string[] = [];
-      if (btResult.status === "rejected") failed.push("Backtest pattern");
-      if (opResult.status === "rejected") failed.push("Opportunità correnti");
-      setFailedSections(failed);
-    } catch (e) {
-      setAggregates([]);
-      setOpportunities([]);
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
-
-  const { best, worst } = useMemo(
-    () => groupBestWorstByTimeframe(aggregates),
-    [aggregates],
+  // ── Top patterns per TF ────────────────────────────────────────────────────
+  const bestByTf = useMemo(
+    () => groupBestByTimeframe(patterns.data?.aggregates ?? []),
+    [patterns.data],
   );
 
-  const alignmentCounts = useMemo(
-    () => countAlignment(opportunities),
-    [opportunities],
+  // ── Top opportunities ──────────────────────────────────────────────────────
+  const topOpps = useMemo(
+    () =>
+      (opps.data?.opportunities ?? [])
+        .filter((r) => r.operational_decision === "execute")
+        .slice(0, TOP_OPPS),
+    [opps.data],
   );
-
-  const tfCounts = useMemo(() => countTfOk(opportunities), [opportunities]);
-
-  const topOpps = useMemo(() => {
-    const copy = [...opportunities];
-    copy.sort((a, b) => b.final_opportunity_score - a.final_opportunity_score);
-    return copy.slice(0, TOP_OPPS);
-  }, [opportunities]);
 
   return (
-    <div className="mx-auto flex min-h-full max-w-[120rem] flex-col gap-8 p-6">
-      <header className="border-b border-zinc-200 pb-4 dark:border-zinc-800">
-        <p className="text-xs font-medium uppercase tracking-wide text-zinc-500">
-          Report MVP
-        </p>
-        <h1 className="mt-1 text-xl font-semibold tracking-tight">Diagnostica screener</h1>
-        <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
-          Sintesi da backtest aggregati e lista opportunità corrente (nessun filtro applicato
-          oltre al limite richiesto all&apos;API).
-        </p>
-      </header>
+    <div className="mx-auto max-w-6xl space-y-8 px-4 py-6 sm:px-6">
+      <h1 className="font-sans text-xl font-bold text-fg">Diagnostica Sistema</h1>
 
-      {failedSections.length > 0 && (
-        <div className="flex items-center gap-2 rounded-lg border border-amber-700/50 bg-amber-950/30 px-4 py-2.5 text-sm text-amber-300">
-          <span className="shrink-0">⚠</span>
-          <span>
-            Dati parziali — fetch non riuscite:{" "}
-            <span className="font-semibold">{failedSections.join(", ")}</span>.
-            I dati mostrati potrebbero essere incompleti.
-          </span>
-        </div>
-      )}
+      {/* ── KPI row ───────────────────────────────────────────────────── */}
+      <ErrorBoundary label="KPI diagnostica">
+        <section aria-label="Metriche sistema">
+          <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+            <KPICard
+              label="Pattern totali"
+              value={patterns.isLoading ? undefined : kpis.totalPatterns}
+              icon={BarChart2}
+              loading={patterns.isLoading}
+              variant="neutral"
+            />
+            <KPICard
+              label="Pattern validati (score ≥50)"
+              value={patterns.isLoading ? undefined : kpis.validatedPatterns}
+              icon={CheckCircle2}
+              loading={patterns.isLoading}
+              variant="bull"
+            />
+            <KPICard
+              label="Segnali Execute live"
+              value={opps.isLoading ? undefined : kpis.executeSignals}
+              icon={Target}
+              loading={opps.isLoading}
+              variant={kpis.executeSignals > 0 ? "bull" : "neutral"}
+              href="/opportunities"
+            />
+            <KPICard
+              label="Allineamento segnali"
+              value={opps.isLoading || kpis.alignmentPct == null ? undefined : `${kpis.alignmentPct}%`}
+              icon={Activity}
+              loading={opps.isLoading}
+              variant={
+                kpis.alignmentPct == null ? "neutral"
+                : kpis.alignmentPct >= 60 ? "bull"
+                : kpis.alignmentPct >= 40 ? "neutral"
+                : "bear"
+              }
+              tooltip="% segnali live con pattern allineato allo score screener"
+            />
+          </div>
+        </section>
+      </ErrorBoundary>
 
-      {loading && (
-        <p className="text-sm text-zinc-600 dark:text-zinc-400" role="status">
-          Caricamento dati…
-        </p>
-      )}
+      {/* ── Best pattern per TF ───────────────────────────────────────── */}
+      <ErrorBoundary label="Tabella pattern per TF">
+        <section aria-label="Migliori pattern per timeframe">
+          <h2 className="mb-3 font-sans text-sm font-semibold uppercase tracking-widest text-fg-2">
+            Top pattern per timeframe
+          </h2>
+          {patterns.isLoading ? (
+            <div className="rounded-xl border border-line bg-surface overflow-hidden">
+              <Table>
+                <TableHeader>
+                  <TableRow className="border-line hover:bg-transparent">
+                    <TableHead className="text-fg-3 font-medium">TF</TableHead>
+                    <TableHead className="text-fg-3 font-medium">Pattern</TableHead>
+                    <TableHead className="text-right text-fg-3 font-medium">Score</TableHead>
+                    <TableHead className="text-right text-fg-3 font-medium">WR% 1</TableHead>
+                    <TableHead className="text-right text-fg-3 font-medium">N</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {Array.from({ length: 8 }).map((_, i) => <RowSkeleton key={i} cols={5} />)}
+                </TableBody>
+              </Table>
+            </div>
+          ) : patterns.error ? (
+            <div className="rounded-xl border border-warn/30 bg-warn/5 p-4" role="alert">
+              <p className="text-sm text-fg-2">Dati pattern non disponibili.</p>
+            </div>
+          ) : bestByTf.length === 0 ? (
+            <p className="text-sm text-fg-2">Nessun dato disponibile.</p>
+          ) : (
+            <div className="rounded-xl border border-line bg-surface overflow-hidden">
+              <Table>
+                <TableHeader>
+                  <TableRow className="border-line hover:bg-transparent">
+                    <TableHead className="text-fg-3 font-medium" scope="col">TF</TableHead>
+                    <TableHead className="text-fg-3 font-medium" scope="col">Pattern</TableHead>
+                    <TableHead className="text-right text-fg-3 font-medium" scope="col">Score</TableHead>
+                    <TableHead className="text-right text-fg-3 font-medium" scope="col">WR% 1</TableHead>
+                    <TableHead className="text-right text-fg-3 font-medium" scope="col">N</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {bestByTf.flatMap(({ tf, rows }) =>
+                    rows.map((r, i) => {
+                      const score = r.pattern_quality_score ?? 0;
+                      const scoreCls = score >= 70 ? "text-bull" : score >= 50 ? "text-neutral" : "text-bear";
+                      return (
+                        <TableRow key={`${tf}-${r.pattern_name}`} className="border-line/50 hover:bg-surface-2">
+                          {i === 0 && (
+                            <TableCell rowSpan={rows.length} className="align-top pt-3">
+                              <Badge variant="outline" className="font-mono text-[10px] border-line">{tf}</Badge>
+                            </TableCell>
+                          )}
+                          <TableCell className="font-mono text-xs text-fg">
+                            {displayTechnicalLabel(r.pattern_name)}
+                          </TableCell>
+                          <TableCell className={cn("text-right font-mono tabular-nums text-xs font-semibold", scoreCls)}>
+                            {score.toFixed(1)}
+                          </TableCell>
+                          <TableCell className={cn(
+                            "text-right font-mono tabular-nums text-xs",
+                            (r.win_rate_1 ?? 0) >= 0.55 ? "text-bull" : (r.win_rate_1 ?? 0) < 0.5 ? "text-bear" : "text-neutral",
+                          )}>
+                            {r.win_rate_1 != null ? `${(r.win_rate_1 * 100).toFixed(1)}%` : "—"}
+                          </TableCell>
+                          <TableCell className="text-right font-mono tabular-nums text-xs text-fg-2">
+                            {r.sample_size}
+                          </TableCell>
+                        </TableRow>
+                      );
+                    }),
+                  )}
+                </TableBody>
+              </Table>
+            </div>
+          )}
+        </section>
+      </ErrorBoundary>
 
-      {!loading && error && (
-        <div
-          className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-800 dark:border-red-900 dark:bg-red-950/40 dark:text-red-200"
-          role="alert"
-        >
-          <strong className="font-medium">Errore caricamento.</strong>
-          <pre className="mt-2 whitespace-pre-wrap font-mono text-xs">{error}</pre>
-        </div>
-      )}
-
-      {!loading && !error && (
-        <>
-          <section aria-labelledby="kpi-h">
-            <h2 id="kpi-h" className="text-sm font-medium text-zinc-800 dark:text-zinc-200">
-              Indicatori rapidi (opportunità caricate: {oppCount})
+      {/* ── Top opportunities ─────────────────────────────────────────── */}
+      <ErrorBoundary label="Top opportunità">
+        <section aria-label="Top opportunità execute">
+          <div className="mb-3 flex items-center justify-between">
+            <h2 className="font-sans text-sm font-semibold uppercase tracking-widest text-fg-2">
+              Top segnali execute live
             </h2>
-            <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-              <div className="rounded-lg border border-zinc-200 bg-zinc-50/80 p-4 dark:border-zinc-800 dark:bg-zinc-950/40">
-                <p className="text-xs font-medium text-zinc-500">Allineamento segnale</p>
-                <p className="mt-2 text-2xl font-semibold tabular-nums">
-                  {alignmentCounts.allineato}
-                </p>
-                <p className="text-xs text-zinc-600 dark:text-zinc-400">allineati</p>
-              </div>
-              <div className="rounded-lg border border-zinc-200 bg-zinc-50/80 p-4 dark:border-zinc-800 dark:bg-zinc-950/40">
-                <p className="text-xs font-medium text-zinc-500">Allineamento segnale</p>
-                <p className="mt-2 text-2xl font-semibold tabular-nums">
-                  {alignmentCounts.misto}
-                </p>
-                <p className="text-xs text-zinc-600 dark:text-zinc-400">misti</p>
-              </div>
-              <div className="rounded-lg border border-zinc-200 bg-zinc-50/80 p-4 dark:border-zinc-800 dark:bg-zinc-950/40">
-                <p className="text-xs font-medium text-zinc-500">Allineamento segnale</p>
-                <p className="mt-2 text-2xl font-semibold tabular-nums">
-                  {alignmentCounts.conflittuale}
-                </p>
-                <p className="text-xs text-zinc-600 dark:text-zinc-400">conflittuali</p>
-              </div>
-              <div className="rounded-lg border border-zinc-200 bg-zinc-50/80 p-4 dark:border-zinc-800 dark:bg-zinc-950/40">
-                <p className="text-xs font-medium text-zinc-500">Pattern righe backtest</p>
-                <p className="mt-2 text-2xl font-semibold tabular-nums">
-                  {patternsEvaluated}
-                </p>
-                <p className="text-xs text-zinc-600 dark:text-zinc-400">valutate (estrazione)</p>
-              </div>
-            </div>
-            <div className="mt-3 grid gap-3 sm:grid-cols-3">
-              <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900/30">
-                <p className="text-xs font-medium text-emerald-800 dark:text-emerald-300">
-                  OK storico sul TF
-                </p>
-                <p className="mt-1 text-2xl font-semibold tabular-nums">{tfCounts.ok}</p>
-              </div>
-              <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900/30">
-                <p className="text-xs font-medium text-amber-800 dark:text-amber-300">
-                  Non OK sul TF
-                </p>
-                <p className="mt-1 text-2xl font-semibold tabular-nums">{tfCounts.nonOk}</p>
-                <p className="text-xs text-zinc-500">marginali / insufficienti / sconosciuti</p>
-              </div>
-              <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900/30">
-                <p className="text-xs font-medium text-zinc-600 dark:text-zinc-400">
-                  Senza pattern (N/A)
-                </p>
-                <p className="mt-1 text-2xl font-semibold tabular-nums">{tfCounts.na}</p>
-              </div>
-            </div>
-          </section>
+            <Link
+              href="/opportunities"
+              className="text-xs text-neutral hover:text-fg transition-colors"
+            >
+              Vedi tutti →
+            </Link>
+          </div>
 
-          <section aria-labelledby="best-h">
-            <h2 id="best-h" className="text-sm font-medium text-zinc-800 dark:text-zinc-200">
-              Migliori pattern per timeframe (qualità backtest)
-            </h2>
-            <p className="mt-1 text-xs text-zinc-500">
-              Fino a {TOP_N_PER_TF} pattern per TF con score qualità più alto (solo righe con
-              score numerico).
-            </p>
-            <div className="mt-2 space-y-4">
-              {best.length === 0 ? (
-                <p className="text-sm text-zinc-500">Nessun aggregato con qualità numerica.</p>
-              ) : (
-                best.map(({ tf, rows }) => (
-                  <div key={tf} className="overflow-x-auto rounded-lg border border-zinc-200 dark:border-zinc-800">
-                    <p className="border-b border-zinc-200 bg-zinc-50 px-3 py-2 text-xs font-medium dark:border-zinc-800 dark:bg-zinc-900/60">
-                      Timeframe <span className="font-mono">{tf}</span>
-                    </p>
-                    <table className="w-full min-w-[32rem] border-collapse text-left text-xs">
-                      <thead>
-                        <tr className="border-b border-zinc-200 bg-zinc-50/80 dark:border-zinc-800 dark:bg-zinc-900/40">
-                          <th className="px-3 py-2 font-medium">Pattern</th>
-                          <th className="px-3 py-2 font-medium">Qualità</th>
-                          <th className="px-3 py-2 font-medium">n</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {rows.map((r) => (
-                          <tr
-                            key={`${r.pattern_name}-${r.timeframe}-${r.pattern_quality_score}`}
-                            className="border-b border-zinc-100 dark:border-zinc-800/80"
-                          >
-                            <td className="px-3 py-1.5 font-mono">
-                              {displayTechnicalLabel(r.pattern_name)}
-                            </td>
-                            <td className="px-3 py-1.5 tabular-nums">
-                              {r.pattern_quality_score != null
-                                ? r.pattern_quality_score.toFixed(1)
-                                : "—"}
-                            </td>
-                            <td className="px-3 py-1.5 tabular-nums">{r.sample_size}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                ))
-              )}
+          {opps.isLoading ? (
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+              {Array.from({ length: 3 }).map((_, i) => (
+                <Skeleton key={i} className="h-40 rounded-xl" />
+              ))}
             </div>
-          </section>
-
-          <section aria-labelledby="worst-h">
-            <h2 id="worst-h" className="text-sm font-medium text-zinc-800 dark:text-zinc-200">
-              Pattern più deboli per timeframe
-            </h2>
-            <p className="mt-1 text-xs text-zinc-500">
-              Fino a {TOP_N_PER_TF} pattern per TF con score qualità più basso.
-            </p>
-            <div className="mt-2 space-y-4">
-              {worst.length === 0 ? (
-                <p className="text-sm text-zinc-500">Nessun dato.</p>
-              ) : (
-                worst.map(({ tf, rows }) => (
-                  <div key={`w-${tf}`} className="overflow-x-auto rounded-lg border border-zinc-200 dark:border-zinc-800">
-                    <p className="border-b border-zinc-200 bg-zinc-50 px-3 py-2 text-xs font-medium dark:border-zinc-800 dark:bg-zinc-900/60">
-                      Timeframe <span className="font-mono">{tf}</span>
-                    </p>
-                    <table className="w-full min-w-[32rem] border-collapse text-left text-xs">
-                      <thead>
-                        <tr className="border-b border-zinc-200 bg-zinc-50/80 dark:border-zinc-800 dark:bg-zinc-900/40">
-                          <th className="px-3 py-2 font-medium">Pattern</th>
-                          <th className="px-3 py-2 font-medium">Qualità</th>
-                          <th className="px-3 py-2 font-medium">n</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {rows.map((r) => (
-                          <tr
-                            key={`w-${r.pattern_name}-${r.timeframe}-${r.pattern_quality_score}`}
-                            className="border-b border-zinc-100 dark:border-zinc-800/80"
-                          >
-                            <td className="px-3 py-1.5 font-mono">
-                              {displayTechnicalLabel(r.pattern_name)}
-                            </td>
-                            <td className="px-3 py-1.5 tabular-nums">
-                              {r.pattern_quality_score != null
-                                ? r.pattern_quality_score.toFixed(1)
-                                : "—"}
-                            </td>
-                            <td className="px-3 py-1.5 tabular-nums">{r.sample_size}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                ))
-              )}
+          ) : opps.error ? (
+            <div className="rounded-xl border border-warn/30 bg-warn/5 p-4" role="alert">
+              <p className="text-sm text-fg-2">Opportunità non disponibili.</p>
             </div>
-          </section>
-
-          <section aria-labelledby="top-h">
-            <h2 id="top-h" className="text-sm font-medium text-zinc-800 dark:text-zinc-200">
-              Top opportunità correnti (score finale)
-            </h2>
-            <p className="mt-1 text-xs text-zinc-500">
-              Prime {TOP_OPPS} righe per score finale tra quelle restituite dall&apos;API.
-            </p>
-            <div className="mt-2 overflow-x-auto rounded-lg border border-zinc-200 dark:border-zinc-800">
-              <table className="w-full min-w-[48rem] border-collapse text-left text-sm">
-                <thead>
-                  <tr className="border-b border-zinc-200 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900/60">
-                    <th className="px-3 py-2 font-medium">Simbolo</th>
-                    <th className="px-3 py-2 font-medium">TF</th>
-                    <th className="px-3 py-2 font-medium">Score finale</th>
-                    <th className="px-3 py-2 font-medium">Livello</th>
-                    <th className="px-3 py-2 font-medium">Pattern</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {topOpps.map((r) => (
-                    <tr
-                      key={`${r.exchange}-${r.symbol}-${r.timeframe}-${r.context_timestamp}`}
-                      className="border-b border-zinc-100 dark:border-zinc-800/80"
-                    >
-                      <td className="px-3 py-2 font-mono text-xs">
-                        <Link
-                          href={seriesDetailHref(r.symbol, r.timeframe, r.exchange)}
-                          className="text-zinc-900 underline underline-offset-2 hover:text-zinc-600 dark:text-zinc-100 dark:hover:text-zinc-300"
-                        >
-                          {r.symbol}
-                        </Link>
-                      </td>
-                      <td className="px-3 py-2 font-mono text-xs">{r.timeframe}</td>
-                      <td className="px-3 py-2 tabular-nums font-medium">
-                        {r.final_opportunity_score.toFixed(1)}
-                      </td>
-                      <td className="px-3 py-2 text-xs">
-                        {displayFinalOpportunityLabel(r.final_opportunity_label)}
-                      </td>
-                      <td className="max-w-[14rem] truncate px-3 py-2 text-xs">
-                        {displayTechnicalLabel(r.latest_pattern_name)}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-              {topOpps.length === 0 && (
-                <p className="p-4 text-sm text-zinc-500">Nessuna opportunità.</p>
-              )}
+          ) : topOpps.length === 0 ? (
+            <div className="flex flex-col items-center gap-2 rounded-xl border border-dashed border-line py-8 text-center">
+              <Target className="h-7 w-7 text-fg-3" aria-hidden />
+              <p className="text-sm text-fg-2">Nessun segnale execute al momento.</p>
+              <Link href="/opportunities" className="text-xs text-neutral underline underline-offset-2">
+                Vai alle opportunità
+              </Link>
             </div>
-          </section>
-        </>
-      )}
+          ) : (
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+              {topOpps.map((opp) => (
+                <SignalCardCompact
+                  key={`${opp.symbol}-${opp.timeframe}-${opp.exchange}`}
+                  opportunity={opp}
+                />
+              ))}
+            </div>
+          )}
+        </section>
+      </ErrorBoundary>
     </div>
   );
 }
