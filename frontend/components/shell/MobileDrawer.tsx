@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useRef } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
@@ -35,6 +36,61 @@ interface MobileDrawerProps {
 
 export function MobileDrawer({ open, onClose }: MobileDrawerProps) {
   const pathname = usePathname();
+  const drawerRef = useRef<HTMLDivElement>(null);
+
+  // Focus trap + Esc key
+  useEffect(() => {
+    if (!open) return;
+
+    const drawer = drawerRef.current;
+    if (!drawer) return;
+
+    // Focus first interactive element when drawer opens
+    const focusable = drawer.querySelectorAll<HTMLElement>(
+      'a[href], button:not([disabled]), [tabindex]:not([tabindex="-1"])',
+    );
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    first?.focus();
+
+    function handleKeyDown(e: KeyboardEvent) {
+      if (e.key === "Escape") {
+        onClose();
+        return;
+      }
+      if (e.key !== "Tab") return;
+      if (focusable.length === 0) {
+        e.preventDefault();
+        return;
+      }
+      if (e.shiftKey) {
+        if (document.activeElement === first) {
+          e.preventDefault();
+          last?.focus();
+        }
+      } else {
+        if (document.activeElement === last) {
+          e.preventDefault();
+          first?.focus();
+        }
+      }
+    }
+
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [open, onClose]);
+
+  // Prevent body scroll when drawer is open
+  useEffect(() => {
+    if (open) {
+      document.body.style.overflow = "hidden";
+    } else {
+      document.body.style.overflow = "";
+    }
+    return () => {
+      document.body.style.overflow = "";
+    };
+  }, [open]);
 
   if (!open) return null;
 
@@ -49,13 +105,14 @@ export function MobileDrawer({ open, onClose }: MobileDrawerProps) {
 
       {/* Drawer panel */}
       <div
+        ref={drawerRef}
         className={cn(
           "fixed inset-y-0 left-0 z-50 flex w-72 flex-col",
           "bg-surface border-r border-line",
           "animate-slide-in lg:hidden",
         )}
         role="dialog"
-        aria-modal
+        aria-modal="true"
         aria-label="Menu navigazione"
       >
         {/* Header */}
