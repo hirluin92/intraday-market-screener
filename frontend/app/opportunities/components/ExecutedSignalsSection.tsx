@@ -1,5 +1,16 @@
 "use client";
 
+import { Badge } from "@/components/ui/badge";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import { cn } from "@/lib/utils";
 import type { ExecutedSignalRow } from "@/lib/api";
 
 interface ExecutedSignalsSectionProps {
@@ -8,6 +19,29 @@ interface ExecutedSignalsSectionProps {
   onToggleExpanded: () => void;
   statusFilter: "all" | "open" | "skipped" | "cancelled";
   onStatusFilterChange: (v: "all" | "open" | "skipped" | "cancelled") => void;
+}
+
+function StatusBadge({ sig }: { sig: ExecutedSignalRow }) {
+  const isOpen = sig.tws_status === "Filled";
+  const hasError = !!sig.error;
+  const isCancelled = sig.tws_status === "Cancelled" || hasError;
+  const isSkipped = sig.tws_status === "skipped";
+
+  return (
+    <Badge
+      variant="outline"
+      className={cn(
+        "font-mono text-[10px] tabular-nums",
+        isOpen && "border-bull/30 bg-bull/10 text-bull",
+        isCancelled && "border-bear/30 bg-bear/10 text-bear",
+        isSkipped && "border-warn/30 bg-warn/10 text-warn",
+        !isOpen && !isCancelled && !isSkipped && "border-line bg-surface-2 text-fg-2",
+      )}
+      title={sig.error ?? undefined}
+    >
+      {hasError ? "Errore" : isOpen ? "Aperta" : sig.tws_status}
+    </Badge>
+  );
 }
 
 export function ExecutedSignalsSection({
@@ -39,161 +73,166 @@ export function ExecutedSignalsSection({
       return true;
     });
 
+  const tabs: { id: typeof statusFilter; label: string; count: number }[] = [
+    { id: "open", label: "Aperte", count: openCount },
+    { id: "all", label: "Tutte", count: signals.length },
+    { id: "skipped", label: "Skipped", count: skippedCount },
+    { id: "cancelled", label: "Canc.", count: cancelledCount },
+  ];
+
   return (
-    <section aria-label="Trade eseguite dal sistema" className="mt-2">
-      <div className="mb-2 flex items-center gap-3">
+    <section aria-label="Trade eseguite dal sistema">
+      {/* Section header */}
+      <div className="flex items-center gap-3">
         <button
+          type="button"
           onClick={onToggleExpanded}
-          className="flex items-center gap-2 font-[family-name:var(--font-trader-sans)] text-sm font-bold uppercase tracking-wide text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors"
+          className="flex items-center gap-2 font-sans text-sm font-semibold text-fg-2 transition-colors hover:text-fg"
+          aria-expanded={expanded}
         >
           <span
-            className={`transition-transform duration-200 ${expanded ? "rotate-90" : "rotate-0"}`}
+            className={cn(
+              "font-mono text-xs transition-transform duration-150",
+              expanded ? "rotate-90" : "rotate-0",
+            )}
+            aria-hidden
           >
             ▶
           </span>
           ⚡ Segnali sistema
-          <span className="ml-1 rounded-full bg-[var(--bg-surface-2)] px-2 py-0.5 text-[10px] font-normal text-[var(--text-muted)]">
-            {openCount > 0 && (
-              <span className="text-emerald-400">{openCount} aperte</span>
-            )}
-            {openCount > 0 && skippedCount + cancelledCount > 0 && (
-              <span className="mx-1 opacity-40">·</span>
-            )}
-            {skippedCount > 0 && (
-              <span className="text-amber-400">{skippedCount} skip</span>
-            )}
-            {skippedCount > 0 && cancelledCount > 0 && (
-              <span className="mx-1 opacity-40">·</span>
-            )}
-            {cancelledCount > 0 && (
-              <span className="text-[var(--accent-bear)]">{cancelledCount} canc.</span>
-            )}
-          </span>
         </button>
 
-        <select
-          value={statusFilter}
-          onChange={(e) =>
-            onStatusFilterChange(
-              e.target.value as "all" | "open" | "skipped" | "cancelled",
-            )
-          }
-          className="ml-auto rounded-lg border border-[var(--border)] bg-[var(--bg-surface-2)] px-2 py-1 text-xs text-[var(--text-secondary)] focus:outline-none focus:ring-1 focus:ring-[var(--accent-bull)]/40"
-        >
-          <option value="open">Aperte ({openCount})</option>
-          <option value="all">Tutte ({signals.length})</option>
-          <option value="skipped">Skipped ({skippedCount})</option>
-          <option value="cancelled">Cancellate ({cancelledCount})</option>
-        </select>
+        {/* Status filter tabs */}
+        <div className="ml-auto flex items-center gap-1 rounded-lg border border-line bg-canvas p-0.5">
+          {tabs.map(({ id, label, count }) => (
+            <button
+              key={id}
+              type="button"
+              onClick={() => onStatusFilterChange(id)}
+              className={cn(
+                "flex items-center gap-1 rounded-md px-2 py-1 text-[10px] font-medium transition-colors",
+                "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral/50",
+                statusFilter === id
+                  ? "bg-surface-3 text-fg"
+                  : "text-fg-3 hover:text-fg",
+              )}
+            >
+              {label}
+              {count > 0 && (
+                <Badge
+                  variant="outline"
+                  className={cn(
+                    "h-4 min-w-4 px-1 font-mono text-[10px] tabular-nums",
+                    id === "open" && count > 0 && "border-bull/30 text-bull",
+                    id === "cancelled" && count > 0 && "border-bear/30 text-bear",
+                    id === "skipped" && count > 0 && "border-warn/30 text-warn",
+                  )}
+                >
+                  {count}
+                </Badge>
+              )}
+            </button>
+          ))}
+        </div>
       </div>
 
+      {/* Table */}
       {expanded && (
-        <div className="overflow-x-auto rounded-xl border border-[var(--border)] bg-[var(--bg-surface)]">
+        <div className="mt-2 overflow-hidden rounded-xl border border-line bg-surface">
           {filteredSignals.length === 0 ? (
-            <p className="px-4 py-6 text-center text-xs text-[var(--text-muted)]">
+            <p className="px-4 py-6 text-center text-xs text-fg-3">
               {statusFilter === "open"
                 ? "Nessuna posizione aperta al momento."
                 : "Nessun segnale per il filtro selezionato."}
             </p>
           ) : (
-            <table className="w-full text-xs">
-              <thead>
-                <tr className="border-b border-[var(--border)] text-[var(--text-muted)]">
-                  <th className="px-3 py-2 text-left font-medium">Ora</th>
-                  <th className="px-3 py-2 text-left font-medium">Simbolo</th>
-                  <th className="px-3 py-2 text-left font-medium">Dir.</th>
-                  <th className="px-3 py-2 text-left font-medium">Pattern</th>
-                  <th className="px-3 py-2 text-right font-medium">Entry</th>
-                  <th className="px-3 py-2 text-right font-medium">SL</th>
-                  <th className="px-3 py-2 text-right font-medium">TP1</th>
-                  <th className="px-3 py-2 text-right font-medium">TP2</th>
-                  <th className="px-3 py-2 text-right font-medium">Qty</th>
-                  <th className="px-3 py-2 text-left font-medium">Status</th>
-                </tr>
-              </thead>
-              <tbody>
-                {filteredSignals.map((sig) => {
-                  const isBull = sig.direction === "bullish";
-                  const hasError = !!sig.error;
-                  const isOpen = sig.tws_status === "Filled";
-                  return (
-                    <tr
-                      key={sig.id}
-                      className={`border-b border-[var(--border)]/50 transition-colors hover:bg-[var(--bg-surface-2)] ${hasError ? "opacity-60" : ""} ${isOpen ? "bg-emerald-500/5" : ""}`}
-                    >
-                      <td className="px-3 py-2 font-[family-name:var(--font-trader-mono)] text-[var(--text-muted)]">
-                        {new Date(sig.executed_at).toLocaleTimeString("it-IT", {
-                          hour: "2-digit",
-                          minute: "2-digit",
-                        })}
-                        <span className="ml-1 text-[10px] text-[var(--text-muted)]/60">
-                          {new Date(sig.executed_at).toLocaleDateString("it-IT", {
-                            day: "2-digit",
-                            month: "2-digit",
-                          })}
-                        </span>
-                      </td>
-                      <td className="px-3 py-2 font-[family-name:var(--font-trader-sans)] font-bold text-[var(--text-primary)]">
-                        {sig.symbol}
-                        <span className="ml-1 text-[10px] text-[var(--text-muted)]">
-                          {sig.timeframe}
-                        </span>
-                      </td>
-                      <td className="px-3 py-2">
-                        <span
-                          className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${
-                            isBull
-                              ? "bg-[var(--accent-bull)]/15 text-[var(--accent-bull)]"
-                              : "bg-[var(--accent-bear)]/15 text-[var(--accent-bear)]"
-                          }`}
-                        >
-                          {isBull ? "▲ LONG" : "▼ SHORT"}
-                        </span>
-                      </td>
-                      <td className="max-w-[120px] truncate px-3 py-2 text-[var(--text-secondary)]">
-                        {sig.pattern_name.replace(/_/g, " ")}
-                      </td>
-                      <td className="px-3 py-2 text-right font-[family-name:var(--font-trader-mono)] text-[var(--text-primary)]">
-                        {sig.entry_price.toFixed(2)}
-                      </td>
-                      <td className="px-3 py-2 text-right font-[family-name:var(--font-trader-mono)] text-[var(--accent-bear)]">
-                        {sig.stop_price.toFixed(2)}
-                      </td>
-                      <td className="px-3 py-2 text-right font-[family-name:var(--font-trader-mono)] text-[var(--accent-bull)]">
-                        {sig.take_profit_1?.toFixed(2) ?? "—"}
-                      </td>
-                      <td className="px-3 py-2 text-right font-[family-name:var(--font-trader-mono)] text-emerald-400">
-                        {sig.take_profit_2?.toFixed(2) ?? "—"}
-                      </td>
-                      <td className="px-3 py-2 text-right font-[family-name:var(--font-trader-mono)] text-[var(--text-secondary)]">
-                        {sig.quantity_tp1 ?? "—"}
-                      </td>
-                      <td className="px-3 py-2">
-                        <span
-                          className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${
-                            isOpen
-                              ? "bg-emerald-500/15 text-emerald-300"
-                              : sig.tws_status === "Cancelled" || hasError
-                                ? "bg-[var(--accent-bear)]/15 text-[var(--accent-bear)]"
-                                : "bg-amber-500/15 text-amber-300"
-                          }`}
-                        >
-                          {hasError ? "Errore" : isOpen ? "Aperta" : sig.tws_status}
-                        </span>
-                        {sig.error && (
-                          <span
-                            className="ml-1 text-[10px] text-[var(--accent-bear)]"
-                            title={sig.error}
-                          >
-                            ⚠
-                          </span>
+            <ScrollArea
+              className={cn(filteredSignals.length > 20 && "h-96")}
+            >
+              <Table>
+                <TableHeader>
+                  <TableRow className="border-line hover:bg-transparent">
+                    <TableHead className="text-fg-3 font-medium">Ora</TableHead>
+                    <TableHead className="text-fg-3 font-medium">Simbolo</TableHead>
+                    <TableHead className="text-fg-3 font-medium">Dir.</TableHead>
+                    <TableHead className="text-fg-3 font-medium">Pattern</TableHead>
+                    <TableHead className="text-right text-fg-3 font-medium">Entry</TableHead>
+                    <TableHead className="text-right text-fg-3 font-medium">SL</TableHead>
+                    <TableHead className="text-right text-fg-3 font-medium">TP1</TableHead>
+                    <TableHead className="text-right text-fg-3 font-medium">Qty</TableHead>
+                    <TableHead className="text-fg-3 font-medium">Status</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {filteredSignals.map((sig) => {
+                    const isBull = sig.direction === "bullish";
+                    const isOpen = sig.tws_status === "Filled";
+                    return (
+                      <TableRow
+                        key={sig.id}
+                        className={cn(
+                          "border-line/50 transition-colors hover:bg-surface-2",
+                          isOpen && "bg-bull/5",
+                          !!sig.error && "opacity-60",
                         )}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+                      >
+                        <TableCell className="font-mono text-xs tabular-nums text-fg-3">
+                          <span>
+                            {new Date(sig.executed_at).toLocaleTimeString("it-IT", {
+                              hour: "2-digit",
+                              minute: "2-digit",
+                            })}
+                          </span>
+                          <span className="ml-1 text-[10px] text-fg-3/60">
+                            {new Date(sig.executed_at).toLocaleDateString("it-IT", {
+                              day: "2-digit",
+                              month: "2-digit",
+                            })}
+                          </span>
+                        </TableCell>
+                        <TableCell className="font-sans font-bold text-fg">
+                          {sig.symbol}
+                          <span className="ml-1 font-mono text-[10px] text-fg-3">
+                            {sig.timeframe}
+                          </span>
+                        </TableCell>
+                        <TableCell>
+                          <Badge
+                            variant="outline"
+                            className={cn(
+                              "font-mono text-[10px]",
+                              isBull
+                                ? "border-bull/30 bg-bull/10 text-bull"
+                                : "border-bear/30 bg-bear/10 text-bear",
+                            )}
+                          >
+                            {isBull ? "▲" : "▼"}
+                          </Badge>
+                        </TableCell>
+                        <TableCell className="max-w-[120px] truncate text-xs text-fg-2">
+                          {sig.pattern_name.replace(/_/g, " ")}
+                        </TableCell>
+                        <TableCell className="text-right font-mono text-xs tabular-nums text-fg">
+                          {sig.entry_price.toFixed(2)}
+                        </TableCell>
+                        <TableCell className="text-right font-mono text-xs tabular-nums text-bear">
+                          {sig.stop_price.toFixed(2)}
+                        </TableCell>
+                        <TableCell className="text-right font-mono text-xs tabular-nums text-bull">
+                          {sig.take_profit_1?.toFixed(2) ?? "—"}
+                        </TableCell>
+                        <TableCell className="text-right font-mono text-xs tabular-nums text-fg-2">
+                          {sig.quantity_tp1 ?? "—"}
+                        </TableCell>
+                        <TableCell>
+                          <StatusBadge sig={sig} />
+                        </TableCell>
+                      </TableRow>
+                    );
+                  })}
+                </TableBody>
+              </Table>
+            </ScrollArea>
           )}
         </div>
       )}
