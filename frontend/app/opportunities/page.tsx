@@ -116,6 +116,7 @@ function OpportunitiesPageInner() {
 
   const [lastUpdate, setLastUpdate] = useState<Date | null>(null);
   const [ibkrStatus, setIbkrStatus] = useState<IbkrStatus | null>(null);
+  const [ibkrFetchFailed, setIbkrFetchFailed] = useState(false);
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [timeLabelReady, setTimeLabelReady] = useState(false);
   const [secondsToRefresh, setSecondsToRefresh] = useState(REFRESH_SEC);
@@ -250,7 +251,8 @@ function OpportunitiesPageInner() {
 
       if (dataResult.status === "rejected") throw dataResult.reason;
       const data = dataResult.value;
-      const ibkr = ibkrResult.status === "fulfilled" ? ibkrResult.value : null;
+      const ibkrFailed = ibkrResult.status === "rejected";
+      const ibkr = ibkrFailed ? null : ibkrResult.value;
       const executed =
         executedResult.status === "fulfilled"
           ? executedResult.value
@@ -258,6 +260,7 @@ function OpportunitiesPageInner() {
 
       setRows(data.opportunities);
       setIbkrStatus(ibkr);
+      setIbkrFetchFailed(ibkrFailed);
       setExecutedSignals(executed.signals);
       setSizingInput(loadPositionSizingInput());
       const execN = data.opportunities.filter((r) => r.operational_decision === "execute").length;
@@ -427,6 +430,13 @@ function OpportunitiesPageInner() {
             </label>
           </div>
           <div className="flex flex-wrap items-center gap-2">
+            {ibkrFetchFailed && (
+              <div className="flex items-center gap-1.5 rounded-full border border-amber-700/60 bg-amber-950/40 px-3 py-1 text-xs text-amber-300"
+                   title="Il servizio IBKR non ha risposto. Dati di connessione e auto-exec non disponibili.">
+                <span className="h-2 w-2 rounded-full bg-amber-400" />
+                ⚠ IBKR non risponde
+              </div>
+            )}
             {ibkrStatus?.enabled === true && (
               <>
                 <div

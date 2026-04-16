@@ -181,7 +181,7 @@ export async function fetchOpportunities(params: {
   if (params.decision?.trim()) {
     url.searchParams.set("decision", params.decision.trim());
   }
-  const res = await fetchWithRetry(url.toString(), { cache: "no-store" });
+  const res = await fetchWithRetry(url.toString(), { cache: "no-store" }, 60_000);
   if (!res.ok) {
     const text = await res.text();
     throw new Error(text || `${res.status} ${res.statusText}`);

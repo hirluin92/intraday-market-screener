@@ -81,10 +81,12 @@ export default function DiagnosticaPage() {
   const [patternsEvaluated, setPatternsEvaluated] = useState(0);
   const [opportunities, setOpportunities] = useState<OpportunityRow[]>([]);
   const [oppCount, setOppCount] = useState(0);
+  const [failedSections, setFailedSections] = useState<string[]>([]);
 
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
+    setFailedSections([]);
     try {
       const [btResult, opResult] = await Promise.allSettled([
         fetchBacktestPatterns({ limit: FETCH_LIMIT }),
@@ -99,10 +101,15 @@ export default function DiagnosticaPage() {
         setOpportunities(opResult.value.opportunities);
         setOppCount(opResult.value.count);
       }
-      // Se entrambe falliscono, propaga il primo errore
+      // Se entrambe falliscono, propaga il primo errore (mostra blocco errore)
       if (btResult.status === "rejected" && opResult.status === "rejected") {
         throw btResult.reason;
       }
+      // Se solo una fallisce, la pagina è parzialmente utilizzabile → mostra banner
+      const failed: string[] = [];
+      if (btResult.status === "rejected") failed.push("Backtest pattern");
+      if (opResult.status === "rejected") failed.push("Opportunità correnti");
+      setFailedSections(failed);
     } catch (e) {
       setAggregates([]);
       setOpportunities([]);
@@ -146,6 +153,17 @@ export default function DiagnosticaPage() {
           oltre al limite richiesto all&apos;API).
         </p>
       </header>
+
+      {failedSections.length > 0 && (
+        <div className="flex items-center gap-2 rounded-lg border border-amber-700/50 bg-amber-950/30 px-4 py-2.5 text-sm text-amber-300">
+          <span className="shrink-0">⚠</span>
+          <span>
+            Dati parziali — fetch non riuscite:{" "}
+            <span className="font-semibold">{failedSections.join(", ")}</span>.
+            I dati mostrati potrebbero essere incompleti.
+          </span>
+        </div>
+      )}
 
       {loading && (
         <p className="text-sm text-zinc-600 dark:text-zinc-400" role="status">

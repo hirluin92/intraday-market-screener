@@ -361,6 +361,7 @@ function SeriesDetailInner() {
   const [features, setFeatures] = useState<FeatureRow[]>([]);
   const [contexts, setContexts] = useState<ContextRow[]>([]);
   const [patterns, setPatterns] = useState<PatternRow[]>([]);
+  const [failedSections, setFailedSections] = useState<string[]>([]);
 
   const load = useCallback(async () => {
     if (!symbol || !timeframe) return;
@@ -419,6 +420,13 @@ function SeriesDetailInner() {
       setFeatures(fResult.status === "fulfilled" ? fResult.value.features : []);
       setContexts(ctxResult.status === "fulfilled" ? ctxResult.value.contexts : []);
       setPatterns(patResult.status === "fulfilled" ? patResult.value.patterns : []);
+
+      const failed: string[] = [];
+      if (cResult.status === "rejected") failed.push("Grafico candele");
+      if (fResult.status === "rejected") failed.push("Indicatori");
+      if (ctxResult.status === "rejected") failed.push("Contesto");
+      if (patResult.status === "rejected") failed.push("Pattern recenti");
+      setFailedSections(failed);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -443,6 +451,16 @@ function SeriesDetailInner() {
 
   return (
     <div className="mx-auto max-w-5xl flex flex-col gap-6 p-4 sm:p-6">
+      {failedSections.length > 0 && (
+        <div className="flex items-center gap-2 rounded-lg border border-amber-700/50 bg-amber-950/30 px-4 py-2.5 text-sm text-amber-300">
+          <span className="shrink-0">⚠</span>
+          <span>
+            Dati parziali — sezioni non disponibili:{" "}
+            <span className="font-semibold">{failedSections.join(", ")}</span>.
+            Il backend potrebbe essere temporaneamente irraggiungibile.
+          </span>
+        </div>
+      )}
       <div className="flex items-center gap-2 text-sm text-zinc-500 flex-wrap">
         <Link href="/opportunities" className="hover:text-zinc-800 dark:hover:text-zinc-200">
           Opportunità

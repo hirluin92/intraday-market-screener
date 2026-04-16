@@ -121,6 +121,14 @@ RIGHT: RegimeIndicator (SPY badge) + MarketClock + Settings icon
 │          │  │ ▲ +1.4%  │ │  30 gg   │ │ corrente │ │          │    │
 │          │  └──────────┘ └──────────┘ └──────────┘ └──────────┘    │
 │          │                                                           │
+│          │  ── ATTIVITÀ RECENTE ───────────────────────────────────  │
+│          │  14:22  ↺ Pipeline  — 23 opportunità trovate             │
+│          │  14:21  ▲ AAPL 1h LONG  eseguito @ 182.40               │
+│          │  14:10  ↺ Pipeline  — 21 opportunità trovate             │
+│          │  14:05  ▼ BTC 5m SHORT  eseguito @ 67,230               │
+│          │  13:50  ↺ Pipeline  — 18 opportunità trovate             │
+│          │                        [Vedi storico completo →]         │
+│          │                                                           │
 │          │  ── SEGNALI EXECUTE ────────────────────────────── [→ tutti]
 │          │  ┌──────────────────┐  ┌──────────────────┐             │
 │          │  │ AAPL · 1h · LONG │  │ TSLA · 5m · SHORT│             │
@@ -129,22 +137,21 @@ RIGHT: RegimeIndicator (SPY badge) + MarketClock + Settings icon
 │          │  │ Score ████░░ 72% │  │ Score ███░░░ 58% │             │
 │          │  └──────────────────┘  └──────────────────┘             │
 │          │  [+ 1 altro segnale]                                      │
-│          │                                                           │
-│          │  ── ATTIVITÀ RECENTE ───────────────────────────────────  │
-│          │  14:22  ↺ Pipeline  — 23 opportunità trovate             │
-│          │  14:21  ▲ AAPL 1h LONG  eseguito @ 182.40               │
-│          │  14:10  ↺ Pipeline  — 21 opportunità trovate             │
-│          │  14:05  ▼ BTC 5m SHORT  eseguito @ 67,230               │
-│          │  13:50  ↺ Pipeline  — 18 opportunità trovate             │
-│          │                        [Vedi storico completo →]         │
 └──────────┴───────────────────────────────────────────────────────────┘
 ```
+
+### Ordine righe (aggiornato da review)
+
+1. **Row 1 — Status** (4 card): IBKR, Pipeline, Mercato, Regime SPY
+2. **Row 2 — Performance** (4 KPI): P&L oggi, Win Rate 30gg, Drawdown, Posizioni aperte
+3. **Row 3 — Activity feed**: ultime 10 azioni (review + contesto prima di agire)
+4. **Row 4 — Segnali execute**: top 3-5 con CTA "Vedi tutti" (azione dopo la review)
 
 ### Componenti usati
 
 - `KPICard` × 7 (IBKR, Pipeline, Mercato, P&L, Win%, Drawdown, Posizioni)
 - `SignalCardCompact` × 3-5 (top segnali execute)
-- Lista attività (feed statico da executed-signals + pipeline log)
+- Lista attività (feed da executed-signals + pipeline log)
 
 ### Stati
 
@@ -173,7 +180,15 @@ Client islands:
 
 **Obiettivo refactor:** spaccare il god component in layout + sezioni + hook.
 
-### Layout desktop
+### Breakpoint preferenze (aggiornato da review)
+
+| Breakpoint | Layout |
+|------------|--------|
+| **≥ 1280px (xl)** | Sidebar sinistra + main + sidebar destra (320px) sticky |
+| **1024–1279px (lg)** | Sidebar sinistra + main (full). Preferenze in Drawer da pulsante header |
+| **< 1024px** | Solo main + drawer mobile per navigazione + preferenze |
+
+### Layout desktop (≥ 1280px)
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
@@ -181,7 +196,7 @@ Client islands:
 ├──────────┬─────────────────────────────────────────┬────────────────┤
 │ SIDEBAR  │  HEADER STICKY  top-12  z-30            │ PREFERENCES    │
 │          │  [● LIVE] Aggiorna [↺] Auto 60s [▓▓|░]  │ PANEL          │
-│          │  [✅3] [👁12] [✗8]   [Regime: Bull]      │ w-72 sticky   │
+│          │  [✅3] [👁12] [✗8]   [Regime: Bull]      │ w-80 sticky   │
 │          │  [Strumenti ⚙]  [Sort ▼]                │ top-12         │
 │          ├─────────────────────────────────────────┤                │
 │          │  FILTRI PILLS                            │ Capitale       │

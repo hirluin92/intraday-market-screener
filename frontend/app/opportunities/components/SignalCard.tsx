@@ -1,7 +1,6 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { useRouter } from "next/navigation";
 
 import type { OpportunityRow } from "@/lib/api";
 import { seriesDetailHref } from "@/lib/api";
@@ -110,7 +109,6 @@ export function SignalCard({
   expanded,
   onExpandedChange,
 }: SignalCardProps) {
-  const router = useRouter();
   const [copied, setCopied] = useState(false);
 
   const snap = useMemo(
@@ -150,7 +148,7 @@ export function SignalCard({
 
   const goDetail = (e: React.MouseEvent) => {
     e.stopPropagation();
-    router.push(
+    window.location.assign(
       seriesDetailHref(row.symbol, row.timeframe, row.exchange, {
         provider: row.provider,
         asset_type: row.asset_type,

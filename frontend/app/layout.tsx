@@ -1,7 +1,9 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono, Space_Mono, Syne } from "next/font/google";
 
-import { AppNav } from "@/components/AppNav";
+import { IBKRStatusBanner } from "@/components/IBKRStatusBanner";
+import { AppShell } from "@/components/shell/AppShell";
+import { Providers } from "./providers";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -29,7 +31,7 @@ const spaceMono = Space_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "intraday-market-screener",
+  title: "Intraday Market Screener",
   description: "Applicazione di screening di mercato intraday",
 };
 
@@ -43,9 +45,16 @@ export default function RootLayout({
       lang="it"
       className={`${geistSans.variable} ${geistMono.variable} ${syne.variable} ${spaceMono.variable} h-full antialiased`}
     >
-      <body className="flex min-h-full flex-col">
-        <AppNav />
-        {children}
+      <body className="flex min-h-screen flex-col bg-canvas text-fg">
+        <Providers>
+          {/* IBKRStatusBanner: conditional, sticky top-0 z-50, only shown when offline */}
+          <IBKRStatusBanner />
+
+          {/* AppShell: sidebar + topbar + main content */}
+          <AppShell>
+            {children}
+          </AppShell>
+        </Providers>
       </body>
     </html>
   );
