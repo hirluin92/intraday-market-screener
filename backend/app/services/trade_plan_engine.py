@@ -17,6 +17,64 @@ from typing import Literal
 
 from app.schemas.trade_plan import TradePlanV1
 
+
+def _apply_tick_rounding(
+    plan: TradePlanV1,
+    symbol: str,
+    exchange: str,
+) -> TradePlanV1:
+    """
+    Arrotonda entry/stop/TP al tick size valido per il simbolo.
+
+    No-op se symbol è vuoto (path backtester) o se i livelli sono None.
+
+    Asimmetria per direzione:
+    - Long:  stop per difetto (più largo = più protettivo),
+             TP per eccesso  (più difficile da raggiungere).
+    - Short: stop per eccesso (più largo = più protettivo),
+             TP per difetto  (più difficile da raggiungere).
+    - Entry: arrotondamento al più vicino per entrambe le direzioni.
+
+    Il risk/reward viene ricalcolato sui livelli arrotondati.
+    """
+    if not symbol or plan.entry_price is None:
+        return plan
+
+    from app.services.tick_size import (  # noqa: PLC0415
+        get_tick_size,
+        resolve_asset_class,
+        round_to_tick,
+    )
+
+    asset_class = resolve_asset_class(symbol=symbol, exchange=exchange)
+    tick = get_tick_size(symbol=symbol, price=plan.entry_price, asset_class=asset_class)
+
+    entry = round_to_tick(plan.entry_price, tick, "nearest")
+
+    if plan.trade_direction == "long":
+        stop = round_to_tick(plan.stop_loss, tick, "down") if plan.stop_loss is not None else None
+        tp1 = round_to_tick(plan.take_profit_1, tick, "up") if plan.take_profit_1 is not None else None
+        tp2 = round_to_tick(plan.take_profit_2, tick, "up") if plan.take_profit_2 is not None else None
+    else:  # short
+        stop = round_to_tick(plan.stop_loss, tick, "up") if plan.stop_loss is not None else None
+        tp1 = round_to_tick(plan.take_profit_1, tick, "down") if plan.take_profit_1 is not None else None
+        tp2 = round_to_tick(plan.take_profit_2, tick, "down") if plan.take_profit_2 is not None else None
+
+    # Ricalcola R/R sui livelli arrotondati
+    rr = plan.risk_reward_ratio
+    if stop is not None and tp1 is not None:
+        risk = abs(entry - stop)
+        if risk > 0:
+            rr = (abs(tp1 - entry) / risk).quantize(Decimal("0.01"))
+
+    return plan.model_copy(update={
+        "entry_price": entry,
+        "stop_loss": stop,
+        "take_profit_1": tp1,
+        "take_profit_2": tp2,
+        "risk_reward_ratio": rr,
+    })
+
 # --- Soglie direzione (modificare qui) ---
 MIN_FINAL_SCORE_FOR_LEVELS: Decimal = Decimal("28")
 MIN_FINAL_LABELS: frozenset[str] = frozenset({"strong", "moderate"})
@@ -121,11 +179,83 @@ def _resolve_trade_direction(
     return "none"
 
 
+# Mappa esplicita pattern_name → entry_strategy.
+# Aggiornare ogni volta che si aggiunge un nuovo detector in pattern_extraction.py.
+# Valori ammessi: "breakout", "retest", "close".
+#   - breakout : entry tra close ed estremo direzionale (momento, movimento impulsivo)
+#   - retest   : entry a metà barra verso l'estremo opposto (attesa pullback/conferma)
+#   - close    : entry sulla chiusura (conferma esplicita, pattern di inversione/divergenza)
+_PATTERN_ENTRY_STRATEGY: dict[str, str] = {
+    # ── Impulso / momentum ───────────────────────────────────────────────
+    "impulsive_bullish_candle":            "breakout",
+    "impulsive_bearish_candle":            "breakout",
+    "inside_bar_breakout_bull":            "breakout",
+    "opening_range_breakout_bull":         "breakout",
+    "opening_range_breakout_bear":         "breakout",
+    # ── Breakout con retest / FVG / Order Block ──────────────────────────
+    "breakout_with_retest":                "retest",
+    "fvg_retest_bull":                     "retest",
+    "fvg_retest_bear":                     "retest",
+    "ob_retest_bull":                      "retest",
+    "ob_retest_bear":                      "retest",
+    "vwap_bounce_bull":                    "retest",
+    "vwap_bounce_bear":                    "retest",
+    "liquidity_sweep_bull":                "retest",
+    "liquidity_sweep_bear":                "retest",
+    # ── Compressione → espansione ────────────────────────────────────────
+    "compression_to_expansion_transition": "retest",
+    # ── Conferma su chiusura (inversione / divergenza) ───────────────────
+    "engulfing_bullish":                   "close",
+    "engulfing_bearish":                   "close",
+    "rsi_momentum_continuation":           "close",
+    "rsi_divergence_bull":                 "close",
+    "rsi_divergence_bear":                 "close",
+    "macd_divergence_bull":                "close",
+    "macd_divergence_bear":                "close",
+    "double_bottom":                       "close",
+    "double_top":                          "close",
+    "morning_star":                        "close",
+    "evening_star":                        "close",
+    "hammer_reversal":                     "close",
+    "shooting_star_reversal":              "close",
+    # ── Rimbalzo su supporto / EMA / Fibonacci ───────────────────────────
+    "support_bounce":                      "retest",
+    "fibonacci_bounce":                    "retest",
+    "ema_pullback_to_support":             "retest",
+    "ema_pullback_to_resistance":          "retest",
+    # ── Continuazione di trend ───────────────────────────────────────────
+    "trend_continuation_pullback":         "retest",
+    "bull_flag":                           "retest",
+    "bear_flag":                           "retest",
+    # ── Rifiuto / breakout range ─────────────────────────────────────────
+    "resistance_rejection":                "close",
+    "nr7_breakout":                        "breakout",
+    "volatility_squeeze_breakout":         "breakout",
+    "range_expansion_breakout_candidate":  "breakout",
+}
+
+
 def _resolve_entry_strategy(pattern_name: str | None, candle_expansion: str) -> str:
-    pn = (pattern_name or "").lower()
-    if "impulsive" in pn or "breakout" in pn:
-        return "breakout"
-    if "compression" in pn or candle_expansion == "expansion":
+    pn = (pattern_name or "").strip().lower()
+
+    # Pattern assente (None o stringa vuota): fallback silenzioso — non loggare warning
+    # perché è uno stato atteso per opportunità senza pattern confermato.
+    if not pn:
+        return "retest" if candle_expansion == "expansion" else "close"
+
+    strategy = _PATTERN_ENTRY_STRATEGY.get(pn)
+    if strategy is not None:
+        return strategy
+
+    # Pattern con nome non vuoto ma non presente nella mappa esplicita:
+    # logga warning (il pattern va aggiunto a _PATTERN_ENTRY_STRATEGY).
+    import logging as _logging  # noqa: PLC0415
+    _logging.getLogger(__name__).warning(
+        "trade_plan_engine: pattern '%s' non presente in _PATTERN_ENTRY_STRATEGY — "
+        "usato fallback dinamico. Aggiungere alla mappa esplicita.",
+        pn,
+    )
+    if candle_expansion == "expansion":
         return "retest"
     return "close"
 
@@ -214,6 +344,8 @@ def build_trade_plan_v1(
     candle_high: Decimal | None,
     candle_low: Decimal | None,
     candle_close: Decimal | None,
+    symbol: str = "",
+    exchange: str = "",
 ) -> TradePlanV1:
     """
     Costruisce un TradePlanV1. Senza OHLC validi, restituisce livelli null e note esplicative.
@@ -316,15 +448,19 @@ def build_trade_plan_v1(
         reward = tp1 - entry
         rr = reward / risk
         inv = _format_invalidation_long(stop, notes)
-        return TradePlanV1(
-            trade_direction="long",
-            entry_strategy=entry_strat,
-            entry_price=entry,
-            stop_loss=stop,
-            take_profit_1=tp1,
-            take_profit_2=tp2,
-            risk_reward_ratio=rr.quantize(Decimal("0.01")),
-            invalidation_note=inv,
+        return _apply_tick_rounding(
+            TradePlanV1(
+                trade_direction="long",
+                entry_strategy=entry_strat,
+                entry_price=entry,
+                stop_loss=stop,
+                take_profit_1=tp1,
+                take_profit_2=tp2,
+                risk_reward_ratio=rr.quantize(Decimal("0.01")),
+                invalidation_note=inv,
+            ),
+            symbol=symbol,
+            exchange=exchange,
         )
 
     # short
@@ -359,15 +495,19 @@ def build_trade_plan_v1(
     reward = entry - tp1
     rr = reward / risk
     inv = _format_invalidation_short(stop, notes)
-    return TradePlanV1(
-        trade_direction="short",
-        entry_strategy=entry_strat,
-        entry_price=entry,
-        stop_loss=stop,
-        take_profit_1=tp1,
-        take_profit_2=tp2,
-        risk_reward_ratio=rr.quantize(Decimal("0.01")),
-        invalidation_note=inv,
+    return _apply_tick_rounding(
+        TradePlanV1(
+            trade_direction="short",
+            entry_strategy=entry_strat,
+            entry_price=entry,
+            stop_loss=stop,
+            take_profit_1=tp1,
+            take_profit_2=tp2,
+            risk_reward_ratio=rr.quantize(Decimal("0.01")),
+            invalidation_note=inv,
+        ),
+        symbol=symbol,
+        exchange=exchange,
     )
 
 
@@ -387,6 +527,8 @@ def build_trade_plan_v1_with_execution_variant(
     stop_profile: StopProfile,
     tp1_r_mult: Decimal,
     tp2_r_mult: Decimal,
+    symbol: str = "",
+    exchange: str = "",
 ) -> TradePlanV1:
     """
     Stessa logica direzionale e note di v1.1, ma ingresso/stop/TP fissati dalla variante
@@ -480,15 +622,19 @@ def build_trade_plan_v1_with_execution_variant(
         reward = tp1 - entry
         rr = reward / risk
         inv = _format_invalidation_long(stop, notes)
-        return TradePlanV1(
-            trade_direction="long",
-            entry_strategy=entry_strat,
-            entry_price=entry,
-            stop_loss=stop,
-            take_profit_1=tp1,
-            take_profit_2=tp2,
-            risk_reward_ratio=rr.quantize(Decimal("0.01")),
-            invalidation_note=inv,
+        return _apply_tick_rounding(
+            TradePlanV1(
+                trade_direction="long",
+                entry_strategy=entry_strat,
+                entry_price=entry,
+                stop_loss=stop,
+                take_profit_1=tp1,
+                take_profit_2=tp2,
+                risk_reward_ratio=rr.quantize(Decimal("0.01")),
+                invalidation_note=inv,
+            ),
+            symbol=symbol,
+            exchange=exchange,
         )
 
     entry = _entry_price(
@@ -520,13 +666,17 @@ def build_trade_plan_v1_with_execution_variant(
     reward = entry - tp1
     rr = reward / risk
     inv = _format_invalidation_short(stop, notes)
-    return TradePlanV1(
-        trade_direction="short",
-        entry_strategy=entry_strat,
-        entry_price=entry,
-        stop_loss=stop,
-        take_profit_1=tp1,
-        take_profit_2=tp2,
-        risk_reward_ratio=rr.quantize(Decimal("0.01")),
-        invalidation_note=inv,
+    return _apply_tick_rounding(
+        TradePlanV1(
+            trade_direction="short",
+            entry_strategy=entry_strat,
+            entry_price=entry,
+            stop_loss=stop,
+            take_profit_1=tp1,
+            take_profit_2=tp2,
+            risk_reward_ratio=rr.quantize(Decimal("0.01")),
+            invalidation_note=inv,
+        ),
+        symbol=symbol,
+        exchange=exchange,
     )

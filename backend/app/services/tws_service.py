@@ -32,10 +32,15 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+import time
 from datetime import datetime, timezone
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+# TTL cache in-memory per get_last_price(): evita N richieste TWS per lo stesso
+# simbolo nello stesso ciclo di refresh. 30 secondi bilancia freschezza e overhead.
+_LAST_PRICE_TTL_S: float = 30.0
 
 # ─── Strutture dati risultato ─────────────────────────────────────────────────
 
@@ -161,6 +166,10 @@ class TWSService:
     _instance: TWSService | None = None
     _lock = threading.Lock()
 
+    # Cooldown tra un tentativo di reconnect e il successivo (secondi).
+    # 60s evita storm di connessioni se TWS è temporaneamente offline.
+    _RECONNECT_COOLDOWN_S: float = 60.0
+
     def __init__(self, host: str, port: int, client_id: int) -> None:
         self._host = host
         self._port = port
@@ -171,6 +180,9 @@ class TWSService:
         self._ready = threading.Event()
         self._connected = False
         self._connect_failed = False
+        self._last_connect_attempt: float = 0.0  # monotonic timestamp dell'ultimo tentativo
+        # Cache (symbol → (price, monotonic_timestamp)) per get_last_price()
+        self._last_price_cache: dict[str, tuple[float, float]] = {}
 
     # ── Connessione ──────────────────────────────────────────────────────────
 
@@ -189,13 +201,13 @@ class TWSService:
                 self._host, self._port, clientId=self._client_id,
                 timeout=10,
             )
-            # Richiedi dati delayed (tipo 3) se real-time non disponibile.
-            # Evita il flood di Error 10089 per simboli US senza abbonamento API real-time.
-            # Tipo 3 = delayed frozen: dati con 15-20 min di ritardo, sempre disponibili.
-            self._ib.reqMarketDataType(3)
+            # Tipo 2 = frozen: usa real-time se disponibile, altrimenti ultimo prezzo noto.
+            # Tipo 1 = real-time puro (errore se abbonamento mancante per quel simbolo).
+            # Tipo 3 = delayed (15-20 min) — usato in precedenza senza abbonamento real-time.
+            self._ib.reqMarketDataType(2)
             self._connected = True
             logger.info(
-                "TWS connesso: %s:%d clientId=%d (market data: delayed/frozen fallback attivo)",
+                "TWS connesso: %s:%d clientId=%d (market data: real-time con frozen fallback)",
                 self._host, self._port, self._client_id,
             )
         except Exception as exc:
@@ -209,12 +221,42 @@ class TWSService:
         if self._thread and self._thread.is_alive():
             return
         self._ready.clear()
+        self._last_connect_attempt = time.monotonic()
         self._thread = threading.Thread(target=self._run_loop, daemon=True, name="tws-loop")
         self._thread.start()
+
+    def reconnect(self) -> None:
+        """
+        Forza un nuovo tentativo di connessione a TWS (se non già connesso).
+
+        Chiamato automaticamente ogni ciclo tws_live_candle_update se il precedente
+        tentativo è fallito e il cooldown di 60s è scaduto. Non fa nulla se già connesso.
+        """
+        if self._connected:
+            return
+        now = time.monotonic()
+        if now - self._last_connect_attempt < self._RECONNECT_COOLDOWN_S:
+            return  # troppo presto, rispetta il cooldown
+        logger.info(
+            "TWS reconnect: tentativo verso %s:%d (precedente fallito %.0fs fa)",
+            self._host, self._port, now - self._last_connect_attempt,
+        )
+        self._connect_failed = False
+        self._connected = False
+        # Termina il vecchio loop/thread se ancora appeso
+        if self._thread and self._thread.is_alive():
+            if self._loop:
+                self._loop.call_soon_threadsafe(self._loop.stop)
+            self._thread.join(timeout=3)
+        self._loop = None
+        self._thread = None
+        self.start()
 
     def _ensure_started(self) -> bool:
         """Avvia se non ancora partito. Restituisce True se connesso."""
         if self._connect_failed:
+            # Non ritentare qui: il reconnect è gestito da _run_tws_live_candle_update
+            # con cadenza periodica (ogni 2 min con cooldown 60s).
             return False
         if not (self._thread and self._thread.is_alive()):
             self.start()
@@ -246,6 +288,10 @@ class TWSService:
         )
 
     def _sync_live_quote(self, symbol: str) -> LiveQuote | None:
+        # Simboli Yahoo Finance con prefisso ^ (indici, es. ^FTSE, ^GSPC) non sono
+        # asset tradabili su IBKR come Stock — skip silenzioso per evitare Error 200.
+        if symbol.startswith("^"):
+            return None
         try:
             import ib_insync as ibi  # noqa: PLC0415
 
@@ -274,6 +320,95 @@ class TWSService:
             volume=t.volume if t.volume else None,
         )
 
+    async def get_last_price(
+        self,
+        symbol: str,
+        timeout_s: float = 2.0,
+        exchange: str = "SMART",
+        currency: str = "USD",
+    ) -> float | None:
+        """
+        Ottiene l'ultimo prezzo live per il simbolo (last trade; fallback a mid bid/ask).
+
+        Usa cache in-memory con TTL 30s (chiave = symbol+exchange per evitare collisioni
+        tra stesso ticker su exchange diversi, es. AZN LSE vs AZN SMART).
+
+        Timeout 2s — restituisce None silenziosamente se TWS non risponde in tempo.
+        Non solleva mai eccezioni.
+
+        Args:
+            symbol:    ticker (es. "AAPL", "AZN")
+            timeout_s: timeout esterno per il run_in_executor (default 2.0s)
+            exchange:  IBKR exchange routing (default "SMART" per US, "LSE" per UK)
+            currency:  valuta contratto (default "USD"; "GBP" per UK)
+
+        Returns:
+            Prezzo float se disponibile, None altrimenti (fallback al chiamante).
+        """
+        import time as _time  # noqa: PLC0415
+
+        now = _time.monotonic()
+        cache_key = f"{symbol}@{exchange}"
+        cached = self._last_price_cache.get(cache_key)
+        if cached and (now - cached[1]) < _LAST_PRICE_TTL_S:
+            logger.debug("get_last_price(%s): cache hit (%.4f)", cache_key, cached[0])
+            return cached[0]
+
+        # Controlla connessione senza bloccare (_ensure_started può attendere 12s)
+        if not self._connected or self._loop is None:
+            return None
+
+        try:
+            price = await asyncio.wait_for(
+                asyncio.get_event_loop().run_in_executor(
+                    None, self._sync_get_last_price, symbol, exchange, currency
+                ),
+                timeout=timeout_s + 0.5,  # buffer sopra il timeout interno 1.5s
+            )
+        except (asyncio.TimeoutError, Exception) as exc:
+            logger.debug("get_last_price(%s) timeout/error: %s", symbol, exc)
+            return None
+
+        if price is not None and price > 0:
+            self._last_price_cache[cache_key] = (price, now)
+            logger.debug("get_last_price(%s): %.4f (live)", cache_key, price)
+        return price if (price is not None and price > 0) else None
+
+    def _sync_get_last_price(
+        self,
+        symbol: str,
+        exchange: str = "SMART",
+        currency: str = "USD",
+    ) -> float | None:
+        """
+        Wrapper sync che gira nel thread-pool di FastAPI.
+        Delega _async_live_quote al loop TWS con timeout 1.5s.
+        Ritorna None silenziosamente su qualsiasi errore.
+        """
+        # Indici Yahoo Finance (^FTSE, ^GSPC, ^IXIC, ecc.) non sono tradabili
+        # come Stock su IBKR — skip per evitare Error 200 nei log.
+        if symbol.startswith("^"):
+            return None
+        try:
+            import ib_insync as ibi  # noqa: PLC0415
+
+            contract = ibi.Stock(symbol, exchange or "SMART", currency or "USD")
+            future = asyncio.run_coroutine_threadsafe(
+                self._async_live_quote(contract),
+                self._loop,  # type: ignore[arg-type]
+            )
+            quote = future.result(timeout=1.5)
+        except Exception as exc:
+            logger.debug("_sync_get_last_price(%s/%s): %s", symbol, exchange, exc)
+            return None
+
+        if quote is None:
+            return None
+        price: float | None = quote.last
+        if (price is None or price <= 0) and quote.bid and quote.ask and quote.bid > 0 and quote.ask > 0:
+            price = (quote.bid + quote.ask) / 2.0
+        return float(price) if price and price > 0 else None
+
     async def get_market_depth(self, symbol: str, levels: int = 5) -> MarketDepth | None:
         """
         Ritorna i primi N livelli del book (Level 2) per un simbolo.
@@ -286,6 +421,8 @@ class TWSService:
         )
 
     def _sync_market_depth(self, symbol: str, levels: int) -> MarketDepth | None:
+        if symbol.startswith("^"):
+            return None
         try:
             import ib_insync as ibi  # noqa: PLC0415
 
@@ -348,6 +485,8 @@ class TWSService:
     def _sync_bid_ask_history(
         self, symbol: str, duration: str, bar_size: str
     ) -> list[dict] | None:
+        if symbol.startswith("^"):
+            return None
         try:
             import ib_insync as ibi  # noqa: PLC0415
 
@@ -423,27 +562,42 @@ class TWSService:
         )
 
     def _sync_historical_bars(
-        self, symbol: str, duration: str, bar_size: str, use_rth: bool
+        self,
+        symbol: str,
+        duration: str,
+        bar_size: str,
+        use_rth: bool,
+        exchange: str = "SMART",
+        currency: str = "USD",
+        end_datetime: datetime | None = None,
+        timeout_s: float = 20.0,
     ) -> list[dict] | None:
         try:
             import ib_insync as ibi  # noqa: PLC0415
 
-            contract = ibi.Stock(symbol, "SMART", "USD")
+            contract = ibi.Stock(symbol, exchange or "SMART", currency or "USD")
             future = asyncio.run_coroutine_threadsafe(
-                self._async_historical_bars(contract, duration, bar_size, use_rth),
+                self._async_historical_bars(contract, duration, bar_size, use_rth, end_datetime),
                 self._loop,
             )
-            return future.result(timeout=20)
+            return future.result(timeout=timeout_s)
         except Exception as exc:
             logger.debug("TWS historical_bars %s: %s", symbol, exc)
             return None
 
     async def _async_historical_bars(
-        self, contract, duration: str, bar_size: str, use_rth: bool
+        self,
+        contract,
+        duration: str,
+        bar_size: str,
+        use_rth: bool,
+        end_datetime: datetime | None = None,
     ) -> list[dict]:
+        # Formato IBKR: "YYYYMMDD HH:MM:SS UTC" oppure "" = adesso.
+        end_str = end_datetime.strftime("%Y%m%d %H:%M:%S UTC") if end_datetime is not None else ""
         bars = await self._ib.reqHistoricalDataAsync(
             contract,
-            endDateTime="",
+            endDateTime=end_str,
             durationStr=duration,
             barSizeSetting=bar_size,
             whatToShow="TRADES",
@@ -466,6 +620,160 @@ class TWSService:
                 "volume": float(b.volume) if b.volume else 0.0,
             })
         return result
+
+    async def get_historical_candles(
+        self,
+        symbol: str,
+        timeframe: str = "1h",
+        limit: int = 50,
+        exchange: str = "SMART",
+        currency: str = "USD",
+    ) -> list[dict] | None:
+        """
+        Ritorna candele OHLCV complete (ultima barra in formazione esclusa) per l'ingestion pipeline.
+
+        Differenza da get_historical_bars(): fail-fast su TWS disconnesso (non blocca 12s),
+        calcola la duration da limit, e scarta l'ultima barra incompleta come fa yfinance.
+
+        Args:
+            symbol:    ticker US, es. "AAPL"
+            timeframe: "1h" | "1d" | "5m" | "15m" | "30m"
+            limit:     numero massimo di barre complete da restituire (le ultime N)
+            exchange:  IBKR exchange routing (default SMART)
+            currency:  valuta contratto (default USD)
+
+        Returns:
+            Lista di dict {timestamp, open, high, low, close, volume} — barre complete, ordinate.
+            None se TWS non è connesso o si verifica un errore.
+        """
+        if not self._connected or self._ib is None:
+            return None
+
+        bar_size_map = {
+            "1m":  "1 min",
+            "5m":  "5 mins",
+            "15m": "15 mins",
+            "30m": "30 mins",
+            "1h":  "1 hour",
+            "1d":  "1 day",
+        }
+        bar_size = bar_size_map.get(timeframe)
+        if bar_size is None:
+            logger.warning("get_historical_candles: timeframe non supportato '%s'", timeframe)
+            return None
+
+        # Calcola duration IBKR dal numero di barre richieste.
+        # Barre RTH per giorno di mercato: 1h→8, 1d→1, 5m→78, 15m→26, 30m→13.
+        bars_per_day = {"1h": 8, "1d": 1, "5m": 78, "15m": 26, "30m": 13}
+        bpd = bars_per_day.get(timeframe, 8)
+        import math
+        days_needed = max(5, math.ceil(limit / bpd) + 3)  # +3 giorni buffer weekend/festivi
+        duration = f"{min(days_needed, 365)} D"
+
+        try:
+            bars = await asyncio.wait_for(
+                asyncio.get_event_loop().run_in_executor(
+                    None,
+                    self._sync_historical_bars,
+                    symbol, duration, bar_size, True,   # use_rth=True
+                    exchange, currency,                  # propaga exchange/currency al contratto
+                ),
+                timeout=20.0,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("get_historical_candles(%s, %s): timeout 20s", symbol, timeframe)
+            return None
+        except Exception as exc:
+            logger.error("get_historical_candles(%s, %s): %s", symbol, timeframe, exc)
+            return None
+
+        if not bars:
+            return bars
+
+        # Scarta ultima barra in formazione (stessa semantica di yahoo_finance_ingestion e Binance).
+        bars = bars[:-1]
+        if not bars:
+            return bars
+
+        # Restituisce le ultime `limit` barre complete.
+        return bars[-limit:] if limit and len(bars) > limit else bars
+
+    async def get_historical_candles_backfill(
+        self,
+        symbol: str,
+        timeframe: str = "1h",
+        duration: str = "1 Y",
+        exchange: str = "SMART",
+        currency: str = "USD",
+        end_datetime: datetime | None = None,
+        timeout_s: float = 120.0,
+    ) -> list[dict] | None:
+        """
+        Versione backfill di get_historical_candles.
+
+        Accetta duration esplicita (es. "1 Y") e end_datetime per download multi-chunk.
+        Timeout 120s di default — richieste di 1 anno su barre 1h possono richiedere
+        più tempo su connessioni lente o se IBKR è in pacing.
+
+        NON scarta l'ultima barra in formazione e NON applica un cap sul numero di barre:
+        restituisce tutto lo storico nella finestra richiesta.
+
+        Args:
+            symbol:       ticker, es. "AZN"
+            timeframe:    "1h" | "1d" | "5m" | "15m"
+            duration:     stringa IBKR diretta: "1 Y", "6 M", "90 D", "365 D" ecc.
+            exchange:     IBKR exchange (es. "LSE" per UK, "SMART" per USA)
+            currency:     valuta contratto (es. "GBP" per UK, "USD" per USA)
+            end_datetime: fine finestra storica (None = adesso)
+            timeout_s:    timeout totale per la chiamata IBKR (default 120s)
+
+        Returns:
+            Lista di dict {timestamp, open, high, low, close, volume} ordinata per timestamp.
+            None se TWS non connesso o errore irrecuperabile.
+        """
+        if not self._ensure_started():
+            return None
+
+        bar_size_map = {
+            "1m":  "1 min",
+            "5m":  "5 mins",
+            "15m": "15 mins",
+            "30m": "30 mins",
+            "1h":  "1 hour",
+            "1d":  "1 day",
+        }
+        bar_size = bar_size_map.get(timeframe)
+        if bar_size is None:
+            logger.warning(
+                "get_historical_candles_backfill: timeframe non supportato '%s'", timeframe
+            )
+            return None
+
+        import functools  # noqa: PLC0415
+
+        fn = functools.partial(
+            self._sync_historical_bars,
+            symbol, duration, bar_size, True,           # use_rth=True
+            exchange, currency, end_datetime, timeout_s,
+        )
+        try:
+            bars = await asyncio.wait_for(
+                asyncio.get_event_loop().run_in_executor(None, fn),
+                timeout=timeout_s + 10.0,  # outer leggermente più largo dell'inner
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "get_historical_candles_backfill(%s, %s, %s): timeout %.0fs",
+                symbol, timeframe, duration, timeout_s,
+            )
+            return None
+        except Exception as exc:
+            logger.error(
+                "get_historical_candles_backfill(%s, %s): %s", symbol, timeframe, exc
+            )
+            return None
+
+        return bars or []
 
     async def get_portfolio(self) -> list[dict] | None:
         """Ritorna le posizioni aperte dal portfolio TWS."""
@@ -823,6 +1131,345 @@ class TWSService:
             "log": [e.message for e in trade.log if e.message],
         }
 
+    # ── Partial fill handling ─────────────────────────────────────────────
+
+    async def poll_entry_fill(
+        self,
+        order_id: int,
+        timeout_s: float = 60.0,
+        poll_interval_s: float = 1.5,
+    ) -> dict:
+        """
+        Polling dello stato fill dell'entry order fino a completamento o timeout.
+
+        Termina quando l'ordine raggiunge uno stato terminale (Filled, Cancelled,
+        Rejected, Inactive, ApiCancelled) oppure allo scadere di timeout_s.
+
+        Returns dict con:
+            status        : stato finale (o "Timeout" / "NotFound")
+            filled_qty    : azioni effettivamente fillate
+            ordered_qty   : azioni ordinate originariamente
+            avg_fill_price: prezzo medio di fill (0 se non fillato)
+        """
+        if not self._ensure_started() or self._ib is None:
+            return {"status": "error", "filled_qty": 0.0, "ordered_qty": 0.0, "avg_fill_price": 0.0}
+        return await asyncio.get_event_loop().run_in_executor(
+            None, self._sync_poll_entry_fill, order_id, timeout_s, poll_interval_s
+        )
+
+    def _sync_poll_entry_fill(
+        self, order_id: int, timeout_s: float, poll_interval_s: float
+    ) -> dict:
+        try:
+            import asyncio as _asyncio  # noqa: PLC0415
+            future = _asyncio.run_coroutine_threadsafe(
+                self._async_poll_entry_fill(order_id, timeout_s, poll_interval_s),
+                self._loop,
+            )
+            return future.result(timeout=timeout_s + 15)
+        except Exception as exc:
+            logger.warning("poll_entry_fill order_id=%s: %s", order_id, exc)
+            return {"status": "error", "filled_qty": 0.0, "ordered_qty": 0.0, "avg_fill_price": 0.0}
+
+    async def _async_poll_entry_fill(
+        self, order_id: int, timeout_s: float, poll_interval_s: float
+    ) -> dict:
+        import time  # noqa: PLC0415
+        _TERMINAL = {"Filled", "Cancelled", "Rejected", "Inactive", "ApiCancelled"}
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            trade = next(
+                (t for t in self._ib.trades() if t.order.orderId == order_id), None
+            )
+            if trade is not None:
+                status = trade.orderStatus.status
+                if status in _TERMINAL:
+                    return {
+                        "status": status,
+                        "filled_qty": float(trade.orderStatus.filled or 0),
+                        "ordered_qty": float(trade.order.totalQuantity or 0),
+                        "avg_fill_price": float(trade.orderStatus.avgFillPrice or 0),
+                    }
+            await asyncio.sleep(poll_interval_s)
+
+        # Timeout: leggi l'ultimo stato disponibile
+        trade = next(
+            (t for t in self._ib.trades() if t.order.orderId == order_id), None
+        )
+        if trade:
+            return {
+                "status": "Timeout",
+                "filled_qty": float(trade.orderStatus.filled or 0),
+                "ordered_qty": float(trade.order.totalQuantity or 0),
+                "avg_fill_price": float(trade.orderStatus.avgFillPrice or 0),
+            }
+        return {"status": "NotFound", "filled_qty": 0.0, "ordered_qty": 0.0, "avg_fill_price": 0.0}
+
+    async def cancel_order_by_id(self, order_id: int) -> bool:
+        """
+        Cancella un ordine specifico per order_id.
+
+        Restituisce True se l'ordine è stato trovato e la richiesta di cancella inviata,
+        False se non trovato o già in stato terminale.
+        """
+        if not self._ensure_started() or self._ib is None:
+            return False
+        return await asyncio.get_event_loop().run_in_executor(
+            None, self._sync_cancel_order_by_id, order_id
+        )
+
+    def _sync_cancel_order_by_id(self, order_id: int) -> bool:
+        try:
+            import asyncio as _asyncio  # noqa: PLC0415
+            future = _asyncio.run_coroutine_threadsafe(
+                self._async_cancel_order_by_id(order_id), self._loop
+            )
+            return future.result(timeout=10)
+        except Exception as exc:
+            logger.warning("cancel_order_by_id order_id=%s: %s", order_id, exc)
+            return False
+
+    async def _async_cancel_order_by_id(self, order_id: int) -> bool:
+        _TERMINAL = {"Filled", "Cancelled", "Inactive", "ApiCancelled"}
+        trade = next(
+            (t for t in self._ib.trades() if t.order.orderId == order_id), None
+        )
+        if trade is None:
+            logger.debug("cancel_order_by_id: order_id=%s non trovato in trades()", order_id)
+            return False
+        if trade.orderStatus.status in _TERMINAL:
+            logger.debug(
+                "cancel_order_by_id: order_id=%s già in stato terminale %s",
+                order_id, trade.orderStatus.status,
+            )
+            return False
+        self._ib.cancelOrder(trade.order)
+        await asyncio.sleep(1.0)  # attesa breve conferma TWS
+        logger.info("cancel_order_by_id: order_id=%s — richiesta cancellazione inviata", order_id)
+        return True
+
+    async def place_tp_sl_standalone(
+        self,
+        symbol: str,
+        close_action: str,
+        quantity: float,
+        stop_price: float,
+        take_profit_price: float,
+        exchange: str = "SMART",
+        currency: str = "USD",
+    ) -> dict:
+        """
+        Invia SL (STP) e TP (LMT) standalone per una posizione già aperta,
+        collegati come gruppo OCA (One Cancels All).
+
+        Usato dopo un fill parziale per ridimensionare SL/TP al fill effettivo.
+        close_action: "SELL" per posizione long, "BUY" per posizione short.
+        """
+        if not self._ensure_started() or self._ib is None:
+            return {"error": "TWS non connesso"}
+        return await asyncio.get_event_loop().run_in_executor(
+            None, self._sync_place_tp_sl_standalone,
+            symbol, close_action, quantity,
+            stop_price, take_profit_price, exchange, currency,
+        )
+
+    def _sync_place_tp_sl_standalone(
+        self, symbol: str, close_action: str, quantity: float,
+        stop_price: float, take_profit_price: float,
+        exchange: str, currency: str,
+    ) -> dict:
+        try:
+            import asyncio as _asyncio  # noqa: PLC0415
+            future = _asyncio.run_coroutine_threadsafe(
+                self._async_place_tp_sl_standalone(
+                    symbol, close_action, quantity,
+                    stop_price, take_profit_price, exchange, currency,
+                ),
+                self._loop,
+            )
+            return future.result(timeout=20)
+        except Exception as exc:
+            logger.error("place_tp_sl_standalone %s: %s", symbol, exc)
+            return {"error": str(exc)}
+
+    async def _async_place_tp_sl_standalone(
+        self, symbol: str, close_action: str, quantity: float,
+        stop_price: float, take_profit_price: float,
+        exchange: str, currency: str,
+    ) -> dict:
+        import time as _time  # noqa: PLC0415
+        import ib_insync as ibi  # noqa: PLC0415
+
+        def _tick(price: float) -> float:
+            return round(round(price / 0.01) * 0.01, 2)
+
+        contract = ibi.Stock(symbol, exchange, currency)
+        accounts = self._ib.managedAccounts()
+        account = accounts[0] if accounts else ""
+        oca_group = f"RESIZE_{symbol}_{int(_time.time())}"
+
+        sl_order = ibi.StopOrder(
+            action=close_action.upper(),
+            totalQuantity=quantity,
+            stopPrice=_tick(stop_price),
+        )
+        sl_order.tif = "GTC"
+        sl_order.account = account
+        sl_order.ocaGroup = oca_group
+        sl_order.ocaType = 1  # cancel with block
+
+        tp_order = ibi.LimitOrder(
+            action=close_action.upper(),
+            totalQuantity=quantity,
+            lmtPrice=_tick(take_profit_price),
+        )
+        tp_order.tif = "GTC"
+        tp_order.account = account
+        tp_order.ocaGroup = oca_group
+        tp_order.ocaType = 1
+
+        sl_trade = self._ib.placeOrder(contract, sl_order)
+        tp_trade = self._ib.placeOrder(contract, tp_order)
+        await asyncio.sleep(3)
+
+        errors: list[str] = []
+        for t in [sl_trade, tp_trade]:
+            for e in t.log:
+                if e.errorCode and e.errorCode not in (0, 2104, 2106, 2158, 10349, 10167) and e.message:
+                    errors.append(e.message)
+
+        return {
+            "symbol": symbol,
+            "oca_group": oca_group,
+            "stop_loss": {
+                "order_id": sl_order.orderId,
+                "status": sl_trade.orderStatus.status,
+            },
+            "take_profit": {
+                "order_id": tp_order.orderId,
+                "status": tp_trade.orderStatus.status,
+            },
+            "errors": errors,
+        }
+
+    async def place_market_close_order(
+        self,
+        symbol: str,
+        action: str,
+        quantity: float,
+        exchange: str = "SMART",
+        currency: str = "USD",
+    ) -> dict:
+        """
+        Invia un ordine Market per chiudere immediatamente una posizione parziale.
+        Usato quando fill_ratio < MIN_FILL_RATIO.
+        action: "SELL" per chiudere long, "BUY" per chiudere short.
+        """
+        if not self._ensure_started() or self._ib is None:
+            return {"error": "TWS non connesso"}
+        return await asyncio.get_event_loop().run_in_executor(
+            None, self._sync_place_market_close, symbol, action, quantity, exchange, currency
+        )
+
+    def _sync_place_market_close(
+        self, symbol: str, action: str, quantity: float, exchange: str, currency: str
+    ) -> dict:
+        try:
+            import asyncio as _asyncio  # noqa: PLC0415
+            future = _asyncio.run_coroutine_threadsafe(
+                self._async_place_market_close(symbol, action, quantity, exchange, currency),
+                self._loop,
+            )
+            return future.result(timeout=15)
+        except Exception as exc:
+            logger.error("place_market_close_order %s: %s", symbol, exc)
+            return {"error": str(exc)}
+
+    async def _async_place_market_close(
+        self, symbol: str, action: str, quantity: float, exchange: str, currency: str
+    ) -> dict:
+        import ib_insync as ibi  # noqa: PLC0415
+
+        contract = ibi.Stock(symbol, exchange, currency)
+        accounts = self._ib.managedAccounts()
+        account = accounts[0] if accounts else ""
+
+        mkt_order = ibi.MarketOrder(action=action.upper(), totalQuantity=quantity)
+        mkt_order.tif = "GTC"
+        mkt_order.account = account
+
+        trade = self._ib.placeOrder(contract, mkt_order)
+        await asyncio.sleep(2)
+
+        return {
+            "symbol": symbol,
+            "action": action.upper(),
+            "quantity": quantity,
+            "order_id": mkt_order.orderId,
+            "status": trade.orderStatus.status,
+        }
+
+    async def get_filled_stop_trades(self) -> list[dict]:
+        """
+        Restituisce i fill degli ordini STP completati nella sessione TWS corrente.
+
+        Usato da poll_and_record_stop_fills per rilevare stop eseguiti e calcolare
+        realized_R rispetto al livello nominale dello stop.
+
+        Nota: ib_insync.IB.trades() contiene solo le trade della sessione attiva;
+        riconnessioni TWS azzereranno la lista. Per storico completo usare
+        get_executions() via ibkr_service (Client Portal REST).
+        """
+        if not self._ensure_started() or self._ib is None:
+            return []
+        return await asyncio.get_event_loop().run_in_executor(
+            None, self._sync_filled_stop_trades
+        )
+
+    def _sync_filled_stop_trades(self) -> list[dict]:
+        try:
+            import asyncio as _asyncio  # noqa: PLC0415
+            future = _asyncio.run_coroutine_threadsafe(
+                self._async_filled_stop_trades(), self._loop
+            )
+            return future.result(timeout=10)
+        except Exception as exc:
+            logger.warning("get_filled_stop_trades: %s", exc)
+            return []
+
+    async def _async_filled_stop_trades(self) -> list[dict]:
+        results = []
+        for trade in self._ib.trades():
+            if (
+                trade.order.orderType != "STP"
+                or trade.orderStatus.status != "Filled"
+                or not trade.fills
+            ):
+                continue
+            fill = trade.fills[-1]  # ultimo fill; per STP è tipicamente uno solo
+            fill_time = getattr(fill.time, "isoformat", lambda: fill.time)()
+            try:
+                import datetime as _dt  # noqa: PLC0415
+                if isinstance(fill.time, _dt.datetime):
+                    ft: _dt.datetime = fill.time
+                else:
+                    ft = _dt.datetime.fromisoformat(str(fill.time))
+            except Exception:
+                ft = None
+            results.append({
+                "order_id": int(trade.order.orderId),
+                "symbol": trade.contract.symbol,
+                "fill_price": float(fill.execution.avgPrice),
+                "fill_time": ft,
+                "qty_filled": float(fill.execution.shares),
+            })
+            logger.debug(
+                "get_filled_stop_trades: symbol=%s order_id=%s fill_price=%.4f fill_time=%s",
+                trade.contract.symbol, trade.order.orderId,
+                fill.execution.avgPrice, fill_time,
+            )
+        return results
+
     async def disconnect(self) -> None:
         if self._connected and self._ib:
             try:
@@ -834,6 +1481,40 @@ class TWSService:
     @property
     def is_connected(self) -> bool:
         return self._connected
+
+    def connection_status(self) -> dict:
+        """
+        Restituisce lo stato di connessione TWS per health check.
+
+        Returns dict con:
+            status       : "connected" | "disconnected" | "error"
+            account_id   : primo account gestito se connesso, altrimenti None
+            error_message: descrizione errore se non connesso
+        """
+        if not self._connected:
+            if self._connect_failed:
+                return {
+                    "status": "error",
+                    "account_id": None,
+                    "error_message": "Connessione TWS fallita durante l'avvio (host non raggiungibile o TWS non in ascolto)",
+                }
+            return {
+                "status": "disconnected",
+                "account_id": None,
+                "error_message": "TWS non connesso",
+            }
+        account_id: str | None = None
+        try:
+            if self._ib is not None:
+                accounts = self._ib.managedAccounts()
+                account_id = accounts[0] if accounts else None
+        except Exception:
+            pass
+        return {
+            "status": "connected",
+            "account_id": account_id,
+            "error_message": None,
+        }
 
 
 # ─── Singleton factory ────────────────────────────────────────────────────────
