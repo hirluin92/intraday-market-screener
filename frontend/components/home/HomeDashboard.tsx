@@ -103,17 +103,33 @@ function IBKRStatusCard({ ibkr }: { ibkr: ReturnType<typeof useDashboardData>["i
 
 // ─── Status card — Pipeline ───────────────────────────────────────────────────
 
-function PipelineCard() {
+function PipelineCardLive({ pipeline }: { pipeline: ReturnType<typeof useDashboardData>["pipeline"] }) {
+  const d = pipeline.data;
+  const isOk = d?.status === "ok";
+  const isStale = d?.status === "stale";
+
+  const color = isOk ? "#00d4a0" : isStale ? "#f5a224" : "rgba(255,255,255,0.3)";
+  const style: React.CSSProperties = {
+    ...GLASS_CARD,
+    ...(isOk ? { borderColor: "rgba(0,212,160,0.20)", boxShadow: "0 0 20px -8px rgba(0,212,160,0.15)" } : {}),
+    ...(isStale ? { borderColor: "rgba(245,162,36,0.20)" } : {}),
+  };
+
+  let label = "—";
+  let sub = "In attesa di dati";
+  if (pipeline.isLoading) { label = "…"; sub = "Caricamento"; }
+  else if (d?.status === "ok")    { label = "✓ OK"; sub = d.age_minutes != null ? `${d.age_minutes}m fa` : ""; }
+  else if (d?.status === "stale") { label = "⚠ Vecchio"; sub = d.age_minutes != null ? `${d.age_minutes}m fa` : ""; }
+  else if (d?.status === "unknown") { label = "—"; sub = "Nessun run nel DB"; }
+
   return (
-    <div style={GLASS_CARD} role="article" aria-label="Stato pipeline">
+    <div style={style} role="article" aria-label="Stato pipeline">
       <div className="flex items-center justify-between mb-3">
         <p style={LABEL_STYLE}>PIPELINE</p>
         <RefreshCw className="h-4 w-4" style={{ color: "rgba(255,255,255,0.2)" }} aria-hidden />
       </div>
-      <p style={{ ...VALUE_LARGE, fontSize: "1.5rem", color: "rgba(255,255,255,0.3)" }}>In attesa</p>
-      <p style={{ fontSize: "11px", color: "rgba(255,255,255,0.18)", fontStyle: "italic", marginTop: "6px" }}>
-        Endpoint non configurato
-      </p>
+      <p style={{ ...VALUE_LARGE, fontSize: "1.4rem", color }}>{label}</p>
+      <p style={{ fontSize: "11px", color: "rgba(255,255,255,0.28)", marginTop: "6px" }}>{sub}</p>
     </div>
   );
 }
@@ -161,18 +177,29 @@ function RegimeSPYCard({ regime }: { regime: { value: string | null; isLoading: 
 
 // ─── Status card — Mercato ────────────────────────────────────────────────────
 
+const NY_TZ = "America/New_York";
+function getNYState(): { str: string; open: boolean } {
+  const fmt = new Intl.DateTimeFormat("en-US", {
+    timeZone: NY_TZ, weekday: "short", hour: "2-digit", minute: "2-digit", hour12: false,
+  });
+  const parts = fmt.formatToParts(new Date());
+  const get = (t: string) => parts.find((p) => p.type === t)?.value ?? "0";
+  const rawH = parseInt(get("hour"), 10);
+  const h = rawH === 24 ? 0 : rawH;
+  const m = parseInt(get("minute"), 10);
+  const dowMap: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+  const dow = dowMap[get("weekday")] ?? 0;
+  const total = h * 60 + m;
+  const open = dow >= 1 && dow <= 5 && total >= 9 * 60 + 30 && total < 16 * 60;
+  const str = `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+  return { str, open };
+}
+
 function MercatoCard() {
   const [time, setTime] = React.useState<{ str: string; open: boolean } | null>(null);
 
   React.useEffect(() => {
-    function tick() {
-      const ny = new Date(new Date().toLocaleString("en-US", { timeZone: "America/New_York" }));
-      const h = ny.getHours(), m = ny.getMinutes(), d = ny.getDay();
-      const total = h * 60 + m;
-      const open = d >= 1 && d <= 5 && total >= 9 * 60 + 30 && total < 16 * 60;
-      const str = ny.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "America/New_York" });
-      setTime({ str, open });
-    }
+    function tick() { setTime(getNYState()); }
     tick();
     const id = setInterval(tick, 1000);
     return () => clearInterval(id);
@@ -282,7 +309,7 @@ function SectionError({ label, onRetry }: { label: string; onRetry?: () => void 
 import React from "react";
 
 export function HomeDashboard() {
-  const { ibkr, regime, topSignals, activity, performance } = useDashboardData();
+  const { ibkr, pipeline, regime, topSignals, activity, performance } = useDashboardData();
   const openPositions = performance.openPositions.value;
 
   return (
@@ -294,7 +321,7 @@ export function HomeDashboard() {
           <SectionHeading title="Status Sistema" />
           <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
             <IBKRStatusCard ibkr={ibkr} />
-            <PipelineCard />
+            <PipelineCardLive pipeline={pipeline} />
             <RegimeSPYCard regime={regime} />
             <MercatoCard />
           </div>
@@ -308,20 +335,22 @@ export function HomeDashboard() {
           <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
             <PerfCard
               label="P&L OGGI"
-              value={null}
+              value={performance.pnlToday.value != null ? `€${performance.pnlToday.value >= 0 ? "+" : ""}${performance.pnlToday.value.toFixed(0)}` : null}
               icon={Wallet}
-              color="#00d4a0"
-              glow="#00d4a0"
-              placeholder
-              placeholderNote="Richiede endpoint backend"
+              color={performance.pnlToday.value != null ? (performance.pnlToday.value >= 0 ? "#00d4a0" : "#ff4d7a") : "rgba(255,255,255,0.3)"}
+              glow={performance.pnlToday.value != null && performance.pnlToday.value > 0 ? "#00d4a0" : undefined}
+              placeholder={performance.pnlToday.placeholder}
+              placeholderNote={performance.pnlToday.placeholderNote}
             />
             <PerfCard
               label="WIN RATE 30GG"
-              value={null}
+              value={performance.winRate30d?.value != null ? `${performance.winRate30d.value}%` : null}
+              sub={performance.totalOrders30d.value != null ? `su ${performance.totalOrders30d.value} trade` : undefined}
               icon={TrendingUp}
-              color="#9b8fd4"
-              placeholder
-              placeholderNote="Richiede endpoint backend"
+              color={(performance.winRate30d?.value ?? 0) >= 55 ? "#00d4a0" : (performance.winRate30d?.value ?? 0) >= 45 ? "#9b8fd4" : "#ff4d7a"}
+              glow={(performance.winRate30d?.value ?? 0) >= 55 ? "#00d4a0" : undefined}
+              placeholder={performance.winRate30d?.value == null && !performance.openPositions.value}
+              placeholderNote="Nessun trade chiuso"
             />
             <PerfCard
               label="POSIZIONI APERTE"
@@ -333,11 +362,11 @@ export function HomeDashboard() {
             />
             <PerfCard
               label="DRAWDOWN"
-              value={null}
+              value={performance.drawdown.value != null ? `-${performance.drawdown.value.toFixed(1)}%` : null}
               icon={TrendingDown}
-              color="#ff4d7a"
-              placeholder
-              placeholderNote="Richiede endpoint backend"
+              color={performance.drawdown.value != null ? (performance.drawdown.value > 10 ? "#ff4d7a" : "#f5a224") : "rgba(255,255,255,0.3)"}
+              placeholder={performance.drawdown.placeholder}
+              placeholderNote={performance.drawdown.placeholderNote}
             />
           </div>
         </section>

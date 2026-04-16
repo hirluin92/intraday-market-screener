@@ -42,10 +42,11 @@ export const KPIValueSchema = z.object({
 export type KPIValue = z.infer<typeof KPIValueSchema>;
 
 export const PerformanceKPIsSchema = z.object({
-  openPositions: KPIValueSchema,
+  openPositions:  KPIValueSchema,
   totalOrders30d: KPIValueSchema,
-  pnlToday: KPIValueSchema,
-  drawdown: KPIValueSchema,
+  pnlToday:       KPIValueSchema,
+  drawdown:       KPIValueSchema,
+  winRate30d:     KPIValueSchema.optional(),
 });
 export type PerformanceKPIs = z.infer<typeof PerformanceKPIsSchema>;
 

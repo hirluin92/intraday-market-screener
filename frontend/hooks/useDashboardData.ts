@@ -14,18 +14,26 @@ import { useIBKRStatus } from "./useIBKRStatus";
 import type { ActivityItem, PerformanceKPIs } from "@/lib/schemas/dashboard";
 
 // ── Pipeline status ───────────────────────────────────────────────────────────
-// GET /api/v1/pipeline/status → does NOT exist yet.
-// Only POST /api/v1/pipeline/refresh is available.
-// TODO backend: add GET /api/v1/pipeline/status returning { last_run_at, in_progress, last_result }
+
+async function fetchPipelineStatus() {
+  const res = await fetch(`${publicEnv.apiUrl}/api/v1/pipeline/status`, { cache: "no-store" });
+  if (!res.ok) throw new Error(`pipeline/status HTTP ${res.status}`);
+  return res.json() as Promise<{
+    last_run_at: string | null;
+    status: "ok" | "stale" | "unknown";
+    age_minutes: number | null;
+    in_progress: boolean;
+  }>;
+}
 
 export function usePipelineStatus() {
-  return {
-    data: null,
-    isLoading: false,
-    error: null,
-    placeholder: true,
-    placeholderNote: "TODO backend: GET /api/v1/pipeline/status (mancante)",
-  };
+  return useQuery({
+    queryKey: ["pipeline", "status"],
+    queryFn: fetchPipelineStatus,
+    refetchInterval: 60_000,
+    staleTime: 30_000,
+    retry: 2,
+  });
 }
 
 // ── Dashboard opportunities (regime + top signals, single fetch) ──────────────
@@ -133,71 +141,59 @@ export function useActivityFeed(maxItems = 10) {
   return { items, isLoading, error, refetch };
 }
 
-// ── Performance KPIs ──────────────────────────────────────────────────────────
-// Open positions: real (from executed-signals count Filled)
-// P&L oggi: MISSING endpoint → placeholder
-// Drawdown: MISSING endpoint → placeholder
-// Esecuzioni: real (from monitoring/execution-stats)
-//
-// TODO backend:
-//   GET /api/v1/performance/kpis → { pnl_today_eur, win_rate_30d_pct, drawdown_current_pct }
+// ── Performance KPIs — ora usa endpoint reale ─────────────────────────────────
 
-async function fetchExecutionStats(days: number) {
-  const url = `${publicEnv.apiUrl}/api/v1/monitoring/execution-stats?days=${days}`;
+async function fetchPerformanceKPIs(days = 30) {
+  const url = `${publicEnv.apiUrl}/api/v1/performance/kpis?days=${days}`;
   const res = await fetch(url, { cache: "no-store" });
-  if (!res.ok) throw new Error(`execution-stats HTTP ${res.status}`);
+  if (!res.ok) throw new Error(`performance/kpis HTTP ${res.status}`);
   return res.json() as Promise<{
-    total_attempts: number;
-    successfully_submitted: number;
-    success_rate_pct: number | null;
+    pnl_today_eur:        number | null;
+    win_rate_30d_pct:     number | null;
+    drawdown_current_pct: number | null;
+    open_positions:       number;
+    total_trades_30d:     number;
+    closed_trades_30d:    number;
+    note:                 string | null;
   }>;
 }
 
 export function usePerformanceKPIs(): PerformanceKPIs {
-  const signalsQuery = useQuery({
-    queryKey: ["screener", "executed-signals", "perf"],
-    queryFn: () => fetchExecutedSignals(200),
+  const { data, isLoading } = useQuery({
+    queryKey: ["performance", "kpis", 30],
+    queryFn: () => fetchPerformanceKPIs(30),
     staleTime: 60_000,
     refetchInterval: 60_000,
+    retry: 2,
   });
 
-  const execStatsQuery = useQuery({
-    queryKey: ["monitoring", "execution-stats", "30d"],
-    queryFn: () => fetchExecutionStats(30),
-    staleTime: 60_000,
-    refetchInterval: 60_000,
-  });
-
-  const openPositions = useMemo(() => {
-    if (!signalsQuery.data) return null;
-    return signalsQuery.data.signals.filter(
-      (s) => s.tws_status === "Filled",
-    ).length;
-  }, [signalsQuery.data]);
-
-  const totalOrders = execStatsQuery.data?.total_attempts ?? null;
+  const pnl   = data?.pnl_today_eur        ?? null;
+  const wr    = data?.win_rate_30d_pct      ?? null;
+  const dd    = data?.drawdown_current_pct  ?? null;
+  const open  = data?.open_positions        ?? null;
 
   return {
     openPositions: {
-      value: openPositions,
+      value: isLoading ? null : open,
       label: "Posizioni aperte",
     },
     totalOrders30d: {
-      value: totalOrders,
-      label: "Ordini 30gg",
+      value: isLoading ? null : (data?.closed_trades_30d ?? null),
+      label: "Trade 30gg",
     },
     pnlToday: {
-      value: null,
+      value: isLoading ? null : pnl,
       label: "P&L oggi",
-      placeholder: true,
-      placeholderNote: "TODO backend: GET /api/v1/performance/kpis",
+      placeholder: !isLoading && pnl === null && (data?.closed_trades_30d ?? 0) === 0,
+      placeholderNote: "Nessun trade chiuso registrato",
     },
     drawdown: {
-      value: null,
+      value: isLoading ? null : dd,
       label: "Drawdown",
-      placeholder: true,
-      placeholderNote: "TODO backend: GET /api/v1/performance/kpis",
+      placeholder: !isLoading && dd === null && (data?.closed_trades_30d ?? 0) === 0,
+      placeholderNote: "Nessun trade chiuso registrato",
     },
+    winRate30d: { value: wr, label: "Win Rate 30gg" },
   };
 }
 
