@@ -1,26 +1,209 @@
 @import "tailwindcss";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
+/* ════════════════════════════════════════════════════════════
+   INTRADAY MARKET SCREENER — GLOBAL DESIGN SYSTEM
+   Tailwind v4 CSS-based config.
+   Token source: promoted from trader-theme.css (was scoped to
+   .trader-dashboard). All pages share the same dark-first theme.
+   ════════════════════════════════════════════════════════════ */
+
+/* ── Semantic color tokens & typography in @theme ──────────
+   Tailwind v4: @theme{} generates both CSS variables AND
+   utility classes (bg-bull, text-bear, border-line, etc.)
+   ───────────────────────────────────────────────────────── */
+@theme {
+  /* ── Accent / semantic ───────────────────────────────── */
+  --color-bull:     hsl(168 100% 42%);   /* #00d4aa  teal-green  */
+  --color-bull-dim: hsl(168 100% 42% / 0.15);
+  --color-bear:     hsl(349 100% 63%);   /* #ff4466  red-pink    */
+  --color-bear-dim: hsl(349 100% 63% / 0.15);
+  --color-neutral:  hsl(229  57% 63%);   /* #6b7fd7  blue-purple */
+  --color-warn:     hsl( 38  92% 60%);   /* #f5a623  amber       */
+  --color-warn-dim: hsl( 38  92% 60% / 0.15);
+
+  /* ── Canvas / surface layers (dark → light) ──────────── */
+  --color-canvas:    hsl(246 24%  6%);   /* #0a0a0f  darkest bg  */
+  --color-surface:   hsl(245 22%  8%);   /* #111118  card bg     */
+  --color-surface-2: hsl(244 20% 10%);   /* #16161f  input bg    */
+  --color-surface-3: hsl(243 18% 13%);   /* #1c1c28  hover bg    */
+
+  /* ── Borders ─────────────────────────────────────────── */
+  --color-line:    hsl(240 24% 14%);     /* #1e1e2e  default border */
+  --color-line-hi: hsl(240 20% 20%);     /* #2a2a3e  focus/hover    */
+
+  /* ── Foreground / text scale ─────────────────────────── */
+  --color-fg:   hsl(240 13% 96%);        /* #f0f0f8  primary text   */
+  --color-fg-2: hsl(240 15% 48%);        /* #6b6b8a  secondary text */
+  --color-fg-3: hsl(240 18% 27%);        /* #3a3a52  muted / ghost  */
+
+  /* ── Border radius scale ─────────────────────────────── */
+  --radius-xs:   3px;
+  --radius-sm:   4px;
+  --radius-md:   8px;
+  --radius-lg:  12px;
+  --radius-xl:  16px;
+  --radius-2xl: 20px;
+  --radius-full: 9999px;
 }
 
+/* ── Font family (references Next.js CSS vars injected
+   by next/font — must be @theme inline, not @theme,
+   because values are resolved at runtime) ──────────────── */
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --font-sans: var(--font-trader-sans), var(--font-geist-sans),
+               "Inter", system-ui, sans-serif;
+  --font-mono: var(--font-trader-mono), var(--font-geist-mono),
+               "JetBrains Mono", ui-monospace, monospace;
+
+  /* shadcn/ui and other libs expect --color-background /
+     --color-foreground — map to our canvas/fg */
+  --color-background: var(--color-canvas);
+  --color-foreground: var(--color-fg);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+/* ════════════════════════════════════════════════════════════
+   LEGACY ALIASES
+   Keep existing var(--accent-bull), var(--bg-surface) etc.
+   working so no existing component breaks during migration.
+   Phase 3 will progressively replace these with new tokens.
+   ════════════════════════════════════════════════════════════ */
+:root {
+  /* Accents */
+  --accent-bull:    var(--color-bull);
+  --accent-bear:    var(--color-bear);
+  --accent-neutral: var(--color-neutral);
+
+  /* Surfaces */
+  --bg-base:      var(--color-canvas);
+  --bg-surface:   var(--color-surface);
+  --bg-surface-2: var(--color-surface-2);
+
+  /* Borders */
+  --border:        var(--color-line);
+  --border-active: var(--color-line-hi);
+
+  /* Text */
+  --text-primary:   var(--color-fg);
+  --text-secondary: var(--color-fg-2);
+  --text-muted:     var(--color-fg-3);
+
+  /* Glows */
+  --glow-bull: 0 0 20px hsl(168 100% 42% / 0.18);
+  --glow-bear: 0 0 20px hsl(349 100% 63% / 0.18);
+}
+
+/* ════════════════════════════════════════════════════════════
+   BASE STYLES
+   ════════════════════════════════════════════════════════════ */
+:root {
+  color-scheme: dark;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  height: 100%;
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  min-height: 100%;
+  background-color: var(--color-canvas);
+  color: var(--color-fg);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Tabular numbers for all monetary / price / numeric output.
+   Applied via .font-mono or .tabular-nums utility. */
+.tabular-nums,
+[data-numeric] {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+}
+
+/* ════════════════════════════════════════════════════════════
+   ANIMATION KEYFRAMES
+   Promoted from trader-theme.css — now globally available.
+   ════════════════════════════════════════════════════════════ */
+@keyframes pulse-live {
+  0%, 100% { opacity: 1;   transform: scale(1);    }
+  50%       { opacity: 0.5; transform: scale(0.85); }
+}
+
+@keyframes glow-execute {
+  0%, 100% { box-shadow: var(--glow-bull); }
+  50%       { box-shadow: 0 0 28px hsl(168 100% 42% / 0.28); }
+}
+
+@keyframes slide-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0);   }
+}
+
+@keyframes fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+@keyframes skeleton-shimmer {
+  0%   { background-position: -200% center; }
+  100% { background-position:  200% center; }
+}
+
+/* ── Animation utility classes ──────────────────────────── */
+.animate-pulse-live {
+  animation: pulse-live 1.4s ease-in-out infinite;
+}
+
+.animate-glow-execute {
+  animation: glow-execute 3.2s ease-in-out infinite;
+}
+
+.animate-slide-in {
+  animation: slide-in 0.35s ease-out both;
+}
+
+.animate-fade-in {
+  animation: fade-in 0.25s ease-out both;
+}
+
+/* ── Skeleton shimmer ──────────────────────────────────── */
+.skeleton {
+  background: linear-gradient(
+    90deg,
+    var(--color-surface)   0%,
+    var(--color-surface-2) 50%,
+    var(--color-surface)   100%
+  );
+  background-size: 200% 100%;
+  animation: skeleton-shimmer 1.6s ease-in-out infinite;
+  border-radius: var(--radius-md);
+}
+
+/* ════════════════════════════════════════════════════════════
+   SCROLLBAR (webkit) — dark, subtle
+   ════════════════════════════════════════════════════════════ */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--color-canvas);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--color-line-hi);
+  border-radius: var(--radius-full);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-fg-3);
 }
