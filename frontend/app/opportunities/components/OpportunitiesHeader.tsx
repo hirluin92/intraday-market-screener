@@ -72,8 +72,13 @@ export function OpportunitiesHeader({
 
   return (
     <header
-      className="sticky top-0 z-20 glass"
-      style={{ borderRadius: 0, borderLeft: "none", borderRight: "none", borderTop: "none", borderBottom: "1px solid var(--glass-border)" }}
+      className="sticky top-0 z-20"
+      style={{
+        background: "hsla(228, 15%, 8%, 0.70)",
+        backdropFilter: "blur(20px) saturate(160%)",
+        WebkitBackdropFilter: "blur(20px) saturate(160%)",
+        borderBottom: "1px solid hsla(0, 0%, 100%, 0.07)",
+      }}
     >
       {/* ── Main row ─────────────────────────────────────────────────── */}
       <div className="mx-auto flex max-w-[1440px] items-center justify-between gap-3 px-4 py-2 sm:px-6">

@@ -30,6 +30,15 @@ function getBreadcrumb(pathname: string): string {
   return "";
 }
 
+// ── Inline style (guaranteed glass, no CSS override) ─────────────────────────
+
+const TOPBAR_STYLE: React.CSSProperties = {
+  background: "hsla(228, 15%, 8%, 0.60)",
+  backdropFilter: "blur(20px) saturate(160%)",
+  WebkitBackdropFilter: "blur(20px) saturate(160%)",
+  borderBottom: "1px solid hsla(0, 0%, 100%, 0.06)",
+};
+
 interface TopbarProps {
   regime?: string | null;
 }
@@ -37,23 +46,13 @@ interface TopbarProps {
 export function Topbar({ regime }: TopbarProps) {
   const pathname = usePathname();
   const [drawerOpen, setDrawerOpen] = useState(false);
-
   const breadcrumb = getBreadcrumb(pathname ?? "");
 
   return (
     <>
       <header
-        className={cn(
-          "sticky top-0 z-30 flex h-12 shrink-0 items-center",
-          "glass border-b-[var(--glass-border)]",
-          "px-4 sm:px-6",
-        )}
-        style={{
-          borderRadius: 0,
-          borderLeft: "none",
-          borderRight: "none",
-          borderTop: "none",
-        }}
+        className="sticky top-0 z-30 flex h-12 shrink-0 items-center px-4 sm:px-6"
+        style={TOPBAR_STYLE}
       >
         {/* Left */}
         <div className="flex flex-1 items-center gap-3">
@@ -61,11 +60,10 @@ export function Topbar({ regime }: TopbarProps) {
             type="button"
             onClick={() => setDrawerOpen(true)}
             className={cn(
-              "rounded-md p-1.5 text-fg-2 hover:text-fg transition-colors",
-              "hover:bg-[var(--glass-bg-hover)]",
-              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50",
-              "lg:hidden",
+              "rounded-md p-1.5 transition-colors lg:hidden",
+              "hover:bg-white/[0.06] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/20",
             )}
+            style={{ color: "hsla(0,0%,100%,0.5)" }}
             aria-label="Apri menu navigazione"
             aria-expanded={drawerOpen}
           >
@@ -75,15 +73,18 @@ export function Topbar({ regime }: TopbarProps) {
           {/* Logo mobile */}
           <Link
             href="/"
-            className="font-sans text-sm font-bold text-fg lg:hidden"
-            style={{ textShadow: "0 0 20px hsla(265 80% 62% / 0.3)" }}
+            className="font-sans text-sm font-bold lg:hidden"
+            style={{
+              color: "#f2f2f2",
+              textShadow: "0 0 20px hsla(265, 80%, 62%, 0.3)",
+            }}
           >
             IMS
           </Link>
 
           {/* Breadcrumb desktop */}
           {breadcrumb && (
-            <span className="hidden font-mono text-xs text-fg-2 lg:inline">
+            <span className="hidden font-mono text-xs lg:inline" style={{ color: "hsla(0,0%,100%,0.4)" }}>
               {breadcrumb}
             </span>
           )}
@@ -96,10 +97,10 @@ export function Topbar({ regime }: TopbarProps) {
           <button
             type="button"
             className={cn(
-              "rounded-md p-1.5 text-fg-2 hover:text-fg transition-colors",
-              "hover:bg-[var(--glass-bg-hover)]",
-              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50",
+              "rounded-md p-1.5 transition-colors",
+              "hover:bg-white/[0.06] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/20",
             )}
+            style={{ color: "hsla(0,0%,100%,0.5)" }}
             aria-label="Impostazioni"
             title="Impostazioni (coming soon)"
           >

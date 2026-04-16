@@ -37,14 +37,41 @@ function Section({
 }) {
   return (
     <section className={cn("space-y-4", className)}>
-      <div className="flex items-center gap-3">
-        <h2 className="section-heading flex-shrink-0">{title}</h2>
-        {action && <div className="ml-auto">{action}</div>}
+      {/* Gradient line heading */}
+      <div className="flex items-center gap-3 mb-2">
+        <div
+          className="flex-1 h-px"
+          style={{ background: "linear-gradient(90deg, transparent, hsla(0,0%,100%,0.10))" }}
+        />
+        <h2
+          className="flex-shrink-0 text-[11px] font-semibold uppercase"
+          style={{ color: "hsla(0,0%,100%,0.35)", letterSpacing: "0.12em" }}
+        >
+          {title}
+        </h2>
+        <div
+          className="flex-1 h-px"
+          style={{ background: "linear-gradient(90deg, hsla(0,0%,100%,0.10), transparent)" }}
+        />
+        {action && <div className="ml-2">{action}</div>}
       </div>
       {children}
     </section>
   );
 }
+
+// Inline style per status card glass
+const STATUS_CARD_STYLE: React.CSSProperties = {
+  background: "hsla(0, 0%, 100%, 0.04)",
+  backdropFilter: "blur(24px) saturate(160%)",
+  WebkitBackdropFilter: "blur(24px) saturate(160%)",
+  border: "1px solid hsla(0, 0%, 100%, 0.08)",
+  borderRadius: "12px",
+  padding: "16px",
+  display: "flex",
+  flexDirection: "column",
+  gap: "8px",
+};
 
 // ── Error card for a single section ──────────────────────────────────────────
 
@@ -87,12 +114,8 @@ export function HomeDashboard() {
         <Section title="Status sistema">
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
             {/* IBKR */}
-            <div
-              className="glass glass-hover rounded-xl p-4 flex flex-col gap-2"
-              role="article"
-              aria-label="Stato connessione IBKR"
-            >
-              <span className="text-xs font-medium text-fg-2">IBKR</span>
+            <div style={STATUS_CARD_STYLE} role="article" aria-label="Stato connessione IBKR">
+              <span style={{fontSize:"11px",fontWeight:600,textTransform:"uppercase",letterSpacing:"0.06em",color:"hsla(0,0%,100%,0.4)"}}>IBKR</span>
               <IBKRStatusPill
                 variant="pill"
                 className={ibkr.isLoading ? "opacity-50" : ""}
@@ -105,12 +128,8 @@ export function HomeDashboard() {
             </div>
 
             {/* Pipeline */}
-            <div
-              className="glass glass-hover rounded-xl p-4 flex flex-col gap-2"
-              role="article"
-              aria-label="Stato pipeline"
-            >
-              <span className="text-xs font-medium text-fg-2">Pipeline</span>
+            <div style={STATUS_CARD_STYLE} role="article" aria-label="Stato pipeline">
+              <span style={{fontSize:"11px",fontWeight:600,textTransform:"uppercase",letterSpacing:"0.06em",color:"hsla(0,0%,100%,0.4)"}}>Pipeline</span>
               <div className="flex items-center gap-2">
                 <RefreshCw className="h-4 w-4 text-fg-3" aria-hidden />
                 <span className="font-mono text-xs text-fg-3">
@@ -123,12 +142,8 @@ export function HomeDashboard() {
             </div>
 
             {/* Regime SPY */}
-            <div
-              className="glass glass-hover rounded-xl p-4 flex flex-col gap-2"
-              role="article"
-              aria-label={`Regime SPY: ${regime.value ?? "non disponibile"}`}
-            >
-              <span className="text-xs font-medium text-fg-2">Regime SPY</span>
+            <div style={STATUS_CARD_STYLE} role="article" aria-label={`Regime SPY: ${regime.value ?? "non disponibile"}`}>
+              <span style={{fontSize:"11px",fontWeight:600,textTransform:"uppercase",letterSpacing:"0.06em",color:"hsla(0,0%,100%,0.4)"}}>Regime SPY</span>
               {regime.isLoading ? (
                 <div className="skeleton h-6 w-24 rounded-full" />
               ) : regime.error ? (
@@ -139,12 +154,8 @@ export function HomeDashboard() {
             </div>
 
             {/* Market clock */}
-            <div
-              className="glass glass-hover rounded-xl p-4 flex flex-col gap-2"
-              role="article"
-              aria-label="Orario mercato"
-            >
-              <span className="text-xs font-medium text-fg-2">Mercato</span>
+            <div style={STATUS_CARD_STYLE} role="article" aria-label="Orario mercato">
+              <span style={{fontSize:"11px",fontWeight:600,textTransform:"uppercase",letterSpacing:"0.06em",color:"hsla(0,0%,100%,0.4)"}}>Mercato</span>
               <MarketClock />
             </div>
           </div>
@@ -215,7 +226,16 @@ export function HomeDashboard() {
               onRetry={() => activity.refetch()}
             />
           ) : (
-            <div className="glass rounded-xl px-2 py-2">
+            <div
+              style={{
+                background: "hsla(0, 0%, 100%, 0.03)",
+                backdropFilter: "blur(24px)",
+                WebkitBackdropFilter: "blur(24px)",
+                border: "1px solid hsla(0, 0%, 100%, 0.07)",
+                borderRadius: "12px",
+                padding: "8px",
+              }}
+            >
               <ActivityFeed
                 items={activity.items}
                 loading={activity.isLoading}
@@ -286,3 +306,4 @@ export function HomeDashboard() {
     </div>
   );
 }
+

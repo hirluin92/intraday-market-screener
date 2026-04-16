@@ -140,20 +140,21 @@
 html { height: 100%; }
 
 body {
-  min-height: 100%;
+  min-height: 100vh;
   font-family: var(--font-sans);
   font-size: 14px;
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-
-  /* Background: quasi-nero + mesh gradient atmosfera */
-  background-color: var(--color-canvas);
   color: var(--color-fg);
 
+  /* ── Background: dark + VISIBLE mesh gradient ── */
+  /* Aloni colorati percepibili, non solo colore piatto */
+  background-color: hsl(228 15% 6%);
   background-image:
-    radial-gradient(ellipse at 20%   0%, hsla(265 80% 40% / 0.08) 0%, transparent 50%),
-    radial-gradient(ellipse at 80% 100%, hsla(168 80% 40% / 0.06) 0%, transparent 50%);
+    radial-gradient(ellipse 80% 50% at 20% -10%, hsla(265 80% 35% / 0.18) 0%, transparent 60%),
+    radial-gradient(ellipse 60% 40% at 85% 110%, hsla(168 80% 35% / 0.14) 0%, transparent 55%),
+    radial-gradient(ellipse 40% 30% at 60%  50%, hsla(200 80% 35% / 0.05) 0%, transparent 50%);
   background-attachment: fixed;
 }
 
@@ -168,25 +169,48 @@ body {
    UTILITY CLASSES — GLASS & GLOW
    ════════════════════════════════════════════════════════════ */
 
-/* ── Glass surfaces ──────────────────────────────────────── */
+/* ── Glass surfaces ──────────────────────────────────────────
+   Background BIANCO semi-trasparente su dark bg → effetto vetro
+   visibile contro il mesh gradient del body.
+   ──────────────────────────────────────────────────────────── */
 .glass {
-  background: var(--glass-bg);
-  backdrop-filter: blur(var(--glass-blur));
-  -webkit-backdrop-filter: blur(var(--glass-blur));
-  border: 1px solid var(--glass-border);
-  border-radius: var(--radius-lg);
+  background: hsla(0 0% 100% / 0.04);
+  backdrop-filter: blur(24px) saturate(160%);
+  -webkit-backdrop-filter: blur(24px) saturate(160%);
+  border: 1px solid hsla(0 0% 100% / 0.08);
+  border-radius: 12px;
 }
 
+.glass:hover {
+  background: hsla(0 0% 100% / 0.07);
+  border-color: hsla(0 0% 100% / 0.14);
+}
+
+/* Sidebar / overlay con blur pesante */
 .glass-heavy {
-  background: var(--glass-bg-heavy);
-  backdrop-filter: blur(var(--glass-blur-heavy));
-  -webkit-backdrop-filter: blur(var(--glass-blur-heavy));
-  border: 1px solid var(--glass-border);
+  background: hsla(228 15% 8% / 0.72);
+  backdrop-filter: blur(40px) saturate(180%);
+  -webkit-backdrop-filter: blur(40px) saturate(180%);
+  border-right: 1px solid hsla(0 0% 100% / 0.06);
 }
 
+/* Hover esplicito (usato anche senza :hover per stati attivi) */
 .glass-hover:hover {
-  background: var(--glass-bg-hover);
-  border-color: var(--glass-border-hover);
+  background: hsla(0 0% 100% / 0.07);
+  border-color: hsla(0 0% 100% / 0.14);
+}
+
+/* Card NON glass — lista lunga (SignalCard, table rows) */
+/* Nessun backdrop-filter: GPU save */
+.card-solid {
+  background: hsla(228 15% 12% / 0.9);
+  border: 1px solid hsla(0 0% 100% / 0.06);
+  border-radius: 12px;
+  transition: border-color 150ms, box-shadow 150ms;
+}
+.card-solid:hover {
+  border-color: hsla(0 0% 100% / 0.14);
+  box-shadow: 0 4px 24px hsla(0 0% 0% / 0.35);
 }
 
 /* ── Glow modifiers ──────────────────────────────────────── */
@@ -264,18 +288,20 @@ body {
   font-size: 0.65rem;
   font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 0.07em;
-  color: var(--color-fg-muted);
+  letter-spacing: 0.08em;
+  color: hsla(0 0% 100% / 0.35);
 }
-.section-heading::before,
+.section-heading::before {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, hsla(0 0% 100% / 0.10));
+}
 .section-heading::after {
   content: '';
   flex: 1;
   height: 1px;
-  background: linear-gradient(90deg, transparent, var(--glass-border));
-}
-.section-heading::after {
-  background: linear-gradient(90deg, var(--glass-border), transparent);
+  background: linear-gradient(90deg, hsla(0 0% 100% / 0.10), transparent);
 }
 
 /* ════════════════════════════════════════════════════════════
@@ -323,8 +349,8 @@ body {
 }
 
 @keyframes shimmer {
-  from { background-position: -200% 0; }
-  to   { background-position:  200% 0; }
+  0%   { background-position: 200%  0; }
+  100% { background-position: -200% 0; }
 }
 
 @keyframes slide-in {

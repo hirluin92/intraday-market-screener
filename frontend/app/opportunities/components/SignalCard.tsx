@@ -259,21 +259,22 @@ function SignalCardInner({
       className={cn(
         "animate-slide-up cursor-pointer rounded-xl",
         "outline-none transition-all duration-150",
-        // NOTE: NO backdrop-filter here — lista lunga, performance critica
-        // Usa bg-elevated senza blur
-        "bg-elevated border",
-        isExecute
-          ? [
-              "border-bull/30",
-              "gradient-border-bull",
-              "glow-bull",
-            ].join(" ")
-          : isMonitor
-            ? "border-warn/30"
-            : "border-line",
-        "hover:border-opacity-60 hover:bg-hover",
-        "focus-visible:ring-2 focus-visible:ring-accent/50",
+        "focus-visible:ring-2 focus-visible:ring-white/20",
+        // No backdrop-filter: lista lunga → performance critica
+        isExecute ? "gradient-border-bull" : "",
       )}
+      style={{
+        background: "hsla(228, 15%, 12%, 0.85)",
+        border: isExecute
+          ? "1px solid hsla(168, 100%, 42%, 0.25)"
+          : isMonitor
+            ? "1px solid hsla(38, 92%, 60%, 0.20)"
+            : "1px solid hsla(0, 0%, 100%, 0.07)",
+        borderRadius: "12px",
+        boxShadow: isExecute
+          ? "0 0 28px -6px hsla(168, 100%, 42%, 0.22)"
+          : "0 2px 8px hsla(0, 0%, 0%, 0.2)",
+      }}
       onClick={handleCardActivate}
       onKeyDown={handleKeyDown}
     >

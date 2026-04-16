@@ -32,6 +32,19 @@ function isActive(href: string, pathname: string): boolean {
   return href === "/" ? pathname === "/" : pathname === href || pathname.startsWith(`${href}/`);
 }
 
+// ── Inline styles (guaranteed, no CSS cascade issues) ─────────────────────────
+
+const SIDEBAR_STYLE: React.CSSProperties = {
+  background: "hsla(228, 15%, 8%, 0.72)",
+  backdropFilter: "blur(40px) saturate(180%)",
+  WebkitBackdropFilter: "blur(40px) saturate(180%)",
+  borderRight: "1px solid hsla(0, 0%, 100%, 0.06)",
+};
+
+const DIVIDER_STYLE: React.CSSProperties = {
+  borderColor: "hsla(0, 0%, 100%, 0.06)",
+};
+
 export function Sidebar() {
   const pathname = usePathname();
   const [collapsed, setCollapsed] = useState(false);
@@ -55,36 +68,42 @@ export function Sidebar() {
     <aside
       className={cn(
         "hidden lg:flex flex-col shrink-0",
-        "glass-heavy sticky top-0 h-screen overflow-y-auto",
+        "sticky top-0 h-screen overflow-y-auto",
         "transition-[width] duration-200 ease-in-out",
         collapsed ? "w-16" : "w-60",
       )}
-      style={{ borderRadius: 0, borderLeft: "none", borderTop: "none", borderBottom: "none" }}
+      style={SIDEBAR_STYLE}
       aria-label="Navigazione principale"
     >
       {/* Logo */}
       <div
         className={cn(
           "flex h-12 shrink-0 items-center border-b px-4",
-          "border-b-[var(--glass-border)]",
           collapsed ? "justify-center" : "justify-between",
         )}
+        style={DIVIDER_STYLE}
       >
         {!collapsed && (
           <span
-            className="font-sans text-sm font-bold tracking-tight text-fg"
-            style={{ textShadow: "0 0 30px hsla(265 80% 62% / 0.3)" }}
+            className="font-sans text-sm font-bold tracking-tight"
+            style={{
+              color: "#f2f2f2",
+              textShadow: "0 0 30px hsla(265, 80%, 62%, 0.4)",
+            }}
           >
             IMS
-            <span className="ml-1 font-mono text-[10px] font-normal text-fg-2">
+            <span className="ml-1 font-mono text-[10px] font-normal" style={{ color: "hsla(0,0%,100%,0.4)" }}>
               screener
             </span>
           </span>
         )}
         {collapsed && (
           <span
-            className="font-mono text-xs font-bold text-bull"
-            style={{ textShadow: "0 0 20px hsla(168 100% 45% / 0.4)" }}
+            className="font-mono text-xs font-bold"
+            style={{
+              color: "#00d4a0",
+              textShadow: "0 0 20px hsla(168, 100%, 45%, 0.5)",
+            }}
           >
             IMS
           </span>
@@ -102,26 +121,31 @@ export function Sidebar() {
                   href={href}
                   className={cn(
                     "group flex items-center gap-3 rounded-lg px-2 py-2 text-sm transition-all duration-150",
-                    "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50",
-                    active ? [
-                      "text-fg font-medium",
-                      "bg-[var(--color-accent-dim)]",
-                      "border-l-2 border-l-accent",
-                    ].join(" ") : [
-                      "text-fg-2 border-l-2 border-l-transparent",
-                      "hover:bg-[var(--glass-bg-hover)] hover:text-fg",
-                    ].join(" "),
+                    "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/20",
                     collapsed && "justify-center",
                   )}
-                  style={active ? { boxShadow: "inset 0 0 20px hsla(265 80% 62% / 0.05)" } : undefined}
+                  style={active ? {
+                    background: "hsla(265, 80%, 60%, 0.12)",
+                    borderLeft: "2px solid hsl(265, 80%, 60%)",
+                    boxShadow: "inset 0 0 30px hsla(265, 80%, 60%, 0.08)",
+                    color: "#f2f2f2",
+                    paddingLeft: collapsed ? undefined : "calc(0.5rem - 2px)",
+                  } : {
+                    color: "hsla(0,0%,100%,0.45)",
+                    borderLeft: "2px solid transparent",
+                  }}
                   title={collapsed ? label : undefined}
                   aria-current={active ? "page" : undefined}
+                  onMouseEnter={(e) => {
+                    if (!active) (e.currentTarget as HTMLElement).style.color = "#f2f2f2";
+                  }}
+                  onMouseLeave={(e) => {
+                    if (!active) (e.currentTarget as HTMLElement).style.color = "hsla(0,0%,100%,0.45)";
+                  }}
                 >
                   <Icon
-                    className={cn(
-                      "h-4 w-4 shrink-0 transition-colors",
-                      active ? "text-accent" : "text-fg-2 group-hover:text-fg",
-                    )}
+                    className="h-4 w-4 shrink-0"
+                    style={{ color: active ? "hsl(265, 80%, 70%)" : undefined }}
                     aria-hidden
                   />
                   {!collapsed && <span className="truncate">{label}</span>}
@@ -133,10 +157,7 @@ export function Sidebar() {
       </nav>
 
       {/* Footer */}
-      <div className={cn(
-        "shrink-0 border-t p-3 space-y-2",
-        "border-t-[var(--glass-border)]",
-      )}>
+      <div className="shrink-0 border-t p-3 space-y-2" style={DIVIDER_STYLE}>
         {!collapsed && <IBKRStatusPill variant="pill" className="w-full justify-start" />}
         {collapsed && <IBKRStatusPill variant="inline" className="justify-center" />}
 
@@ -144,11 +165,11 @@ export function Sidebar() {
           type="button"
           onClick={toggleCollapsed}
           className={cn(
-            "flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-xs text-fg-2",
-            "hover:bg-[var(--glass-bg-hover)] hover:text-fg transition-colors",
-            "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50",
+            "flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-xs transition-colors",
+            "hover:bg-white/[0.05] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/20",
             collapsed ? "justify-center" : "justify-end",
           )}
+          style={{ color: "hsla(0,0%,100%,0.35)" }}
           aria-label={collapsed ? "Espandi sidebar" : "Comprimi sidebar"}
           suppressHydrationWarning
         >
