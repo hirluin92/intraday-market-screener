@@ -74,7 +74,7 @@ export function useOpportunityFilters({ rows, isLoading = false }: UseOpportunit
   // ── Executed signals table ───────────────────────────────────────────────
   const [signalsExpanded, setSignalsExpanded] = useState(true);
   const [signalsStatusFilter, setSignalsStatusFilter] = useState<
-    "all" | "open" | "skipped" | "cancelled"
+    "all" | "open" | "closed" | "skipped" | "cancelled"
   >("open");
 
   // ── Deep link handler ────────────────────────────────────────────────────

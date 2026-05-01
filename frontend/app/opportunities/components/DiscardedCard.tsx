@@ -12,6 +12,18 @@ type Props = {
   opportunity: OpportunityRow;
 };
 
+function discardedExchangeTag(row: OpportunityRow): string | null {
+  const provider = (row.provider ?? "").toLowerCase();
+  if (provider === "binance") return null;
+  const ex = (row.exchange ?? "").toUpperCase();
+  if (ex === "LSE") return "LSE";
+  if (ex === "NYSE") return "NYSE";
+  if (ex === "NASDAQ" || ex === "NSDQ") return "NSDQ";
+  if (ex === "ARCA") return "ARCA";
+  if (ex === "YAHOO_US") return "US";
+  return ex || null;
+}
+
 function dirArrow(row: OpportunityRow): string {
   const d = row.latest_pattern_direction?.toLowerCase();
   if (d === "bearish") return "▼";
@@ -47,10 +59,15 @@ export function DiscardedCard({ opportunity: opp }: Props) {
       {/* Discard icon */}
       <Minus className="h-3.5 w-3.5 shrink-0 text-fg-3" aria-hidden />
 
-      {/* Symbol + timeframe + direction */}
+      {/* Symbol + exchange + timeframe + direction */}
       <span className="font-mono text-sm font-semibold text-fg-2">
         {opp.symbol}
       </span>
+      {discardedExchangeTag(opp) && (
+        <span className="font-mono text-[10px] text-fg-3">
+          {discardedExchangeTag(opp)}
+        </span>
+      )}
       <span className="text-xs text-fg-3">{opp.timeframe}</span>
       <span
         className={cn(

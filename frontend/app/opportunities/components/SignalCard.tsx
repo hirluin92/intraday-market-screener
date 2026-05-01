@@ -16,6 +16,21 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { TradeInstructions } from "./TradeInstructions";
 
+// ── Exchange display label ─────────────────────────────────────────────────────
+
+function exchangeTag(row: OpportunityRow): string | null {
+  const provider = (row.provider ?? "").toLowerCase();
+  if (provider === "binance") return null; // /USDT già identificativo
+  const ex = (row.exchange ?? "").toUpperCase();
+  if (ex === "LSE") return "LSE";
+  if (ex === "NYSE") return "NYSE";
+  if (ex === "NASDAQ" || ex === "NSDQ") return "NSDQ";
+  if (ex === "ARCA") return "ARCA";
+  if (ex === "BATS") return "BATS";
+  if (ex === "YAHOO_US") return "US";
+  return ex || null;
+}
+
 // ── Pure helpers (same as before, no logic change) ────────────────────────────
 
 function num(v: string | null | undefined): number | null {
@@ -86,11 +101,18 @@ function buildCopyParamsText(
       : "—";
   const riskPct =
     sizing.riskMode === "percent" ? `${sizing.riskPercent}%` : "fisso";
+  const tp2 = num(plan.take_profit_2);
+  let tp2Pct = "";
+  if (entry != null && entry > 0 && tp2 != null) {
+    const d = ((tp2 - entry) / entry) * 100;
+    tp2Pct = ` (${d >= 0 ? "+" : ""}${d.toFixed(2)}%)`;
+  }
   return [
     `${row.symbol} — ${dirLabel}`,
     `Entry: ${formatPrice(plan.entry_price)}`,
     `Stop Loss: ${formatPrice(plan.stop_loss)}${stopPct}`,
-    `Take Profit: ${formatPrice(plan.take_profit_1)}${tpPct}`,
+    `Take Profit 1: ${formatPrice(plan.take_profit_1)}${tpPct}`,
+    ...(plan.take_profit_2 != null ? [`Take Profit 2: ${formatPrice(plan.take_profit_2)}${tp2Pct}`] : []),
     `R/R: ${rr}`,
     `Quantità consigliata: ${qty} azioni`,
     `Rischio: ${currencyLabel}${risk} (${riskPct} capitale)`,
@@ -197,10 +219,12 @@ function SignalCardInner({
   const entryS = plan?.entry_price != null ? formatPrice(plan.entry_price) : "—";
   const stopS = plan?.stop_loss != null ? formatPrice(plan.stop_loss) : "—";
   const tpS = plan?.take_profit_1 != null ? formatPrice(plan.take_profit_1) : "—";
+  const tp2S = plan?.take_profit_2 != null ? formatPrice(plan.take_profit_2) : null;
   const rrS = plan?.risk_reward_ratio ?? "—";
 
   const stopDelta = priceDeltaPct(plan?.stop_loss ?? null, plan?.entry_price ?? null);
   const tpDelta = priceDeltaPct(plan?.take_profit_1 ?? null, plan?.entry_price ?? null);
+  const tp2Delta = tp2S != null ? priceDeltaPct(plan?.take_profit_2 ?? null, plan?.entry_price ?? null) : null;
 
   const qtyS = snap?.preview.ok
     ? String(Math.max(0, Math.round(snap.preview.positionSizeUnits)))
@@ -212,6 +236,10 @@ function SignalCardInner({
     snap?.preview.ok && snap.preview.estimatedNetProfitAtTp1 != null
       ? snap.preview.estimatedNetProfitAtTp1.toFixed(2)
       : "—";
+  const profitTp2Eur =
+    snap?.preview.ok && snap.preview.estimatedNetProfitAtTp2 != null
+      ? snap.preview.estimatedNetProfitAtTp2.toFixed(2)
+      : null;
 
   const detailHref = seriesDetailHref(row.symbol, row.timeframe, row.exchange, {
     provider: row.provider,
@@ -337,33 +365,34 @@ function SignalCardInner({
       <div className="px-4 pb-3">
         <h3
           id={`${cardId}-title`}
-          className="font-sans text-xl font-bold tracking-tight text-fg"
+          className="flex items-baseline gap-1.5 font-sans text-xl font-bold tracking-tight text-fg"
         >
           {row.symbol}
+          {exchangeTag(row) && (
+            <span className="font-mono text-[11px] font-medium text-fg-3 tracking-wide">
+              {exchangeTag(row)}
+            </span>
+          )}
         </h3>
         <p className="text-xs text-fg-2">{displayName(row)}</p>
       </div>
 
       {/* ── Price grid (always visible) ────────────────────────────── */}
       {plan && (
-        <div className="grid grid-cols-4 gap-x-3 gap-y-1 border-t border-line/50 px-4 py-3">
+        <div
+          className={cn(
+            "gap-x-3 gap-y-1 border-t border-line/50 px-4 py-3",
+            tp2S != null ? "grid grid-cols-5" : "grid grid-cols-4",
+          )}
+        >
           {[
-            { label: "Entry", value: entryS, cls: "text-fg", delta: null },
-            {
-              label: "Stop",
-              value: stopS,
-              cls: "text-bear",
-              delta: stopDelta,
-              deltaCls: "text-bear",
-            },
-            {
-              label: "TP1",
-              value: tpS,
-              cls: "text-bull",
-              delta: tpDelta,
-              deltaCls: "text-bull",
-            },
-            { label: "R/R", value: String(rrS), cls: "text-fg", delta: null },
+            { label: "Entry", value: entryS, cls: "text-fg", delta: null, deltaCls: "" },
+            { label: "Stop", value: stopS, cls: "text-bear", delta: stopDelta, deltaCls: "text-bear" },
+            { label: "TP1", value: tpS, cls: "text-bull", delta: tpDelta, deltaCls: "text-bull" },
+            ...(tp2S != null
+              ? [{ label: "TP2", value: tp2S, cls: "text-bull/70", delta: tp2Delta, deltaCls: "text-bull/70" }]
+              : []),
+            { label: "R/R", value: String(rrS), cls: "text-fg", delta: null, deltaCls: "" },
           ].map(({ label, value, cls, delta, deltaCls }) => (
             <div key={label}>
               <p className="text-[10px] text-fg-3">{label}</p>
@@ -480,6 +509,15 @@ function SignalCardInner({
                 {profitEur}
               </span>
             </span>
+            {profitTp2Eur != null && (
+              <span>
+                Guadagno TP2:{" "}
+                <span className="font-mono font-semibold text-bull/70">
+                  {currencySymbol}
+                  {profitTp2Eur}
+                </span>
+              </span>
+            )}
           </div>
 
           {/* Trade instructions (broker steps) */}

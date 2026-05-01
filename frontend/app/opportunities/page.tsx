@@ -20,7 +20,7 @@ import { pickRegimeSpy } from "./utils";
 
 function OpportunitiesPageInner() {
   const opps = useOpportunities();
-  const executed = useExecutedSignals(50);
+  const executed = useExecutedSignals(100);
   const prefs = useOpportunityPreferences();
   const pipeline = usePipelineControl();
   const ibkr = useIBKRStatus();

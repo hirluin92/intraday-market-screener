@@ -44,6 +44,8 @@ export function useOpportunities() {
     staleTime: 30_000,
     refetchInterval: autoRefresh ? REFRESH_SEC * 1000 : false,
     refetchIntervalInBackground: false,
+    retry: 1,
+    retryDelay: 1500,
   });
 
   // Countdown to next refetch

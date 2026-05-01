@@ -29,7 +29,7 @@ export const DEFAULT_POSITION_SIZING_INPUT: PositionSizingUserInput = {
   riskMode: "percent",
   riskPercent: 1,
   riskFixed: 10,
-  feeRoundTripPercent: 0.08,
+  feeRoundTripPercent: 0.10,
   slippagePercent: 0.05,
   maxLeverage: 1,
   maxMarginPercent: 50,

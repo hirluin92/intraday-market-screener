@@ -181,7 +181,14 @@ export async function fetchOpportunities(params: {
   if (params.decision?.trim()) {
     url.searchParams.set("decision", params.decision.trim());
   }
-  const res = await fetchWithRetry(url.toString(), { cache: "no-store" }, 60_000);
+  // Evita "loading infinito": se il backend rallenta oltre 20s
+  // mostriamo errore rapidamente invece di bloccare la UI per minuti.
+  const res = await fetchWithRetry(
+    url.toString(),
+    { cache: "no-store" },
+    20_000,
+    0,
+  );
   if (!res.ok) {
     const text = await res.text();
     throw new Error(text || `${res.status} ${res.statusText}`);
@@ -205,12 +212,24 @@ export type ExecutedSignalRow = {
   take_profit_1: number | null;
   take_profit_2: number | null;
   quantity_tp1: number | null;
+  quantity_tp2: number | null;
   entry_order_id: number | null;
   tp_order_id: number | null;
+  tp2_order_id: number | null;
   sl_order_id: number | null;
   tws_status: string;
   error: string | null;
   executed_at: string;
+  // Campi di chiusura (popolati dopo stop/TP fill)
+  closed_at: string | null;
+  close_fill_price: number | null;
+  realized_r: number | null;
+  close_outcome: "stop" | "tp1" | "tp2" | "timeout" | null;
+  close_cause: "normal" | "overnight_gap" | null;
+  // Fill tracking
+  partial_fill: boolean | null;
+  filled_qty: number | null;
+  ordered_qty: number | null;
 };
 
 export type ExecutedSignalsResponse = {
@@ -218,8 +237,13 @@ export type ExecutedSignalsResponse = {
   count: number;
 };
 
-export async function fetchExecutedSignals(limit = 50): Promise<ExecutedSignalsResponse> {
-  const res = await fetchWithRetry(`${base}/api/v1/screener/executed-signals?limit=${limit}`, {
+export async function fetchExecutedSignals(
+  limit = 100,
+  symbol?: string,
+): Promise<ExecutedSignalsResponse> {
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (symbol) params.set("symbol", symbol);
+  const res = await fetchWithRetry(`${base}/api/v1/screener/executed-signals?${params}`, {
     cache: "no-store",
   });
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
@@ -233,6 +257,9 @@ export type IbkrStatus = {
   paper_trading?: boolean;
   auto_execute?: boolean;
   authenticated?: boolean;
+  connected?: boolean;
+  tws_connected?: boolean;
+  accounts?: string[];
   account_id?: string;
   max_capital?: number;
   risk_per_trade_pct?: number;
