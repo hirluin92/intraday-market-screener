@@ -20,7 +20,7 @@ class FeatureExtractRequest(BaseModel):
         default=None,
         description="Restrict to venue id (e.g. binance, YAHOO_US). Omit to include all venues.",
     )
-    provider: Literal["binance", "yahoo_finance", "alpaca"] | None = Field(
+    provider: Literal["binance", "yahoo_finance", "alpaca", "ibkr"] | None = Field(
         default=None,
         description="Restrict to data provider; combine with exchange for unambiguous Yahoo vs Binance.",
     )

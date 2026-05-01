@@ -1,7 +1,7 @@
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import DateTime, ForeignKey, Index, Numeric, String, UniqueConstraint, text
+from sqlalchemy import DateTime, Index, Numeric, PrimaryKeyConstraint, String, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql import func
@@ -14,23 +14,22 @@ class CandlePattern(Base):
 
     __tablename__ = "candle_patterns"
     __table_args__ = (
+        PrimaryKeyConstraint("id", "timestamp", name="pk_candle_patterns"),
+        # FK non dichiarate: TimescaleDB non supporta FK tra hypertables.
         UniqueConstraint(
             "candle_feature_id",
             "pattern_name",
-            name="uq_candle_patterns_feature_pattern",
+            "timestamp",
+            name="uq_candle_patterns_feature_pattern_ts",
         ),
         Index("ix_candle_patterns_exchange_symbol_timeframe_ts", "exchange", "symbol", "timeframe", "timestamp"),
+        Index("ix_candle_patterns_provider_ts_id", "provider", "timestamp", "id", postgresql_ops={"timestamp": "DESC", "id": "DESC"}),
+        Index("ix_candle_patterns_name_ts_series", "pattern_name", "timestamp", "exchange", "symbol", "timeframe"),
     )
 
-    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    candle_feature_id: Mapped[int] = mapped_column(
-        ForeignKey("candle_features.id", ondelete="CASCADE"),
-        nullable=False,
-    )
-    candle_context_id: Mapped[int | None] = mapped_column(
-        ForeignKey("candle_contexts.id", ondelete="SET NULL"),
-        nullable=True,
-    )
+    id: Mapped[int] = mapped_column(autoincrement=True)
+    candle_feature_id: Mapped[int] = mapped_column(nullable=False)
+    candle_context_id: Mapped[int | None] = mapped_column(nullable=True)
     asset_type: Mapped[str] = mapped_column(
         String(16),
         nullable=False,

@@ -21,8 +21,12 @@ _SeriesKey = tuple[str, str, str]
 # I pattern in sviluppo ricevono una penalità di 4 ore.
 #
 #   validated  → timestamp reale          (penalità 0h)
-#   development→ timestamp - 4h           (penalità 4h)
-#   blocked    → timestamp - 8h           (penalità 8h)
+#   development→ timestamp - 8h           (penalità 8h: non deve mai sopravanzare un
+#                                          validato delle ultime 8h — i pattern crypto
+#                                          non-validati (fibonacci_bounce, trend_continuation_pullback
+#                                          ecc.) compariono ogni 2-5h e altrimenti
+#                                          oscurano i validati più vecchi di 4h)
+#   blocked    → timestamp - 12h          (penalità 12h: quasi mai visibile)
 _EFFECTIVE_TIMESTAMP = CandlePattern.timestamp - case(
     (
         CandlePattern.pattern_name.in_(list(VALIDATED_PATTERNS_OPERATIONAL)),
@@ -30,9 +34,9 @@ _EFFECTIVE_TIMESTAMP = CandlePattern.timestamp - case(
     ),
     (
         CandlePattern.pattern_name.in_(list(PATTERNS_BLOCKED)),
-        text("interval '8 hours'"),
+        text("interval '12 hours'"),
     ),
-    else_=text("interval '4 hours'"),
+    else_=text("interval '8 hours'"),
 )
 
 # Priorità secondaria (tie-break a parità di timestamp effettivo):

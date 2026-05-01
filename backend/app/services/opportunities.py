@@ -17,6 +17,7 @@ from app.core.cache import (
     variant_best_cache,
 )
 from app.core.config import settings
+from app.core.hour_filters import is_equity_market_active
 from app.core.trade_plan_variant_constants import (
     BACKTEST_TOTAL_COST_RATE_DEFAULT,
     SIGNAL_MIN_CONFLUENCE,
@@ -57,11 +58,13 @@ from app.services.trade_plan_live_variant import (
 from app.services.ml_signal_scorer import build_signal_feature_dict, is_enabled as ml_is_enabled, score_signal
 from app.services.operational_decision import map_decision_filter_param
 from app.services.opportunity_validator import validate_opportunity
+from app.services.indicator_query import get_indicator_for_candle_timestamp
 from app.services.regime_filter_service import RegimeFilter, load_regime_filter
 from app.services.pattern_staleness import (
     compute_pattern_staleness_fields,
     stale_threshold_bars,
 )
+from app.db.session import AsyncSessionLocal
 
 logger = logging.getLogger(__name__)
 
@@ -69,10 +72,11 @@ logger = logging.getLogger(__name__)
 _vix_history_cache: dict[str, float] = {}
 _vix_cache_ts: float = 0.0
 _VIX_CACHE_TTL_S: float = 3600.0
+_vix_lock = asyncio.Lock()
 
 # ── IBKR spread cache: conid → {spread_pct, volume_live, ts}; TTL 2 min ────────
 # Evita N chiamate a IBKR per lo stesso simbolo nel medesimo ciclo di refresh.
-_spread_cache: dict[int, dict] = {}
+_spread_cache: dict[str, dict] = {}
 _SPREAD_CACHE_TTL_S: float = 120.0
 
 
@@ -83,26 +87,28 @@ async def _get_vix_history() -> dict[str, float]:
     now = time.monotonic()
     if now - _vix_cache_ts < _VIX_CACHE_TTL_S and _vix_history_cache:
         return _vix_history_cache
-    try:
-        import asyncio  # noqa: PLC0415
-        import yfinance as yf  # noqa: PLC0415
-        from datetime import timedelta  # noqa: PLC0415
+    async with _vix_lock:
+        now = time.monotonic()
+        if now - _vix_cache_ts < _VIX_CACHE_TTL_S and _vix_history_cache:
+            return _vix_history_cache
+        try:
+            import yfinance as yf  # noqa: PLC0415
 
-        def _dl() -> dict[str, float]:
-            # yf.download() per indici come ^VIX produce KeyError('chart') in alcune
-            # versioni di yfinance. Ticker.history() usa un path diverso ed è stabile.
-            df = yf.Ticker("^VIX").history(period="14mo", auto_adjust=False)
-            if df is None or df.empty:
-                return {}
-            close_col = next((c for c in ("Adj Close", "Close") if c in df.columns), df.columns[0])
-            return {idx.strftime("%Y-%m-%d"): float(v) for idx, v in zip(df.index, df[close_col])}
+            def _dl() -> dict[str, float]:
+                # yf.download() per indici come ^VIX produce KeyError('chart') in alcune
+                # versioni di yfinance. Ticker.history() usa un path diverso ed è stabile.
+                df = yf.Ticker("^VIX").history(period="14mo", auto_adjust=False)
+                if df is None or df.empty:
+                    return {}
+                close_col = next((c for c in ("Adj Close", "Close") if c in df.columns), df.columns[0])
+                return {idx.strftime("%Y-%m-%d"): float(v) for idx, v in zip(df.index, df[close_col])}
 
-        data = await asyncio.to_thread(_dl)
-        if data:
-            _vix_history_cache = data
-            _vix_cache_ts = now
-    except Exception as exc:
-        logger.debug("_get_vix_history: %s", exc)
+            data = await asyncio.to_thread(_dl)
+            if data:
+                _vix_history_cache = data
+                _vix_cache_ts = now
+        except Exception as exc:
+            logger.debug("_get_vix_history: %s", exc)
     return _vix_history_cache
 
 
@@ -158,24 +164,9 @@ async def _get_ibkr_spread(symbol: str) -> dict[str, float | None]:
     except Exception as exc:
         logger.debug("TWS spread check %s: %s", symbol, exc)
 
-    # ── Tentativo 2: Client Portal REST (fallback, solo se Gateway attivo) ─
-    if not settings.ibkr_enabled:
-        return _EMPTY
-    try:
-        from app.services.ibkr_service import get_ibkr_service  # noqa: PLC0415
-
-        svc = get_ibkr_service()
-        conid = await svc.get_conid(sym_clean)
-        if conid is None:
-            return _EMPTY
-
-        snap = await svc.get_spread_snapshot(conid)
-        entry = {**snap, "source": "client_portal", "ts": now}
-        _spread_cache[cache_key] = entry
-        return entry
-    except Exception as exc:
-        logger.debug("_get_ibkr_spread %s: %s", symbol, exc)
-        return _EMPTY
+    # TWS non disponibile o nessun dato — cache _EMPTY per evitare re-tentativo
+    _spread_cache[cache_key] = {**_EMPTY, "ts": now}
+    return _EMPTY
 
 
 def _trade_plan_price_float(value: object | None) -> float | None:
@@ -315,47 +306,46 @@ async def list_opportunities(
     decision: str | None = None,
     min_confluence_patterns: int | None = None,
 ) -> list[OpportunityRow]:
-    contexts: list[CandleContext] = await list_latest_context_per_series(
-        session,
-        symbol=symbol,
-        exchange=exchange,
-        provider=provider,
-        asset_type=asset_type,
-        timeframe=timeframe,
+    # Le 3 operazioni iniziali sono indipendenti: girano in parallelo su sessioni proprie.
+    # _fetch_contexts_and_dedupe raggruppa list_latest_context_per_series +
+    # dedupe_latest_contexts_prefer_freshest_candle nella stessa sessione e nello
+    # stesso slot del gather, così la query di deduplication (fetch candles per series)
+    # gira in parallelo con patterns e confluence invece di aspettarle.
+    async def _fetch_contexts_and_dedupe() -> tuple[list[CandleContext], dict]:
+        async with AsyncSessionLocal() as s:
+            ctxs = await list_latest_context_per_series(
+                s, symbol=symbol, exchange=exchange, provider=provider,
+                asset_type=asset_type, timeframe=timeframe,
+            )
+            return await dedupe_latest_contexts_prefer_freshest_candle(s, ctxs)
+
+    async def _fetch_patterns() -> list[CandlePattern]:
+        async with AsyncSessionLocal() as s:
+            return await list_latest_pattern_per_series(
+                s, symbol=symbol, exchange=exchange, provider=provider,
+                asset_type=asset_type, timeframe=timeframe,
+            )
+
+    async def _fetch_confluence() -> dict[tuple[str, str, str], int]:
+        try:
+            async with AsyncSessionLocal() as s:
+                return await count_concurrent_patterns_per_series(
+                    s, symbol=symbol, exchange=exchange, provider=provider,
+                    asset_type=asset_type, timeframe=timeframe,
+                )
+        except Exception:
+            logger.exception("list_opportunities: count_concurrent_patterns_per_series failed; confluence=1 for all")
+            return {}
+
+    (contexts, candle_map), latest_patterns, confluence_map = await asyncio.gather(
+        _fetch_contexts_and_dedupe(),
+        _fetch_patterns(),
+        _fetch_confluence(),
     )
-    contexts, candle_map = await dedupe_latest_contexts_prefer_freshest_candle(
-        session,
-        contexts,
-    )
-    latest_patterns: list[CandlePattern] = await list_latest_pattern_per_series(
-        session,
-        symbol=symbol,
-        exchange=exchange,
-        provider=provider,
-        asset_type=asset_type,
-        timeframe=timeframe,
-    )
+
     by_series: dict[tuple[str, str, str], CandlePattern] = {
         _pattern_key(p): p for p in latest_patterns
     }
-
-    # Confluence map: per ogni (exchange, symbol, timeframe) conta i pattern
-    # validati distinti alla barra corrente. Usato da validate_opportunity per
-    # filtrare segnali singoli (rumore) vs multi-segnale (confluenza).
-    try:
-        confluence_map: dict[tuple[str, str, str], int] = (
-            await count_concurrent_patterns_per_series(
-                session,
-                symbol=symbol,
-                exchange=exchange,
-                provider=provider,
-                asset_type=asset_type,
-                timeframe=timeframe,
-            )
-        )
-    except Exception:
-        logger.exception("list_opportunities: count_concurrent_patterns_per_series failed; confluence=1 for all")
-        confluence_map = {}
 
     pq_key = opportunity_lookup_key(
         "pq",
@@ -367,18 +357,17 @@ async def list_opportunities(
     )
 
     async def _compute_pq() -> dict[tuple[str, str], PatternBacktestAggregateRow]:
-        # dt_to=now(): usa solo pattern storici fino ad ora per evitare look-ahead bias.
-        return await pattern_quality_lookup_by_name_tf(
-            session,
-            symbol=symbol,
-            exchange=exchange,
-            provider=provider,
-            asset_type=asset_type,
-            timeframe=timeframe,
-            dt_to=datetime.now(UTC),
-        )
-
-    pq_lookup = await pattern_quality_cache.get_or_compute(key=pq_key, compute=_compute_pq)
+        # Sessione propria: sicuro per background recompute (stale-while-revalidate).
+        async with AsyncSessionLocal() as s:
+            return await pattern_quality_lookup_by_name_tf(
+                s,
+                symbol=symbol,
+                exchange=exchange,
+                provider=provider,
+                asset_type=asset_type,
+                timeframe=timeframe,
+                dt_to=datetime.now(UTC),
+            )
 
     tpb_key = opportunity_lookup_key(
         "tpb",
@@ -391,17 +380,58 @@ async def list_opportunities(
     )
 
     async def _compute_tpb():
-        return await trade_plan_backtest_lookup_by_bucket(
-            session,
-            symbol=symbol,
-            exchange=exchange,
-            provider=provider,
-            asset_type=asset_type,
-            timeframe=timeframe,
-            cost_rate=BACKTEST_TOTAL_COST_RATE_DEFAULT,
-        )
+        async with AsyncSessionLocal() as s:
+            return await trade_plan_backtest_lookup_by_bucket(
+                s,
+                symbol=symbol,
+                exchange=exchange,
+                provider=provider,
+                asset_type=asset_type,
+                timeframe=timeframe,
+                cost_rate=BACKTEST_TOTAL_COST_RATE_DEFAULT,
+            )
 
-    tpb_lookup = await trade_plan_backtest_cache.get_or_compute(key=tpb_key, compute=_compute_tpb)
+    var_key = opportunity_lookup_key(
+        "var",
+        symbol=symbol,
+        exchange=exchange,
+        provider=provider,
+        asset_type=asset_type,
+        timeframe=timeframe,
+        cost_rate=BACKTEST_TOTAL_COST_RATE_DEFAULT,
+        limit=LIVE_VARIANT_BACKTEST_PATTERN_LIMIT,
+    )
+
+    async def _compute_var():
+        async with AsyncSessionLocal() as s:
+            return await load_best_variant_lookup_for_live(
+                s,
+                symbol=symbol,
+                exchange=exchange,
+                provider=provider,
+                asset_type=asset_type,
+                timeframe=timeframe,
+                limit=LIVE_VARIANT_BACKTEST_PATTERN_LIMIT,
+                cost_rate=BACKTEST_TOTAL_COST_RATE_DEFAULT,
+            )
+
+    # Le 3 computazioni sono indipendenti: girare in parallelo riduce il tempo di
+    # attesa al primo avvio (cache miss) da ~90s sequenziali a ~30s paralleli.
+    _gather_results = await asyncio.gather(
+        pattern_quality_cache.get_or_compute(key=pq_key, compute=_compute_pq),
+        trade_plan_backtest_cache.get_or_compute(key=tpb_key, compute=_compute_tpb),
+        variant_best_cache.get_or_compute(key=var_key, compute=_compute_var),
+        return_exceptions=True,
+    )
+    pq_lookup = _gather_results[0] if not isinstance(_gather_results[0], BaseException) else {}
+    tpb_lookup = _gather_results[1] if not isinstance(_gather_results[1], BaseException) else {}
+    variant_lookup_raw = _gather_results[2] if not isinstance(_gather_results[2], BaseException) else {}
+    if isinstance(_gather_results[0], BaseException):
+        logger.exception("list_opportunities: pq_lookup compute failed: %s", _gather_results[0])
+    if isinstance(_gather_results[1], BaseException):
+        logger.exception("list_opportunities: tpb_lookup compute failed: %s", _gather_results[1])
+    if isinstance(_gather_results[2], BaseException):
+        logger.exception("list_opportunities: variant_lookup compute failed; default trade plans only: %s", _gather_results[2])
 
     # Lookup contesto per series key: usato nel secondo loop (enrichment + ML) per
     # ricavare il CandleContext corrispondente alla row in elaborazione senza dipendere
@@ -453,6 +483,8 @@ async def list_opportunities(
             tpb_conf = "unknown"
         else:
             bucket = tpb_lookup.get((pn, ctx.timeframe, ctx.provider, ctx.asset_type))
+            if bucket is None and ctx.provider == "alpaca":
+                bucket = tpb_lookup.get((pn, ctx.timeframe, "yahoo_finance", ctx.asset_type))
             adjusted, tpb_delta, tpb_label, tpb_exp, tpb_n, tpb_conf = (
                 adjust_final_score_for_trade_plan_backtest(score_before_tpb, bucket)
             )
@@ -468,8 +500,12 @@ async def list_opportunities(
             pattern_timeframe_quality_ok=tf_ok,
         )
         pat_ts = p.timestamp if p is not None else None
+        # Usa max(ctx.timestamp, now) come riferimento per la staleness:
+        # a mercato chiuso ctx.timestamp è congelato all'ultima barra, quindi senza
+        # questo fix un pattern delle 19:45 appare "1 barra fa" anche a mezzanotte.
+        staleness_ref = max(ctx.timestamp, datetime.now(UTC))
         age_bars, pat_stale = compute_pattern_staleness_fields(
-            ctx.timestamp,
+            staleness_ref,
             pat_ts,
             ctx.timeframe,
         )
@@ -548,45 +584,35 @@ async def list_opportunities(
 
     ranked = _pre_enrich_sort(out)
 
-    var_key = opportunity_lookup_key(
-        "var",
-        symbol=symbol,
-        exchange=exchange,
-        provider=provider,
-        asset_type=asset_type,
-        timeframe=timeframe,
-        cost_rate=BACKTEST_TOTAL_COST_RATE_DEFAULT,
-        limit=LIVE_VARIANT_BACKTEST_PATTERN_LIMIT,
-    )
-
-    async def _compute_var():
-        return await load_best_variant_lookup_for_live(
-            session,
-            symbol=symbol,
-            exchange=exchange,
-            provider=provider,
-            asset_type=asset_type,
-            timeframe=timeframe,
-            limit=LIVE_VARIANT_BACKTEST_PATTERN_LIMIT,
-            cost_rate=BACKTEST_TOTAL_COST_RATE_DEFAULT,
-        )
-
-    try:
-        variant_lookup = await variant_best_cache.get_or_compute(
-            key=var_key,
-            compute=_compute_var,
-        )
-    except Exception:
-        logger.exception(
-            "list_opportunities: load_best_variant_lookup_for_live failed; default trade plans only",
-        )
-        variant_lookup = {}
+    # variant_lookup già calcolato in parallelo con pq/tpb sopra.
+    variant_lookup = variant_lookup_raw
 
     regime_filter_yahoo: RegimeFilter | None = None
     try:
         regime_filter_yahoo = await load_regime_filter(session, provider="yahoo_finance")
     except Exception:
         logger.exception("list_opportunities: load_regime_filter (yahoo) failed; regime fields degraded")
+
+    # Regime filter UK: ^FTSE 1d via Yahoo Finance (analogo a SPY per USA — Fase 4A).
+    # None → PATTERNS_BEAR_REGIME_ONLY UK vengono forzati a "monitor" dal validator
+    # (regime_label default = "neutral", non è "bearish" → safe-fail conservativo).
+    regime_filter_ibkr: RegimeFilter | None = None
+    _uk_regime_attempted = False
+    try:
+        from app.core.config import settings as _cfg_regime  # noqa: PLC0415
+        if getattr(_cfg_regime, "enable_uk_market", False):
+            _uk_regime_attempted = True
+            regime_filter_ibkr = await load_regime_filter(session, provider="ibkr")
+    except Exception:
+        logger.exception("list_opportunities: load_regime_filter (ibkr/uk) failed; regime UK degraded")
+
+    if _uk_regime_attempted and (regime_filter_ibkr is None or not regime_filter_ibkr.has_data):
+        logger.warning(
+            "UK regime filter (^FTSE 1d): nessun dato in DB — "
+            "PATTERNS_BEAR_REGIME_ONLY UK (engulfing_bullish, macd/rsi_divergence_bull) "
+            "forzati a 'monitor' per sicurezza. "
+            "Eseguire batch_pipeline_uk --symbols '^FTSE' --timeframe 1d per ripopolare."
+        )
 
     # ── Prefetch spread IBKR in parallelo (evita 76 chiamate seriali a TWS) ──────
     ibkr_spread_filter_active_global = (
@@ -600,7 +626,46 @@ async def list_opportunities(
             )
         ]
         if spread_symbols:
-            await asyncio.gather(*[_get_ibkr_spread(s) for s in spread_symbols], return_exceptions=True)
+            # Timeout 6s per l'intera batch: evita blocchi lunghi quando
+            # TWS è connesso ma i dati non sono disponibili (mercato chiuso).
+            # I simboli non risolti entro 6s avranno spread=None nel loop sottostante.
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*[_get_ibkr_spread(s) for s in spread_symbols], return_exceptions=True),
+                    timeout=6.0,
+                )
+            except asyncio.TimeoutError:
+                logger.debug("ibkr spread prefetch: timeout 6s — %d simboli non risolti", len(spread_symbols))
+
+    # ── Prefetch prezzi live TWS in parallelo (evita chiamate seriali per ogni US stock) ──
+    # Cache TTL 30s in tws_service: il gather popola la cache; il loop sottostante
+    # legge dalla cache senza ulteriori round-trip a TWS.
+    _tws_svc_global = None
+    try:
+        from app.services.tws_service import get_tws_service  # noqa: PLC0415
+        _tws_svc_global = get_tws_service()
+    except Exception:
+        pass
+    if _tws_svc_global is not None and _tws_svc_global.is_connected:
+        us_stock_symbols = [
+            r.symbol for r in ranked
+            if (r.provider or "") == "yahoo_finance" and r.symbol
+        ]
+        if us_stock_symbols:
+            try:
+                # Timeout 8s: evita blocchi se TWS non risponde per alcuni simboli.
+                await asyncio.wait_for(
+                    asyncio.gather(
+                        *[_tws_svc_global.get_last_price(s) for s in us_stock_symbols],
+                        return_exceptions=True,
+                    ),
+                    timeout=8.0,
+                )
+            except asyncio.TimeoutError:
+                logger.debug(
+                    "TWS live price prefetch: timeout 8s — %d simboli, prezzi non disponibili",
+                    len(us_stock_symbols),
+                )
 
     enriched: list[OpportunityRow] = []
     for r in ranked:
@@ -610,6 +675,10 @@ async def list_opportunities(
             best_row = variant_lookup.get(
                 (r.latest_pattern_name, r.timeframe, r.provider, r.asset_type),
             )
+            if best_row is None and r.provider == "alpaca":
+                best_row = variant_lookup.get(
+                    (r.latest_pattern_name, r.timeframe, "yahoo_finance", r.asset_type),
+                )
         plan, sv, st, ss, se, src, fbr = build_live_trade_plan_for_opportunity(
             final_opportunity_label=r.final_opportunity_label,
             final_opportunity_score=r.final_opportunity_score,
@@ -624,6 +693,8 @@ async def list_opportunities(
             candle_low=c.low if c is not None else None,
             candle_close=c.close if c is not None else None,
             best_row=best_row,
+            symbol=r.symbol or "",
+            exchange=r.exchange or "",
         )
         row_with_plan = r.model_copy(
             update={
@@ -656,13 +727,54 @@ async def list_opportunities(
         pat_str_f = float(pat_str) if pat_str is not None else None
         _rf_val = (
             None
+            # crypto Binance: 24/7, nessun regime filter
             if row_with_plan.provider == "binance"
+            # UK IBKR/LSE: usa ISF.L 1d come regime anchor (analogo a SPY — Fase 4A)
+            else regime_filter_ibkr if (
+                row_with_plan.provider == "ibkr"
+                and (row_with_plan.exchange or "").upper() == "LSE"
+            )
+            # IBKR non-LSE (es. futures, altri mercati): nessun regime filter
+            else None if row_with_plan.provider == "ibkr"
             else regime_filter_yahoo
         )
+        _tp_for_risk = row_with_plan.trade_plan
+        _risk_pct_val: float | None = None
+        if _tp_for_risk and _tp_for_risk.entry_price and _tp_for_risk.stop_loss:
+            try:
+                _risk_pct_val = float(
+                    abs(_tp_for_risk.entry_price - _tp_for_risk.stop_loss)
+                    / _tp_for_risk.entry_price * 100
+                )
+            except (TypeError, ZeroDivisionError):
+                pass
+
+        # TRIPLO config apr 2026: per 5m Alpaca midday (11-14 ET) il validator
+        # necessita di price_position_in_range (running session H/L) per il filtro
+        # al estremo del giorno. Caricato solo per alpaca 5m per evitare overhead.
+        _ind_val = None
+        if (
+            row_with_plan.provider == "alpaca"
+            and row_with_plan.timeframe == "5m"
+            and ts_ref is not None
+        ):
+            try:
+                _ind_val = await get_indicator_for_candle_timestamp(
+                    session,
+                    symbol=row_with_plan.symbol,
+                    exchange=row_with_plan.exchange or "",
+                    provider=row_with_plan.provider,
+                    timeframe=row_with_plan.timeframe,
+                    timestamp=ts_ref,
+                )
+            except Exception:
+                pass  # fallback: ind=None → midday scartato per sicurezza
+
         v_dec, v_rationale = validate_opportunity(
             symbol=row_with_plan.symbol,
             timeframe=row_with_plan.timeframe,
             provider=row_with_plan.provider,
+            exchange=row_with_plan.exchange,
             pattern_name=row_with_plan.latest_pattern_name,
             direction=row_with_plan.latest_pattern_direction,
             regime_filter=_rf_val,
@@ -670,18 +782,62 @@ async def list_opportunities(
             pattern_strength=pat_str_f,
             confluence_count=row_with_plan.confluence_count,
             min_confluence_patterns=min_confluence_patterns,
+            final_score=row_with_plan.final_opportunity_score,
+            screener_score=row_with_plan.screener_score,
+            risk_pct=_risk_pct_val,
+            ind=_ind_val,
         )
+
+        # ── Guard: trade plan senza livelli validi → non eseguibile ────────────
+        # Se il piano ha trade_direction="none" o stop_loss=None (es. score_direction
+        # neutro o in conflitto con pattern_direction), non ci sono parametri operativi.
+        # Un segnale "execute" senza stop/TP non è operabile — demotare a "monitor".
+        tp = row_with_plan.trade_plan
+        if v_dec == "execute" and tp is not None and (
+            tp.trade_direction == "none" or tp.stop_loss is None
+        ):
+            v_dec = "monitor"
+            v_rationale = [
+                "Piano di trade incompleto: direzione o stop non calcolabili "
+                "(score_direction neutro o conflitto pattern/score).",
+                "Attendere conferma direzionale prima di eseguire.",
+                *list(v_rationale),
+            ]
 
         threshold_pct = settings.opportunity_price_staleness_pct
         current_price: float | None = None
         price_distance_pct: float | None = None
         price_stale = False
         price_stale_reason: str | None = None
+        price_source: str = "unavailable"
 
-        if c is not None:
+        # ── Prezzo live TWS (solo US stock, non crypto Binance) ──────────────
+        # Priorità: prezzo live TWS (last trade o mid bid/ask, cache 30s)
+        # Fallback: close dell'ultima candela completata nel DB.
+        # Per Binance non esiste connessione TWS equivalente — si usa sempre candle close.
+        # Il prefetch parallelo sopra ha già popolato la cache TWS: questa chiamata
+        # è praticamente gratuita (hit cache, nessun round-trip a TWS).
+        _is_us_stock = (row_with_plan.provider or "") == "yahoo_finance"
+        if _is_us_stock and _tws_svc_global is not None and _tws_svc_global.is_connected:
+            try:
+                # cache_only=True: usa solo la cache del prefetch parallelo fatto sopra.
+                # Evita round-trip sequenziali a TWS per ogni simbolo nel loop (fino a 100s
+                # con 40+ US stock × 2.5s timeout). Simboli non in cache → fallback candle.
+                _live_price = await _tws_svc_global.get_last_price(
+                    row_with_plan.symbol, cache_only=True
+                )
+                if _live_price is not None:
+                    current_price = _live_price
+                    price_source = "live_tws"
+            except Exception as _lp_exc:
+                logger.debug(
+                    "get_last_price skipped %s: %s", row_with_plan.symbol, _lp_exc
+                )
+
+        if current_price is None and c is not None:
             current_price = float(c.close)
+            price_source = "candle_close"
 
-        tp = row_with_plan.trade_plan
         entry_f = _trade_plan_price_float(tp.entry_price) if tp else None
         stop_f = _trade_plan_price_float(tp.stop_loss) if tp else None
         direction = (row_with_plan.latest_pattern_direction or "bullish").strip().lower()
@@ -828,6 +984,7 @@ async def list_opportunities(
                     "regime_spy": regime_spy,
                     "regime_direction_ok": regime_direction_ok,
                     "current_price": current_price,
+                    "price_source": price_source,
                     "price_distance_pct": price_distance_pct,
                     "price_stale": price_stale,
                     "price_stale_reason": price_stale_reason,
@@ -842,6 +999,17 @@ async def list_opportunities(
     decision_code = map_decision_filter_param(decision)
     if decision_code is not None:
         enriched = [x for x in enriched if x.operational_decision == decision_code]
+
+    # ── Filtro orario: nascondi segnali execute equity a mercato chiuso ──────
+    # Applicato solo quando decision="execute" (live trading).
+    # Per decision=None/monitor: i segnali restano visibili per analisi e prewarm cache.
+    # Cripto (binance) non viene mai filtrata (24/7).
+    if decision == "execute":
+        enriched = [
+            x for x in enriched
+            if is_equity_market_active(x.provider)
+        ]
+
     ordered = _post_enrich_sort(enriched)
     return ordered[:limit]
 
@@ -856,22 +1024,25 @@ async def list_ranked_screener(
     timeframe: str | None,
     limit: int,
 ) -> list[RankedScreenerRow]:
-    contexts: list[CandleContext] = await list_latest_context_per_series(
-        session,
-        symbol=symbol,
-        exchange=exchange,
-        provider=provider,
-        asset_type=asset_type,
-        timeframe=timeframe,
+    async def _fetch_ctx_screener() -> list[CandleContext]:
+        async with AsyncSessionLocal() as s:
+            return await list_latest_context_per_series(
+                s, symbol=symbol, exchange=exchange, provider=provider,
+                asset_type=asset_type, timeframe=timeframe,
+            )
+
+    async def _fetch_pats_screener() -> list[CandlePattern]:
+        async with AsyncSessionLocal() as s:
+            return await list_latest_pattern_per_series(
+                s, symbol=symbol, exchange=exchange, provider=provider,
+                asset_type=asset_type, timeframe=timeframe,
+            )
+
+    contexts, latest_patterns = await asyncio.gather(
+        _fetch_ctx_screener(),
+        _fetch_pats_screener(),
     )
-    latest_patterns: list[CandlePattern] = await list_latest_pattern_per_series(
-        session,
-        symbol=symbol,
-        exchange=exchange,
-        provider=provider,
-        asset_type=asset_type,
-        timeframe=timeframe,
-    )
+
     by_series: dict[tuple[str, str, str], CandlePattern] = {
         _pattern_key(p): p for p in latest_patterns
     }
@@ -885,16 +1056,16 @@ async def list_ranked_screener(
     )
 
     async def _compute_pq_ranked() -> dict[tuple[str, str], PatternBacktestAggregateRow]:
-        # dt_to=now(): stesso allineamento anti-leakage della prima lookup.
-        return await pattern_quality_lookup_by_name_tf(
-            session,
-            symbol=symbol,
-            exchange=exchange,
-            provider=provider,
-            asset_type=None,
-            timeframe=timeframe,
-            dt_to=datetime.now(UTC),
-        )
+        async with AsyncSessionLocal() as s:
+            return await pattern_quality_lookup_by_name_tf(
+                s,
+                symbol=symbol,
+                exchange=exchange,
+                provider=provider,
+                asset_type=None,
+                timeframe=timeframe,
+                dt_to=datetime.now(UTC),
+            )
 
     pq_lookup = await pattern_quality_cache.get_or_compute(
         key=pq_key_ranked,

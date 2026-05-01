@@ -9,10 +9,14 @@ import logging
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
 
-import httpx
 from sqlalchemy import delete
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+from app.core.alert_channels import (
+    _channels_configured,
+    send_discord,
+    send_telegram,
+)
 from app.core.config import settings
 from app.core.trade_plan_variant_constants import SIGNAL_MIN_STRENGTH
 from app.core.hour_filters import EXCLUDED_HOURS_UTC_YAHOO, hour_utc
@@ -72,13 +76,6 @@ def _format_price(price: float | None) -> str:
     if price > 10:
         return f"${price:.2f}"
     return f"${price:.4f}"
-
-
-def _channels_configured() -> bool:
-    return bool(
-        (settings.telegram_bot_token and settings.telegram_chat_id)
-        or settings.discord_webhook_url
-    )
 
 
 def pattern_alert_channels_configured() -> bool:
@@ -347,53 +344,6 @@ def build_alert_message_telegram_plain(
     msg += f"\n\n📊 Apri opportunità (tap sull'URL):\n{deep_link}"
 
     return msg
-
-
-async def send_telegram(message_plain: str) -> bool:
-    token = settings.telegram_bot_token
-    chat_id = settings.telegram_chat_id
-    if not token or not chat_id:
-        return False
-
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.post(
-                url,
-                json={
-                    "chat_id": chat_id,
-                    "text": message_plain,
-                    "disable_web_page_preview": True,
-                },
-            )
-            resp.raise_for_status()
-            return True
-    except Exception as exc:
-        logger.warning("Telegram alert failed: %s", exc)
-        return False
-
-
-async def send_discord(message: str) -> bool:
-    webhook_url = settings.discord_webhook_url
-    if not webhook_url:
-        return False
-
-    discord_msg = message
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.post(
-                webhook_url,
-                json={
-                    "content": discord_msg,
-                    "username": "IntraDay Screener",
-                    "avatar_url": "https://cdn-icons-png.flaticon.com/512/2942/2942289.png",
-                },
-            )
-            resp.raise_for_status()
-            return True
-    except Exception as exc:
-        logger.warning("Discord alert failed: %s", exc)
-        return False
 
 
 async def send_alert(

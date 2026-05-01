@@ -16,7 +16,7 @@ class IndicatorExtractRequest(BaseModel):
 
     symbol: str | None = Field(default=None)
     exchange: str | None = Field(default=None)
-    provider: Literal["binance", "yahoo_finance", "alpaca"] | None = Field(default=None)
+    provider: Literal["binance", "yahoo_finance", "alpaca", "ibkr"] | None = Field(default=None)
     timeframe: str | None = Field(default=None)
     limit: int = Field(
         default=5000,

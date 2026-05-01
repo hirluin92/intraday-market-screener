@@ -40,7 +40,8 @@ from app.services.indicator_extraction import extract_indicators
 from app.services.indicator_query import list_stored_indicators
 from app.services.pattern_extraction import extract_patterns
 from app.services.pattern_query import list_stored_patterns
-from app.services.market_data_ingestion import MarketDataIngestionService
+from app.services.binance_ingestion import MarketDataIngestionService
+from app.services.ibkr_ingestion import IBKRIngestionService
 from app.services.yahoo_finance_ingestion import YahooFinanceIngestionService
 
 logger = logging.getLogger(__name__)
@@ -299,6 +300,18 @@ async def ingest_market_data(
             raise HTTPException(status_code=400, detail=str(e)) from e
         except Exception as e:
             logger.exception("yahoo finance ingestion error")
+            raise HTTPException(status_code=502, detail=str(e)) from e
+
+    if body.provider == "ibkr":
+        ibkr = IBKRIngestionService()
+        try:
+            return await ibkr.ingest(session, body)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        except RuntimeError as e:
+            raise HTTPException(status_code=503, detail=str(e)) from e
+        except Exception as e:
+            logger.exception("ibkr ingestion error")
             raise HTTPException(status_code=502, detail=str(e)) from e
 
     try:

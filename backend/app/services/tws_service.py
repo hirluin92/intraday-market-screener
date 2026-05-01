@@ -39,8 +39,10 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 # TTL cache in-memory per get_last_price(): evita N richieste TWS per lo stesso
-# simbolo nello stesso ciclo di refresh. 30 secondi bilancia freschezza e overhead.
-_LAST_PRICE_TTL_S: float = 30.0
+# simbolo nello stesso ciclo di refresh. 90s: il frontend aggiorna ogni 60s, quindi
+# un TTL > 60s garantisce cache warm ad ogni richiesta frontend senza rifare il
+# prefetch TWS (8s) ad ogni ciclo.
+_LAST_PRICE_TTL_S: float = 90.0
 
 # ─── Strutture dati risultato ─────────────────────────────────────────────────
 
@@ -59,7 +61,7 @@ class LiveQuote:
     ) -> None:
         self.bid = bid
         self.ask = ask
-        self.last = last or bid or ask
+        self.last = last if last is not None else (bid or ask)
         self.bid_size = bid_size
         self.ask_size = ask_size
         self.volume = volume
@@ -205,6 +207,14 @@ class TWSService:
             # Tipo 1 = real-time puro (errore se abbonamento mancante per quel simbolo).
             # Tipo 3 = delayed (15-20 min) — usato in precedenza senza abbonamento real-time.
             self._ib.reqMarketDataType(2)
+            # Ripopola self._ib.trades() con gli ordini aperti dalla sessione precedente.
+            # Senza questa chiamata, trades() è vuoto dopo un restart del backend e
+            # modify_stop_price() non trova i SL order → trailing stop silenziosamente inattivo.
+            try:
+                await self._ib.reqAllOpenOrdersAsync()
+                logger.info("TWS: ordini aperti recuperati da reqAllOpenOrders()")
+            except Exception as _oe:
+                logger.warning("TWS: reqAllOpenOrders fallita (non bloccante): %s", _oe)
             self._connected = True
             logger.info(
                 "TWS connesso: %s:%d clientId=%d (market data: real-time con frozen fallback)",
@@ -283,7 +293,7 @@ class TWSService:
         """
         if not self._ensure_started():
             return None
-        return await asyncio.get_event_loop().run_in_executor(
+        return await asyncio.get_running_loop().run_in_executor(
             None, self._sync_live_quote, symbol
         )
 
@@ -326,6 +336,7 @@ class TWSService:
         timeout_s: float = 2.0,
         exchange: str = "SMART",
         currency: str = "USD",
+        cache_only: bool = False,
     ) -> float | None:
         """
         Ottiene l'ultimo prezzo live per il simbolo (last trade; fallback a mid bid/ask).
@@ -337,10 +348,13 @@ class TWSService:
         Non solleva mai eccezioni.
 
         Args:
-            symbol:    ticker (es. "AAPL", "AZN")
-            timeout_s: timeout esterno per il run_in_executor (default 2.0s)
-            exchange:  IBKR exchange routing (default "SMART" per US, "LSE" per UK)
-            currency:  valuta contratto (default "USD"; "GBP" per UK)
+            symbol:     ticker (es. "AAPL", "AZN")
+            timeout_s:  timeout esterno per il run_in_executor (default 2.0s)
+            exchange:   IBKR exchange routing (default "SMART" per US, "LSE" per UK)
+            currency:   valuta contratto (default "USD"; "GBP" per UK)
+            cache_only: se True, ritorna solo dalla cache senza round-trip a TWS.
+                        Usato nel loop per-riga dopo il prefetch parallelo: evita
+                        chiamate sequenziali a TWS per simboli non già in cache.
 
         Returns:
             Prezzo float se disponibile, None altrimenti (fallback al chiamante).
@@ -354,13 +368,16 @@ class TWSService:
             logger.debug("get_last_price(%s): cache hit (%.4f)", cache_key, cached[0])
             return cached[0]
 
+        if cache_only:
+            return None
+
         # Controlla connessione senza bloccare (_ensure_started può attendere 12s)
         if not self._connected or self._loop is None:
             return None
 
         try:
             price = await asyncio.wait_for(
-                asyncio.get_event_loop().run_in_executor(
+                asyncio.get_running_loop().run_in_executor(
                     None, self._sync_get_last_price, symbol, exchange, currency
                 ),
                 timeout=timeout_s + 0.5,  # buffer sopra il timeout interno 1.5s
@@ -416,7 +433,7 @@ class TWSService:
         """
         if not self._ensure_started():
             return None
-        return await asyncio.get_event_loop().run_in_executor(
+        return await asyncio.get_running_loop().run_in_executor(
             None, self._sync_market_depth, symbol, levels
         )
 
@@ -478,7 +495,7 @@ class TWSService:
         """
         if not self._ensure_started():
             return None
-        return await asyncio.get_event_loop().run_in_executor(
+        return await asyncio.get_running_loop().run_in_executor(
             None, self._sync_bid_ask_history, symbol, duration, bar_size
         )
 
@@ -557,7 +574,7 @@ class TWSService:
         """
         if not self._ensure_started():
             return None
-        return await asyncio.get_event_loop().run_in_executor(
+        return await asyncio.get_running_loop().run_in_executor(
             None, self._sync_historical_bars, symbol, duration, bar_size, use_rth
         )
 
@@ -672,7 +689,7 @@ class TWSService:
 
         try:
             bars = await asyncio.wait_for(
-                asyncio.get_event_loop().run_in_executor(
+                asyncio.get_running_loop().run_in_executor(
                     None,
                     self._sync_historical_bars,
                     symbol, duration, bar_size, True,   # use_rth=True
@@ -758,7 +775,7 @@ class TWSService:
         )
         try:
             bars = await asyncio.wait_for(
-                asyncio.get_event_loop().run_in_executor(None, fn),
+                asyncio.get_running_loop().run_in_executor(None, fn),
                 timeout=timeout_s + 10.0,  # outer leggermente più largo dell'inner
             )
         except asyncio.TimeoutError:
@@ -779,7 +796,7 @@ class TWSService:
         """Ritorna le posizioni aperte dal portfolio TWS."""
         if not self._ensure_started():
             return None
-        return await asyncio.get_event_loop().run_in_executor(None, self._sync_portfolio)
+        return await asyncio.get_running_loop().run_in_executor(None, self._sync_portfolio)
 
     def _sync_portfolio(self) -> list[dict] | None:
         try:
@@ -811,7 +828,7 @@ class TWSService:
         """Posizioni attualmente aperte (position != 0)."""
         if not self._ensure_started():
             return []
-        return await asyncio.get_event_loop().run_in_executor(None, self._sync_open_positions)
+        return await asyncio.get_running_loop().run_in_executor(None, self._sync_open_positions)
 
     def _sync_open_positions(self) -> list[dict]:
         try:
@@ -836,6 +853,41 @@ class TWSService:
             if abs(p.position) > 1e-6
         ]
 
+    async def has_pending_entry_order(self, symbol: str) -> bool:
+        """
+        True se esiste già un ordine entry LMT in stato PreSubmitted/Submitted per il simbolo.
+
+        Previene il caso in cui due cicli pipeline consecutivi inviino due ordini entry sullo
+        stesso simbolo prima che il primo venga fillato (get_open_positions non vede gli ordini
+        pendenti — solo le posizioni aperte con position != 0).
+        """
+        if not self._ensure_started():
+            return False
+        sym_u = symbol.upper()
+
+        def _check() -> bool:
+            if self._ib is None:
+                return False
+            for t in self._ib.openTrades():
+                contract_symbol = (getattr(t.contract, "symbol", "") or "").upper()
+                status = t.orderStatus.status
+                order = t.order
+                # Cerca ordini LMT attivi senza parentId (= entry, non child TP/SL)
+                if (
+                    contract_symbol == sym_u
+                    and getattr(order, "orderType", "") == "LMT"
+                    and getattr(order, "parentId", 0) == 0
+                    and status in ("PreSubmitted", "Submitted")
+                ):
+                    return True
+            return False
+
+        try:
+            return await asyncio.get_running_loop().run_in_executor(None, _check)
+        except Exception as exc:
+            logger.debug("TWS has_pending_entry_order: %s", exc)
+            return False
+
     async def get_net_liquidation(self, currency: str = "USD") -> float | None:
         """Legge il valore netto del conto (NetLiquidation) da TWS.
 
@@ -844,7 +896,7 @@ class TWSService:
         """
         if not self._ensure_started():
             return None
-        return await asyncio.get_event_loop().run_in_executor(
+        return await asyncio.get_running_loop().run_in_executor(
             None, self._sync_net_liquidation, currency
         )
 
@@ -861,13 +913,26 @@ class TWSService:
     async def _async_net_liquidation(self, currency: str) -> float | None:
         tags = "NetLiquidation"
         summaries = await self._ib.reqAccountSummaryAsync(group="All", tags=tags)
+        first_value: float | None = None
         for s in summaries:
-            if s.tag == "NetLiquidation" and s.currency == currency:
-                try:
-                    return float(s.value)
-                except (TypeError, ValueError):
-                    return None
-        return None
+            if s.tag != "NetLiquidation":
+                continue
+            try:
+                val = float(s.value)
+            except (TypeError, ValueError):
+                continue
+            if s.currency == currency:
+                return val
+            # Fallback: account in valuta diversa (es. EUR paper trading europeo).
+            # Usa il primo valore trovato se la valuta richiesta non è presente.
+            if first_value is None:
+                first_value = val
+                logger.debug(
+                    "get_net_liquidation: valuta richiesta=%s non trovata, "
+                    "fallback a currency=%s value=%.2f",
+                    currency, s.currency, val,
+                )
+        return first_value
 
     async def place_bracket_order(
         self,
@@ -877,25 +942,27 @@ class TWSService:
         entry_price: float,
         stop_price: float,
         take_profit_price: float,
+        take_profit_2_price: float | None = None,
         exchange: str = "SMART",
         currency: str = "USD",
     ) -> dict:
         """
         Bracket order completo: entry LMT + TP LMT + SL STP collegati.
 
-        IBKR gestisce i tre ordini come gruppo: se l'entry viene eseguita,
-        TP e SL diventano attivi; se uno dei due viene colpito, l'altro
-        viene cancellato automaticamente (OCA).
+        Se take_profit_2_price è valorizzato e quantity >= 2, invia due bracket
+        indipendenti (split 50/50): il primo chiude qty//2 al TP1, il secondo
+        chiude qty-qty//2 al TP2. Ogni leg ha il proprio SL.
 
-        Restituisce lo stato dei tre ordini dopo 5 secondi.
+        Restituisce lo stato degli ordini dopo 5 secondi.
         """
         if not self._ensure_started():
             return {"error": "TWS non connesso"}
-        return await asyncio.get_event_loop().run_in_executor(
+        return await asyncio.get_running_loop().run_in_executor(
             None,
             self._sync_place_bracket,
             symbol, action, quantity,
             entry_price, stop_price, take_profit_price,
+            take_profit_2_price,
             exchange, currency,
         )
 
@@ -907,6 +974,7 @@ class TWSService:
         entry_price: float,
         stop_price: float,
         take_profit_price: float,
+        take_profit_2_price: float | None,
         exchange: str,
         currency: str,
     ) -> dict:
@@ -916,11 +984,12 @@ class TWSService:
                 self._async_place_bracket(
                     symbol, action, quantity,
                     entry_price, stop_price, take_profit_price,
+                    take_profit_2_price,
                     exchange, currency,
                 ),
                 self._loop,
             )
-            return future.result(timeout=20)
+            return future.result(timeout=30)
         except Exception as exc:
             logger.error("TWS bracket_order %s: %s", symbol, exc)
             return {"error": str(exc)}
@@ -933,6 +1002,7 @@ class TWSService:
         entry_price: float,
         stop_price: float,
         take_profit_price: float,
+        take_profit_2_price: float | None,
         exchange: str,
         currency: str,
     ) -> dict:
@@ -946,46 +1016,6 @@ class TWSService:
         # Prezzi con 3+ decimali provocano Warning 110 e l'ordine rimane in PendingSubmit.
         def _tick(price: float) -> float:
             return round(round(price / 0.01) * 0.01, 2)
-
-        # ib_insync crea i 3 ordini collegati (parent → OCA tra TP e SL)
-        bracket = self._ib.bracketOrder(
-            action=action.upper(),
-            quantity=quantity,
-            limitPrice=_tick(entry_price),
-            takeProfitPrice=_tick(take_profit_price),
-            stopLossPrice=_tick(stop_price),
-        )
-        parent_order, tp_order, sl_order = bracket
-
-        for order in bracket:
-            order.account = account
-            order.tif = "GTC"
-
-        # Strategia "parent-first":
-        # 1) Invia il parent con transmit=True (va subito all'exchange come LMT aperto)
-        # 2) Aspetta che TWS lo confermi (status Submitted/PreSubmitted), max 8s
-        # 3) Solo dopo invia TP e SL come child — a questo punto il parent è nel book di TWS
-        # Questo evita Error 135 "cannot find order" causato dalla race condition
-        # in cui i child arrivano prima che TWS abbia registrato il parent.
-        parent_order.transmit = True
-        tp_order.transmit = True
-        sl_order.transmit = True
-
-        parent_trade = self._ib.placeOrder(contract, parent_order)
-        # Attendi conferma parent (Submitted / PreSubmitted)
-        for _ in range(40):
-            await asyncio.sleep(0.25)
-            st = parent_trade.orderStatus.status
-            if st in ("Submitted", "PreSubmitted", "Filled"):
-                logger.info("TWS bracket parent %s confermato: %s", parent_order.orderId, st)
-                break
-        else:
-            logger.warning("TWS bracket parent %s non confermato in 10s, status=%s — invio child comunque", parent_order.orderId, parent_trade.orderStatus.status)
-
-        tp_trade = self._ib.placeOrder(contract, tp_order)
-        sl_trade = self._ib.placeOrder(contract, sl_order)
-        trades = [parent_trade, tp_trade, sl_trade]
-        await asyncio.sleep(5)
 
         def _trade_summary(t: Any) -> dict:
             return {
@@ -1001,7 +1031,99 @@ class TWSService:
                 "avg_fill": t.orderStatus.avgFillPrice,
             }
 
-        parent, tp, sl = trades[0], trades[1], trades[2]
+        if take_profit_2_price is not None and int(quantity) >= 2:
+            # ── Split bracket: due bracket indipendenti (TP1 leg + TP2 leg) ──
+            # Leg 1 chiude qty_tp1 azioni a TP1, con il suo SL.
+            # Leg 2 chiude qty_tp2 azioni a TP2, con il suo SL (stesso prezzo di SL1).
+            # Ogni bracket è trasmesso come batch atomico (ib_insync standard).
+            qty_tp1 = int(quantity) // 2
+            qty_tp2 = int(quantity) - qty_tp1
+
+            b1 = self._ib.bracketOrder(
+                action=action.upper(),
+                quantity=qty_tp1,
+                limitPrice=_tick(entry_price),
+                takeProfitPrice=_tick(take_profit_price),
+                stopLossPrice=_tick(stop_price),
+            )
+            b2 = self._ib.bracketOrder(
+                action=action.upper(),
+                quantity=qty_tp2,
+                limitPrice=_tick(entry_price),
+                takeProfitPrice=_tick(take_profit_2_price),
+                stopLossPrice=_tick(stop_price),
+            )
+            parent1, tp1_ord, sl1_ord = b1
+            parent2, tp2_ord, sl2_ord = b2
+
+            for order in [parent1, tp1_ord, sl1_ord, parent2, tp2_ord, sl2_ord]:
+                order.account = account
+            parent1.tif = "DAY"; tp1_ord.tif = "GTC"; sl1_ord.tif = "GTC"
+            parent2.tif = "DAY"; tp2_ord.tif = "GTC"; sl2_ord.tif = "GTC"
+
+            t_parent1 = self._ib.placeOrder(contract, parent1)
+            t_tp1     = self._ib.placeOrder(contract, tp1_ord)
+            t_sl1     = self._ib.placeOrder(contract, sl1_ord)   # transmit=True → bracket1 atomico
+
+            t_parent2 = self._ib.placeOrder(contract, parent2)
+            t_tp2     = self._ib.placeOrder(contract, tp2_ord)
+            t_sl2     = self._ib.placeOrder(contract, sl2_ord)   # transmit=True → bracket2 atomico
+
+            all_trades = [t_parent1, t_tp1, t_sl1, t_parent2, t_tp2, t_sl2]
+            await asyncio.sleep(5)
+
+            errors = [
+                e.message for t in all_trades
+                for e in t.log
+                if e.errorCode and e.errorCode not in (0, 2104, 2106, 2158, 10349, 10167)
+                and e.message
+            ]
+            return {
+                "symbol": symbol,
+                "action": action.upper(),
+                "quantity": quantity,
+                "entry_price": entry_price,
+                "take_profit_price": take_profit_price,
+                "take_profit_2_price": take_profit_2_price,
+                "stop_price": stop_price,
+                "account": account,
+                "entry":         _trade_summary(t_parent1),
+                "entry_2":       _trade_summary(t_parent2),
+                "take_profit":   _trade_summary(t_tp1),
+                "take_profit_2": _trade_summary(t_tp2),
+                "stop_loss":     _trade_summary(t_sl1),
+                "stop_loss_2":   _trade_summary(t_sl2),
+                "errors": errors,
+                "split": True,
+                "qty_tp1": qty_tp1,
+                "qty_tp2": qty_tp2,
+            }
+
+        # ── Single bracket (path originale) ─────────────────────────────────
+        # ib_insync.bracketOrder() imposta già: parent.transmit=False, tp.transmit=False,
+        # sl.transmit=True → batch atomico: IBKR riceve tutti e tre insieme e attiva
+        # TP/SL solo dopo il fill del parent. NON sovrascrivere transmit.
+        bracket = self._ib.bracketOrder(
+            action=action.upper(),
+            quantity=quantity,
+            limitPrice=_tick(entry_price),
+            takeProfitPrice=_tick(take_profit_price),
+            stopLossPrice=_tick(stop_price),
+        )
+        parent_order, tp_order, sl_order = bracket
+
+        for order in bracket:
+            order.account = account
+        parent_order.tif = "DAY"
+        tp_order.tif = "GTC"
+        sl_order.tif = "GTC"
+
+        parent_trade = self._ib.placeOrder(contract, parent_order)
+        tp_trade = self._ib.placeOrder(contract, tp_order)
+        sl_trade = self._ib.placeOrder(contract, sl_order)
+        trades = [parent_trade, tp_trade, sl_trade]
+        await asyncio.sleep(5)
+
         errors = [
             e.message for t in trades
             for e in t.log
@@ -1016,9 +1138,9 @@ class TWSService:
             "take_profit_price": take_profit_price,
             "stop_price": stop_price,
             "account": account,
-            "entry": _trade_summary(parent),
-            "take_profit": _trade_summary(tp),
-            "stop_loss": _trade_summary(sl),
+            "entry": _trade_summary(parent_trade),
+            "take_profit": _trade_summary(tp_trade),
+            "stop_loss": _trade_summary(sl_trade),
             "errors": errors,
         }
 
@@ -1042,7 +1164,7 @@ class TWSService:
         """
         if not self._ensure_started():
             return {"error": "TWS non connesso"}
-        return await asyncio.get_event_loop().run_in_executor(
+        return await asyncio.get_running_loop().run_in_executor(
             None, self._sync_place_order,
             symbol, action, quantity, order_type,
             limit_price, stop_price, what_if, exchange, currency,
@@ -1153,7 +1275,7 @@ class TWSService:
         """
         if not self._ensure_started() or self._ib is None:
             return {"status": "error", "filled_qty": 0.0, "ordered_qty": 0.0, "avg_fill_price": 0.0}
-        return await asyncio.get_event_loop().run_in_executor(
+        return await asyncio.get_running_loop().run_in_executor(
             None, self._sync_poll_entry_fill, order_id, timeout_s, poll_interval_s
         )
 
@@ -1214,7 +1336,7 @@ class TWSService:
         """
         if not self._ensure_started() or self._ib is None:
             return False
-        return await asyncio.get_event_loop().run_in_executor(
+        return await asyncio.get_running_loop().run_in_executor(
             None, self._sync_cancel_order_by_id, order_id
         )
 
@@ -1248,6 +1370,63 @@ class TWSService:
         logger.info("cancel_order_by_id: order_id=%s — richiesta cancellazione inviata", order_id)
         return True
 
+    async def modify_stop_price(
+        self,
+        order_id: int,
+        new_stop_price: float,
+        symbol: str,
+        exchange: str = "SMART",
+        currency: str = "USD",
+    ) -> bool:
+        """
+        Modifica il prezzo di un ordine STP esistente (trail stop → break-even).
+
+        Usa ib_insync modify (stesso orderId, nuovo auxPrice) per preservare il gruppo OCA
+        del bracket. Non cancella e non ricrea: il link TP↔SL rimane intatto.
+        Restituisce True se la modifica è stata inviata, False se l'ordine non è trovato.
+        """
+        if not self._ensure_started() or self._ib is None:
+            return False
+        return await asyncio.get_running_loop().run_in_executor(
+            None, self._sync_modify_stop, order_id, new_stop_price, symbol
+        )
+
+    def _sync_modify_stop(self, order_id: int, new_stop_price: float, symbol: str) -> bool:
+        try:
+            import asyncio as _asyncio  # noqa: PLC0415
+            future = _asyncio.run_coroutine_threadsafe(
+                self._async_modify_stop(order_id, new_stop_price, symbol), self._loop
+            )
+            return future.result(timeout=10)
+        except Exception as exc:
+            logger.warning("modify_stop order_id=%s symbol=%s: %s", order_id, symbol, exc)
+            return False
+
+    async def _async_modify_stop(self, order_id: int, new_stop_price: float, symbol: str) -> bool:
+        _TERMINAL = {"Filled", "Cancelled", "Inactive", "ApiCancelled"}
+        trade = next((t for t in self._ib.trades() if t.order.orderId == order_id), None)
+        if trade is None:
+            logger.debug("modify_stop: order_id=%s non trovato in trades()", order_id)
+            return False
+        if trade.orderStatus.status in _TERMINAL:
+            logger.debug(
+                "modify_stop: order_id=%s già in stato terminale %s — skip",
+                order_id, trade.orderStatus.status,
+            )
+            return False
+
+        def _tick(price: float) -> float:
+            return round(round(price / 0.01) * 0.01, 2)
+
+        trade.order.auxPrice = _tick(new_stop_price)
+        self._ib.placeOrder(trade.contract, trade.order)
+        await asyncio.sleep(0.5)
+        logger.info(
+            "modify_stop: order_id=%s symbol=%s → new_stop=%.4f",
+            order_id, symbol, new_stop_price,
+        )
+        return True
+
     async def place_tp_sl_standalone(
         self,
         symbol: str,
@@ -1267,7 +1446,7 @@ class TWSService:
         """
         if not self._ensure_started() or self._ib is None:
             return {"error": "TWS non connesso"}
-        return await asyncio.get_event_loop().run_in_executor(
+        return await asyncio.get_running_loop().run_in_executor(
             None, self._sync_place_tp_sl_standalone,
             symbol, close_action, quantity,
             stop_price, take_profit_price, exchange, currency,
@@ -1306,7 +1485,7 @@ class TWSService:
         contract = ibi.Stock(symbol, exchange, currency)
         accounts = self._ib.managedAccounts()
         account = accounts[0] if accounts else ""
-        oca_group = f"RESIZE_{symbol}_{int(_time.time())}"
+        oca_group = f"RESIZE_{symbol}_{int(_time.time() * 1000)}"
 
         sl_order = ibi.StopOrder(
             action=close_action.upper(),
@@ -1367,7 +1546,7 @@ class TWSService:
         """
         if not self._ensure_started() or self._ib is None:
             return {"error": "TWS non connesso"}
-        return await asyncio.get_event_loop().run_in_executor(
+        return await asyncio.get_running_loop().run_in_executor(
             None, self._sync_place_market_close, symbol, action, quantity, exchange, currency
         )
 
@@ -1395,7 +1574,7 @@ class TWSService:
         account = accounts[0] if accounts else ""
 
         mkt_order = ibi.MarketOrder(action=action.upper(), totalQuantity=quantity)
-        mkt_order.tif = "GTC"
+        mkt_order.tif = "DAY"
         mkt_order.account = account
 
         trade = self._ib.placeOrder(contract, mkt_order)
@@ -1422,7 +1601,7 @@ class TWSService:
         """
         if not self._ensure_started() or self._ib is None:
             return []
-        return await asyncio.get_event_loop().run_in_executor(
+        return await asyncio.get_running_loop().run_in_executor(
             None, self._sync_filled_stop_trades
         )
 
@@ -1467,6 +1646,66 @@ class TWSService:
                 "get_filled_stop_trades: symbol=%s order_id=%s fill_price=%.4f fill_time=%s",
                 trade.contract.symbol, trade.order.orderId,
                 fill.execution.avgPrice, fill_time,
+            )
+        return results
+
+    async def get_filled_lmt_trades(self) -> list[dict]:
+        """
+        Restituisce i fill degli ordini LMT (limit) completati nella sessione TWS corrente.
+
+        Usato da poll_and_record_tp_fills per rilevare take profit eseguiti e calcolare
+        realized_R. Il matching con il record DB avviene tramite tp_order_id / tp2_order_id.
+
+        Nota: include anche gli entry order LMT già fillati — il filtro per tp_order_id
+        avviene nel layer chiamante (auto_execute_service).
+        """
+        if not self._ensure_started() or self._ib is None:
+            return []
+        return await asyncio.get_running_loop().run_in_executor(
+            None, self._sync_filled_lmt_trades
+        )
+
+    def _sync_filled_lmt_trades(self) -> list[dict]:
+        try:
+            import asyncio as _asyncio  # noqa: PLC0415
+            future = _asyncio.run_coroutine_threadsafe(
+                self._async_filled_lmt_trades(), self._loop
+            )
+            return future.result(timeout=10)
+        except Exception as exc:
+            logger.warning("get_filled_lmt_trades: %s", exc)
+            return []
+
+    async def _async_filled_lmt_trades(self) -> list[dict]:
+        results = []
+        for trade in self._ib.trades():
+            if (
+                trade.order.orderType not in ("LMT", "MKT")
+                or trade.orderStatus.status != "Filled"
+                or not trade.fills
+            ):
+                continue
+            fill = trade.fills[-1]
+            try:
+                import datetime as _dt  # noqa: PLC0415
+                if isinstance(fill.time, _dt.datetime):
+                    ft: _dt.datetime = fill.time
+                else:
+                    ft = _dt.datetime.fromisoformat(str(fill.time))
+            except Exception:
+                ft = None
+            results.append({
+                "order_id": int(trade.order.orderId),
+                "symbol": trade.contract.symbol,
+                "fill_price": float(fill.execution.avgPrice),
+                "fill_time": ft,
+                "qty_filled": float(fill.execution.shares),
+                "order_type": trade.order.orderType,
+            })
+            logger.debug(
+                "get_filled_lmt_trades: symbol=%s order_id=%s fill_price=%.4f fill_time=%s type=%s",
+                trade.contract.symbol, trade.order.orderId,
+                fill.execution.avgPrice, ft, trade.order.orderType,
             )
         return results
 

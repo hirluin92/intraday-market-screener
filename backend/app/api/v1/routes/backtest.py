@@ -27,7 +27,7 @@ from app.schemas.backtest import (
     WalkForwardResponse,
 )
 from app.schemas.timeframe_fields import OptionalAllMarketsTimeframe
-from app.services.backtest_simulation import run_backtest_simulation
+from app.services.simulation_service import run_backtest_simulation
 from app.services.pattern_backtest import run_pattern_backtest
 from app.services.trade_plan_backtest import run_trade_plan_backtest
 from app.services.trade_plan_variant_backtest import run_trade_plan_variant_backtest

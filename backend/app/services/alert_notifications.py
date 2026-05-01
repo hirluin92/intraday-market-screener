@@ -17,13 +17,20 @@ Canali: Discord webhook e/o Telegram (variabili d'ambiente). Dedupe su DB per
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from decimal import Decimal
 from urllib.parse import quote
 
-import httpx
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.alert_channels import (
+    _channels_configured,
+    _discord_configured,
+    _telegram_configured,
+    send_discord as _send_discord,
+    send_telegram as _send_telegram,
+)
 from app.core.config import settings
 from app.models.alert_notification_sent import AlertNotificationSent
 
@@ -40,10 +47,6 @@ MEDIA_ALERT_LEVEL = "media_priorita"
 
 # Max righe opportunità considerate in un refresh globale (post-ordinamento score).
 GLOBAL_NOTIFY_OPPORTUNITIES_LIMIT = 1000
-
-DISCORD_CONTENT_MAX = 1900
-TELEGRAM_TEXT_MAX = 4000
-
 
 def _notification_eligible_for_outbound(opp: OpportunityRow) -> bool:
     """Solo gating invio: alta_priorita e opzionalmente media_priorita (env)."""
@@ -158,26 +161,6 @@ def _format_message(opp: OpportunityRow) -> str:
     return "\n".join(lines)
 
 
-def _truncate(text: str, max_len: int) -> str:
-    if len(text) <= max_len:
-        return text
-    return text[: max_len - 20] + "\n… (troncato)"
-
-
-def _channels_configured() -> bool:
-    return bool(settings.discord_webhook_url.strip()) or (
-        bool(settings.telegram_bot_token.strip()) and bool(settings.telegram_chat_id.strip())
-    )
-
-
-def _discord_configured() -> bool:
-    return bool(settings.discord_webhook_url.strip())
-
-
-def _telegram_configured() -> bool:
-    return bool(settings.telegram_bot_token.strip()) and bool(settings.telegram_chat_id.strip())
-
-
 async def _try_claim_notification(
     session: AsyncSession,
     *,
@@ -217,78 +200,30 @@ async def _try_claim_notification(
         return True
 
 
-def _response_body_snippet(response: httpx.Response | None, max_len: int = 500) -> str:
-    if response is None:
-        return ""
-    try:
-        t = (response.text or "").strip()
-    except Exception:
-        return "(body unreadable)"
-    if len(t) <= max_len:
-        return t
-    return t[: max_len - 3] + "..."
+async def send_system_alert(message: str) -> None:
+    """
+    Invia un alert di sistema (non di mercato) su tutti i canali configurati.
 
+    Aggiunge il prefisso ``🚨 SYSTEM:`` per distinguerlo visivamente dai segnali di trading.
+    Non richiede una sessione DB, non ha dedupe, non rispetta ``alert_notifications_enabled``
+    (i problemi di sistema vanno notificati anche se le alert di mercato sono disabilitate).
 
-async def _send_discord(text: str) -> bool:
-    url = settings.discord_webhook_url.strip()
-    if not url:
-        logger.info("alert_notifications: notification attempt skipped (Discord webhook not configured)")
-        return True
-    payload = {"content": _truncate(text, DISCORD_CONTENT_MAX)}
-    logger.info("alert_notifications: notification attempt (Discord webhook)")
-    try:
-        async with httpx.AsyncClient(timeout=20.0) as client:
-            r = await client.post(url, json=payload)
-            r.raise_for_status()
-        logger.info(
-            "alert_notifications: notification success (Discord) http_status=%s",
-            r.status_code,
-        )
-        return True
-    except httpx.HTTPStatusError as e:
-        snippet = _response_body_snippet(e.response)
+    Uso tipico: skip operativi critici in auto_execute_service (es. NetLiquidation non disponibile).
+    """
+    if not _channels_configured():
+        logger.warning("send_system_alert: nessun canale configurato — messaggio non inviato: %s", message)
+        return
+
+    text = f"🚨 SYSTEM: {message}"
+    logger.warning("send_system_alert: %s", message)
+    ok_discord = await _send_discord(text)
+    ok_telegram = await _send_telegram(text)
+    if not ok_discord or not ok_telegram:
         logger.error(
-            "alert_notifications: notification failed (Discord) http_status=%s body=%s",
-            e.response.status_code,
-            snippet or "(empty)",
+            "send_system_alert: invio fallito su uno o più canali discord_ok=%s telegram_ok=%s",
+            ok_discord,
+            ok_telegram,
         )
-        return False
-    except httpx.RequestError as e:
-        logger.error("alert_notifications: notification failed (Discord) request_error=%s", e)
-        return False
-
-
-async def _send_telegram(text: str) -> bool:
-    token = settings.telegram_bot_token.strip()
-    chat = settings.telegram_chat_id.strip()
-    if not token or not chat:
-        logger.info(
-            "alert_notifications: notification attempt skipped (Telegram bot token or chat id not configured)",
-        )
-        return True
-    api = f"https://api.telegram.org/bot{token}/sendMessage"
-    payload = {"chat_id": chat, "text": _truncate(text, TELEGRAM_TEXT_MAX)}
-    logger.info("alert_notifications: notification attempt (Telegram sendMessage)")
-    try:
-        async with httpx.AsyncClient(timeout=20.0) as client:
-            r = await client.post(api, json=payload)
-            r.raise_for_status()
-        logger.info(
-            "alert_notifications: notification success (Telegram) http_status=%s",
-            r.status_code,
-        )
-        return True
-    except httpx.HTTPStatusError as e:
-        snippet = _response_body_snippet(e.response)
-        logger.error(
-            "alert_notifications: notification failed (Telegram) http_status=%s body=%s",
-            e.response.status_code,
-            snippet or "(empty)",
-        )
-        return False
-    except httpx.RequestError as e:
-        logger.error("alert_notifications: notification failed (Telegram) request_error=%s", e)
-        return False
 
 
 async def maybe_notify_after_pipeline_refresh(
@@ -352,6 +287,7 @@ async def _notify_targeted_pipeline(
         session,
         symbol=body.symbol,
         exchange=body.exchange,
+        provider=body.provider,
         timeframe=body.timeframe,
         limit=1,
     )
@@ -575,3 +511,139 @@ async def _notify_global_pipeline(
         skipped_dedupe,
         failed_send,
     )
+
+
+# ── Order execution and trade close notifications ─────────────────────────────
+
+def _format_trade_duration(executed_at: datetime, closed_at: datetime) -> str:
+    try:
+        delta = closed_at - executed_at
+        total_s = int(delta.total_seconds())
+        if total_s < 0:
+            return "—"
+        d, rem = divmod(total_s, 86400)
+        h, rem = divmod(rem, 3600)
+        m = rem // 60
+        if d > 0:
+            return f"{d}d {h}h {m}m"
+        if h > 0:
+            return f"{h}h {m}m"
+        return f"{m}m"
+    except Exception:
+        return "—"
+
+
+async def send_order_executed_notification(
+    *,
+    symbol: str,
+    timeframe: str,
+    direction: str,
+    entry_price: float,
+    stop_price: float,
+    take_profit_price: float,
+    size: float,
+    capital: float,
+) -> None:
+    """
+    Invia notifica su tutti i canali configurati quando un bracket order
+    viene confermato da TWS (tws_status=submitted).
+    Chiamato da auto_execute_service._execute_and_save() solo quando executed_ok=True.
+    """
+    if not _channels_configured():
+        return
+
+    dir_arrow = "▲" if (direction or "").lower() == "bullish" else "▼"
+    dir_label = "LONG" if (direction or "").lower() == "bullish" else "SHORT"
+    stop_dist = abs(entry_price - stop_price)
+    tp_dist   = abs(take_profit_price - entry_price)
+    rr        = round(tp_dist / stop_dist, 2) if stop_dist > 1e-10 else 0.0
+    risk_usd  = round(size * stop_dist, 2) if size > 0 else 0.0
+    risk_pct  = round(risk_usd / capital * 100, 2) if capital > 0 else 0.0
+
+    from datetime import datetime as _dt, timezone  # noqa: PLC0415
+    ts_str = _dt.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+    text = "\n".join([
+        f"🟢 ORDINE ESEGUITO — {symbol} {timeframe}",
+        f"{dir_arrow} {dir_label}  (entry LIMIT)",
+        "",
+        f"Entry:    ${entry_price:.2f}",
+        f"Stop:     ${stop_price:.2f}  (−${stop_dist:.2f}/az)",
+        f"TP1:      ${take_profit_price:.2f}  (+${tp_dist:.2f}/az)",
+        f"Qty:      {size:.1f} az  |  R/R 1:{rr}",
+        f"Rischio:  ${risk_usd:.2f}  ({risk_pct:.2f}% cap)",
+        f"Capitale: ${capital:,.0f}",
+        "",
+        f"⏰ {ts_str}",
+    ])
+
+    logger.info(
+        "send_order_executed_notification: symbol=%s tf=%s dir=%s size=%.1f",
+        symbol, timeframe, direction, size,
+    )
+    await _send_discord(text)
+    await _send_telegram(text)
+
+
+async def send_trade_closed_notification(
+    *,
+    symbol: str,
+    direction: str,
+    entry_price: float,
+    stop_price: float,
+    close_fill_price: float,
+    realized_r: float,
+    close_outcome: str,
+    close_cause: str,
+    executed_at: datetime,
+    closed_at: datetime,
+    qty: float = 0.0,
+) -> None:
+    """
+    Invia notifica su tutti i canali configurati quando un trade si chiude
+    (stop loss, take profit, timeout).
+    Chiamato da poll_and_record_stop_fills() e poll_and_record_tp_fills()
+    solo dopo commit DB riuscito.
+    """
+    if not _channels_configured():
+        return
+
+    dir_arrow = "▲" if (direction or "").lower() == "bullish" else "▼"
+    dir_label = "LONG" if (direction or "").lower() == "bullish" else "SHORT"
+    is_win    = realized_r > 0
+    emoji     = "🟢" if is_win else "🔴"
+
+    outcome_labels = {"tp1": "TP1 ✓", "tp2": "TP2 ✓", "stop": "SL ✗", "timeout": "Timeout"}
+    outcome_label  = outcome_labels.get(close_outcome, close_outcome)
+    gap_note = "  (gap notturno ⚠)" if close_cause == "overnight_gap" else ""
+
+    risk = abs(entry_price - stop_price)
+    if qty > 0 and risk > 1e-10:
+        pnl_val = realized_r * risk * qty
+        sign = "+" if pnl_val >= 0 else ""
+        rsign = "+" if realized_r >= 0 else ""
+        pnl_str = f"{sign}${pnl_val:,.2f}  ({rsign}{realized_r:.2f}R)"
+    else:
+        rsign = "+" if realized_r >= 0 else ""
+        pnl_str = f"{rsign}{realized_r:.2f}R"
+
+    duration = _format_trade_duration(executed_at, closed_at)
+    ts_str   = closed_at.strftime("%Y-%m-%d %H:%M:%S UTC")
+
+    text = "\n".join([
+        f"{emoji} TRADE CHIUSO — {symbol}",
+        f"{dir_arrow} {dir_label} → {outcome_label}{gap_note}",
+        "",
+        f"Entry:   ${entry_price:.2f}  →  Exit: ${close_fill_price:.2f}",
+        f"P&L:     {pnl_str}",
+        f"Durata:  {duration}",
+        "",
+        f"⏰ {ts_str}",
+    ])
+
+    logger.info(
+        "send_trade_closed_notification: symbol=%s outcome=%s realized_r=%.2f cause=%s",
+        symbol, close_outcome, realized_r, close_cause,
+    )
+    await _send_discord(text)
+    await _send_telegram(text)

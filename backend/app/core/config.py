@@ -30,7 +30,41 @@ class Settings(BaseSettings):
         default=300,
         ge=1,
         le=86400,
-        description="How often to run the full ingest→extract pipeline for each configured pair.",
+        description="How often to run the full ingest→extract pipeline for each configured pair. Ignored when pipeline_scheduler_align_to_5m=true.",
+    )
+    pipeline_scheduler_align_to_5m: bool = Field(
+        default=False,
+        description=(
+            "Se True, usa un trigger cron allineato alle chiusure delle candele 5m "
+            "(XX:00:10, XX:05:10, ..., XX:55:10) invece del polling ogni N secondi. "
+            "Riduce la latenza media da ~150s a ~10s per i segnali 5m e 1h. "
+            "I simboli 1h saltano l'extraction 11/12 cicli grazie a skip_if_unchanged "
+            "(nessuna candela nuova fuori dai boundary dell'ora) — carico DB invariato. "
+            "Richiede ALPACA_ENABLED=true e/o TWS_ENABLED=true per dati 5m real-time."
+        ),
+    )
+    pipeline_scheduler_cron_offset_s: int = Field(
+        default=10,
+        ge=0,
+        le=59,
+        description=(
+            "Secondi di attesa dopo il boundary 5m prima di avviare il ciclo pipeline "
+            "(buffer per ricezione dati dal provider). "
+            "Default 10s: sufficiente per IBKR TWS e Alpaca REST (dati disponibili <5s dalla chiusura). "
+            "Usato in modalità unified (align_to_5m=true) e split."
+        ),
+    )
+    pipeline_scheduler_mode: str = Field(
+        default="unified",
+        description=(
+            "Modalità scheduler pipeline: "
+            "'unified' = un solo job APScheduler per tutti i simboli (cron o interval); "
+            "'split' = due job separati: 'pipeline_1h' (cron XX:01:00, timeframe 1h+1d) e "
+            "'pipeline_5m' (cron XX:00:10…XX:55:10, timeframe 5m). "
+            "In split mode il parallelismo è 6 per ciclo (vs 12 in unified) per non saturare "
+            "il pool DB se i due cicli si sovrappongono (~50s di finestra a ogni ora). "
+            "Richiede ALPACA_ENABLED=true o TWS_ENABLED=true per dati 5m real-time."
+        ),
     )
     pipeline_scheduler_source: str = Field(
         default="explicit",
@@ -103,12 +137,23 @@ class Settings(BaseSettings):
     )
 
     opportunity_lookup_cache_ttl_seconds: int = Field(
-        default=300,
+        default=600,
         ge=30,
         le=86_400,
         description=(
-            "TTL secondi per cache in-memory dei lookup backtest on-demand "
-            "(pattern quality, trade plan backtest, variant best) usati da GET opportunities."
+            "TTL secondi per pattern_quality_cache (invalidata dopo ogni pipeline refresh). "
+            "Usato anche come fallback se backtest_cache_ttl_seconds non è impostato."
+        ),
+    )
+
+    backtest_cache_ttl_seconds: int = Field(
+        default=3600,
+        ge=300,
+        le=86_400,
+        description=(
+            "TTL secondi per trade_plan_backtest_cache e variant_best_cache. "
+            "Questi lookup sono storici (2+ anni di dati) e non cambiano con nuovi candle: "
+            "TTL lungo evita ricalcoli bloccanti (~70s+20s) ad ogni ciclo pipeline."
         ),
     )
 
@@ -119,6 +164,16 @@ class Settings(BaseSettings):
         description=(
             "Soglia % di distanza prezzo vs entry: oltre questa soglia un execute "
             "viene declassato a monitor (ultimo close candela nel DB)."
+        ),
+    )
+
+    equity_provider_1h: str = Field(
+        default="ibkr",
+        description=(
+            "Provider per l'ingestione candele 1h dei 40 simboli azionari USA: "
+            "'ibkr' (default) = IBKR TWS reqHistoricalData (abbonamenti NASDAQ/NYSE/ARCA richiesti); "
+            "'yahoo_finance' = fallback yfinance (soggetto a timeout sistematici). "
+            "Non influenza Binance (crypto) né Alpaca (5m azionari)."
         ),
     )
 
@@ -184,6 +239,16 @@ class Settings(BaseSettings):
         default=True,
         description="Se true, non inviare alert se la direzione non è allineata al regime daily (SPY su Yahoo, BTC/USDT su Binance).",
     )
+    notify_order_events_enabled: bool = Field(
+        default=True,
+        description=(
+            "Se True, invia notifica Telegram/Discord quando un bracket order viene confermato "
+            "da TWS (tws_status=submitted) e quando un trade si chiude (stop/TP/timeout). "
+            "Indipendente da alert_pattern_signals_enabled — per ricevere solo notifiche ordini "
+            "impostare ALERT_PATTERN_SIGNALS_ENABLED=false e NOTIFY_ORDER_EVENTS_ENABLED=true. "
+            "Richiede almeno un canale configurato (DISCORD_WEBHOOK_URL o TELEGRAM_*)."
+        ),
+    )
 
     # IBKR Client Portal Gateway (localhost) — esecuzione ordini
     ibkr_enabled: bool = Field(
@@ -225,7 +290,19 @@ class Settings(BaseSettings):
         default=0.5,
         ge=0.01,
         le=100.0,
-        description="Rischio massimo per trade come % del capitale allocato (position sizing).",
+        description="Rischio massimo per trade come % del capitale allocato (position sizing). Usato come fallback se ibkr_risk_pct_1h/5m non impostati.",
+    )
+    ibkr_risk_pct_1h: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=100.0,
+        description="Risk % per trade 1h. Se > 0 sovrascrive ibkr_max_risk_per_trade_pct per i segnali 1h. 0 = usa il valore base.",
+    )
+    ibkr_risk_pct_5m: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=100.0,
+        description="Risk % per trade 5m. Se > 0 sovrascrive ibkr_max_risk_per_trade_pct per i segnali 5m. 0 = usa il valore base.",
     )
     ibkr_max_capital: float = Field(
         default=2269.0,
@@ -233,10 +310,39 @@ class Settings(BaseSettings):
         description="Capitale massimo (notional) da usare per sizing IBKR.",
     )
     ibkr_max_simultaneous_positions: int = Field(
+        default=5,
+        ge=1,
+        le=100,
+        description=(
+            "Massimo posizioni totali aperte contemporanee (cap globale). "
+            "Con slot separation (ibkr_slots_1h + ibkr_slots_5m), il totale e' sempre <= questo valore."
+        ),
+    )
+    ibkr_slots_1h: int = Field(
         default=3,
         ge=1,
-        le=20,
-        description="Massimo posizioni aperte contemporanee (allineato a max_simultaneous backtest).",
+        le=5,
+        description=(
+            "Slot dedicati ai trade 1h (Strategy E: slot separation 3+2). "
+            "Il 1h puo' usare slot 5m se i suoi 3 sono pieni e quelli 5m sono liberi. "
+            "Il 5m NON puo' usare slot 1h."
+        ),
+    )
+    ibkr_slots_5m: int = Field(
+        default=2,
+        ge=1,
+        le=5,
+        description=(
+            "Slot dedicati ai trade 5m (Strategy E: slot separation 3+2). "
+            "Il 1h puo' prenderli in prestito se i suoi 3 slot sono pieni."
+        ),
+    )
+    eod_close_enabled: bool = Field(
+        default=True,
+        description=(
+            "Se True, il job APScheduler chiude tutte le posizioni aperte e cancella "
+            "gli ordini pendenti alle 15:55 ET (lun–ven). Richiede TWS_ENABLED=true."
+        ),
     )
     ibkr_max_spread_pct: float = Field(
         default=0.5,
@@ -279,6 +385,36 @@ class Settings(BaseSettings):
         ),
     )
 
+    # ── Auto-execute: timeframe e provider operativi ──────────────────────────
+    # Separatore: virgola. Default conservativo: solo 1h (validato da Strada A).
+    # 5m è esplicitamente escluso finché non esiste un validation set 5m con
+    # metriche WR e avg_R misurate out-of-sample, analogo a quello 1h esistente.
+    auto_execute_timeframes_enabled: str = Field(
+        default="1h",
+        description=(
+            "Timeframe abilitati per auto-execute (comma-separated). "
+            "Default: '1h' (validato empiricamente da Strada A). "
+            "5m escluso di default: nessun dataset OOS disponibile. "
+            "Aggiungere '5m' solo dopo aver costruito e validato un dataset 5m."
+        ),
+    )
+    auto_execute_providers_enabled: str = Field(
+        default="yahoo_finance,binance",
+        description=(
+            "Provider abilitati per auto-execute (comma-separated). "
+            "Default: 'yahoo_finance,binance'. "
+            "Rimuovere 'binance' se non si vuole eseguire automaticamente crypto."
+        ),
+    )
+
+    @property
+    def auto_execute_timeframes_list(self) -> list[str]:
+        return [x.strip() for x in self.auto_execute_timeframes_enabled.split(",") if x.strip()]
+
+    @property
+    def auto_execute_providers_list(self) -> list[str]:
+        return [x.strip() for x in self.auto_execute_providers_enabled.split(",") if x.strip()]
+
     # ── Alpaca Markets (storico 5m US stocks) ─────────────────────────────────
     alpaca_enabled: bool = Field(
         default=False,
@@ -317,6 +453,27 @@ class Settings(BaseSettings):
         ge=1,
         le=5,
         description="Anni di storico da backfillare con Alpaca (endpoint /backtest/alpaca-backfill).",
+    )
+
+    # ── Mercato UK (London Stock Exchange) — sperimentale ────────────────────
+    # Fase 1 di 3: flag di configurazione. Scheduler e validator UK non ancora
+    # estesi (Fase 2). Auto-execute UK disabilitato di default anche se enable_uk=True.
+    enable_uk_market: bool = Field(
+        default=False,
+        description=(
+            "Abilita il supporto al mercato UK (London Stock Exchange). "
+            "Default False: lo scheduler non ingesta simboli LSE finché non impostato True. "
+            "Richiede abbonamento IBKR 'London Stock Exchange UK Bundle'."
+        ),
+    )
+    uk_auto_execute_enabled: bool = Field(
+        default=False,
+        description=(
+            "Abilita auto-execute su simboli UK (GBP, LSE). "
+            "Disabilitato di default anche se enable_uk_market=True: Strada A non ancora "
+            "validata su dataset UK. Abilitare solo dopo raccolta 3-6 mesi di dati UK e "
+            "validazione OOS dedicata."
+        ),
     )
 
     # ── ML Signal Scorer ──────────────────────────────────────────────────────

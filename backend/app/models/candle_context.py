@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Index, String, UniqueConstraint, text
+from sqlalchemy import DateTime, Index, PrimaryKeyConstraint, String, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql import func
@@ -13,15 +13,16 @@ class CandleContext(Base):
 
     __tablename__ = "candle_contexts"
     __table_args__ = (
-        UniqueConstraint("candle_feature_id", name="uq_candle_contexts_candle_feature_id"),
+        PrimaryKeyConstraint("id", "timestamp", name="pk_candle_contexts"),
+        # FK non dichiarate: TimescaleDB non supporta FK tra hypertables.
+        UniqueConstraint("candle_feature_id", "timestamp", name="uq_candle_contexts_feature_id_ts"),
         Index("ix_candle_contexts_exchange_symbol_timeframe_ts", "exchange", "symbol", "timeframe", "timestamp"),
+        Index("ix_candle_contexts_provider_ts_id", "provider", "timestamp", "id", postgresql_ops={"timestamp": "DESC", "id": "DESC"}),
+        Index("ix_candle_contexts_ts_id", "timestamp", "id", postgresql_ops={"timestamp": "DESC", "id": "DESC"}),
     )
 
-    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    candle_feature_id: Mapped[int] = mapped_column(
-        ForeignKey("candle_features.id", ondelete="CASCADE"),
-        nullable=False,
-    )
+    id: Mapped[int] = mapped_column(autoincrement=True)
+    candle_feature_id: Mapped[int] = mapped_column(nullable=False)
     asset_type: Mapped[str] = mapped_column(
         String(16),
         nullable=False,

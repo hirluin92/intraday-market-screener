@@ -16,7 +16,7 @@ from app.schemas.patterns import PatternExtractResponse
 class PipelineRefreshRequest(BaseModel):
     """Run ingest → features → indicators → context → patterns with the same optional series filters."""
 
-    provider: Literal["binance", "yahoo_finance", "alpaca"] = Field(
+    provider: Literal["binance", "yahoo_finance", "alpaca", "ibkr"] = Field(
         default="binance",
         description="binance: ccxt ingest. yahoo_finance: yfinance US equities/ETFs. alpaca: Alpaca Data API v2 (US stocks, storico 5m lungo).",
     )
@@ -50,13 +50,22 @@ class PipelineRefreshRequest(BaseModel):
         le=200,
         description="Finestra rolling context (barre). 50 più stabile di 20 su TF lunghi.",
     )
+    skip_if_unchanged: bool = Field(
+        default=False,
+        description=(
+            "Se True, salta tutte le fasi di extraction quando l'ingest non produce nuove candele "
+            "(rows_inserted == 0). Ideale per i job dello scheduler: evita rielaborazione inutile "
+            "durante mercato chiuso o refresh infra-minuto."
+        ),
+    )
 
     @model_validator(mode="after")
     def _default_exchange_and_timeframe(self) -> Self:
         if self.exchange is None or (
             isinstance(self.exchange, str) and not self.exchange.strip()
         ):
-            if self.provider == "yahoo_finance":
+            if self.provider in ("yahoo_finance", "ibkr"):
+                # ibkr salva su YAHOO_US: exchange default allineato per la fase di extract.
                 self.exchange = YAHOO_VENUE_LABEL
             elif self.provider == "alpaca":
                 self.exchange = ALPACA_VENUE_LABEL
@@ -72,3 +81,7 @@ class PipelineRefreshResponse(BaseModel):
     indicators: IndicatorExtractResponse
     context: ContextExtractResponse
     patterns: PatternExtractResponse
+    extraction_skipped: bool = Field(
+        default=False,
+        description="True se l'extraction è stata saltata perché rows_inserted==0 e skip_if_unchanged==True.",
+    )

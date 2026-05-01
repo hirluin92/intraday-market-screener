@@ -28,7 +28,7 @@ def _f(x: Any) -> float:
     return float(x)
 
 
-_UPSERT_CHUNK_SIZE = 500
+_UPSERT_CHUNK_SIZE = 2_000
 
 
 async def _chunked_upsert_contexts(
@@ -44,7 +44,7 @@ async def _chunked_upsert_contexts(
         stmt_ins = insert(CandleContext).values(chunk)
         excluded = stmt_ins.excluded
         stmt_ins = stmt_ins.on_conflict_do_update(
-            constraint="uq_candle_contexts_candle_feature_id",
+            constraint="uq_candle_contexts_feature_id_ts",
             set_={
                 "asset_type": excluded.asset_type,
                 "provider": excluded.provider,

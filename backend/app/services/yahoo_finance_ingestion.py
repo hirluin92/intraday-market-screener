@@ -73,7 +73,12 @@ def _history_sync(ticker: str, yf_interval: str, period: str) -> Any:
     return t.history(period=period, interval=yf_interval, auto_adjust=False)
 
 
-_UPSERT_CHUNK_SIZE = 500
+_UPSERT_CHUNK_SIZE = 2_000
+# Fetch concorrenti verso Yahoo Finance (thread pool via asyncio.to_thread)
+_FETCH_CONCURRENCY: int = 5
+# Retry su errori di rete transienti (già gestiti da with_retry, ma il semaforo
+# conta il tentativo completo inclusi i retry interni)
+_FETCH_MAX_RETRIES: int = 3
 
 
 async def _chunked_upsert_candles(
@@ -129,108 +134,146 @@ class YahooFinanceIngestionService:
 
         candles_received = 0
         incomplete_candles_dropped = 0
-        rows: list[dict[str, Any]] = []
 
-        for symbol in symbols:
+        # Fetch parallelo di tutte le coppie (symbol, tf) con semaforo.
+        # asyncio.to_thread esegue _history_sync nel thread pool di Python:
+        # con _FETCH_CONCURRENCY=5 girano 5 thread contemporaneamente senza
+        # saturare il rate limit di Yahoo Finance.
+        semaphore = asyncio.Semaphore(_FETCH_CONCURRENCY)
+
+        async def _fetch_one(symbol: str, tf: str) -> tuple[str, str, Any]:
+            if tf in _SHORT_TF_YAHOO:
+                yf_interval = tf
+                period = _max_period_for_timeframe(tf)
+            else:
+                yf_interval, period = _YAHOO_TF_PARAMS[tf]
+            try:
+                df = await with_retry(
+                    lambda s=symbol, i=yf_interval, p=period: asyncio.to_thread(
+                        _history_sync, s, i, p
+                    ),
+                    label=f"yahoo_finance.history({symbol},{tf})",
+                    max_attempts=_FETCH_MAX_RETRIES,
+                )
+            except Exception:
+                logger.exception(
+                    "yahoo_finance: fetch failed definitivamente symbol=%s timeframe=%s",
+                    symbol,
+                    tf,
+                )
+                return symbol, tf, None
+            return symbol, tf, df
+
+        async def _fetch_one_throttled(symbol: str, tf: str) -> tuple[str, str, Any]:
+            async with semaphore:
+                return await _fetch_one(symbol, tf)
+
+        tasks = [
+            _fetch_one_throttled(symbol, tf)
+            for symbol in symbols
+            for tf in timeframes
+        ]
+        logger.info(
+            "yahoo_finance: avvio fetch parallelo %d task (concurrency=%d)",
+            len(tasks),
+            _FETCH_CONCURRENCY,
+        )
+        fetch_results: list[tuple[str, str, Any]] = await asyncio.gather(*tasks)
+
+        # Elaborazione risultati (sequenziale — solo CPU, nessuna I/O)
+        rows: list[dict[str, Any]] = []
+        for symbol, tf, df in fetch_results:
+            if df is None or df.empty:
+                logger.warning("yahoo_finance: empty history symbol=%s timeframe=%s", symbol, tf)
+                continue
+
             asset_type = YAHOO_SYMBOL_ASSET_TYPE[symbol]
-            for tf in timeframes:
-                if tf in _SHORT_TF_YAHOO:
-                    yf_interval = tf
-                    period = _max_period_for_timeframe(tf)
-                else:
-                    yf_interval, period = _YAHOO_TF_PARAMS[tf]
-                try:
-                    df = await with_retry(
-                        lambda s=symbol, i=yf_interval, p=period: asyncio.to_thread(
-                            _history_sync, s, i, p
-                        ),
-                        label=f"yahoo_finance.history({symbol},{tf})",
-                        max_attempts=3,
-                    )
-                except Exception:
-                    logger.exception(
-                        "yahoo_finance: fetch failed definitivamente symbol=%s timeframe=%s",
+            if tf in _SHORT_TF_YAHOO:
+                yf_interval = tf
+                period = _max_period_for_timeframe(tf)
+            else:
+                yf_interval, period = _YAHOO_TF_PARAMS[tf]
+
+            # Indice barra: Yahoo US spesso senza tz → assumiamo America/New_York poi UTC.
+            df = df.sort_index()
+            if df.index.tz is None:
+                df.index = df.index.tz_localize("America/New_York", ambiguous="infer")
+            df.index = df.index.tz_convert("UTC")
+
+            # Fix apr 2026: per barre 1h US equity, Yahoo Finance restituisce durante
+            # i refresh intraday sia la barra chiusa (:30 UTC, volume pieno) sia una
+            # barra parziale (:00 UTC, volume 10-100x inferiore). Le barre NYSE reali
+            # iniziano sempre alle :30 ET → :30 UTC in ogni stagione (EST e EDT).
+            # Filtriamo tenendo solo minute=30 per evitare contaminazione dei pattern.
+            if tf == "1h":
+                df = df[df.index.minute == 30]
+
+            if (
+                request.limit
+                and tf not in _SHORT_TF_YAHOO
+                and len(df) > request.limit
+            ):
+                df = df.tail(request.limit)
+
+            # Ultima barra spesso ancora in formazione → stesso criterio del path Binance.
+            if len(df) < 2:
+                continue
+            df = df.iloc[:-1]
+            incomplete_candles_dropped += 1
+
+            if df.empty:
+                continue
+
+            last_ts: datetime | None = None
+            for ts, row in df.iterrows():
+                tsp = pd.Timestamp(ts)
+                ts_utc = tsp.to_pydatetime()
+                if ts_utc.tzinfo is None:
+                    ts_utc = ts_utc.replace(tzinfo=UTC)
+                if last_ts is not None and ts_utc <= last_ts:
+                    logger.warning(
+                        "yahoo_finance: non-increasing ts symbol=%s tf=%s ts=%s",
                         symbol,
                         tf,
+                        ts_utc,
                     )
-                    raise
-
-                if df is None or df.empty:
-                    logger.warning("yahoo_finance: empty history symbol=%s timeframe=%s", symbol, tf)
                     continue
+                last_ts = ts_utc
 
-                # Indice barra: Yahoo US spesso senza tz → assumiamo America/New_York poi UTC.
-                df = df.sort_index()
-                if df.index.tz is None:
-                    df.index = df.index.tz_localize("America/New_York", ambiguous="infer")
-                df.index = df.index.tz_convert("UTC")
+                o = _to_decimal(row["Open"])
+                h = _to_decimal(row["High"])
+                low = _to_decimal(row["Low"])
+                c = _to_decimal(row["Close"])
+                v_raw = row["Volume"] if "Volume" in row.index else None
+                if v_raw is None or pd.isna(v_raw):
+                    vol = Decimal("0")
+                else:
+                    vol = _to_decimal(v_raw)
 
-                if (
-                    request.limit
-                    and tf not in _SHORT_TF_YAHOO
-                    and len(df) > request.limit
-                ):
-                    df = df.tail(request.limit)
+                meta: dict[str, Any] = {
+                    "source": "yahoo_finance",
+                    "yahoo_ticker": symbol,
+                    "yahoo_interval": yf_interval,
+                    "yahoo_period": period,
+                }
 
-                # Ultima barra spesso ancora in formazione → stesso criterio del path Binance.
-                if len(df) < 2:
-                    continue
-                df = df.iloc[:-1]
-                incomplete_candles_dropped += 1
-
-                if df.empty:
-                    continue
-
-                last_ts: datetime | None = None
-                for ts, row in df.iterrows():
-                    tsp = pd.Timestamp(ts)
-                    ts_utc = tsp.to_pydatetime()
-                    if ts_utc.tzinfo is None:
-                        ts_utc = ts_utc.replace(tzinfo=UTC)
-                    if last_ts is not None and ts_utc <= last_ts:
-                        logger.warning(
-                            "yahoo_finance: non-increasing ts symbol=%s tf=%s ts=%s",
-                            symbol,
-                            tf,
-                            ts_utc,
-                        )
-                        continue
-                    last_ts = ts_utc
-
-                    o = _to_decimal(row["Open"])
-                    h = _to_decimal(row["High"])
-                    low = _to_decimal(row["Low"])
-                    c = _to_decimal(row["Close"])
-                    v_raw = row["Volume"] if "Volume" in row.index else None
-                    if v_raw is None or pd.isna(v_raw):
-                        vol = Decimal("0")
-                    else:
-                        vol = _to_decimal(v_raw)
-
-                    meta: dict[str, Any] = {
-                        "source": "yahoo_finance",
-                        "yahoo_ticker": symbol,
-                        "yahoo_interval": yf_interval,
-                        "yahoo_period": period,
+                rows.append(
+                    {
+                        "asset_type": asset_type,
+                        "provider": self.provider_id,
+                        "symbol": symbol,
+                        "exchange": YAHOO_VENUE_LABEL,
+                        "timeframe": tf,
+                        "market_metadata": meta,
+                        "timestamp": ts_utc,
+                        "open": o,
+                        "high": h,
+                        "low": low,
+                        "close": c,
+                        "volume": vol,
                     }
-
-                    rows.append(
-                        {
-                            "asset_type": asset_type,
-                            "provider": self.provider_id,
-                            "symbol": symbol,
-                            "exchange": YAHOO_VENUE_LABEL,
-                            "timeframe": tf,
-                            "market_metadata": meta,
-                            "timestamp": ts_utc,
-                            "open": o,
-                            "high": h,
-                            "low": low,
-                            "close": c,
-                            "volume": vol,
-                        }
-                    )
-                    candles_received += 1
+                )
+                candles_received += 1
 
         rows_inserted = await _chunked_upsert_candles(session, rows)
 

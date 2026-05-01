@@ -23,6 +23,14 @@ from app.models.candle_indicator import CandleIndicator
 REGIME_SYMBOL_BINANCE = "BTC/USDT"
 REGIME_TIMEFRAME_DAILY = "1d"
 
+# Regime anchor UK: ^FTSE (FTSE 100 index via Yahoo Finance) — analogo a SPY per USA.
+# Ticker Yahoo Finance: "^FTSE". Stessa formula EMA50 ±2%.
+# Provider Yahoo Finance (stesso di SPY) — ISF/ISF.GB via IBKR non risolto come
+# contratto Stock da tws_service (richiede secType='ETF' non supportato nel path backfill).
+REGIME_SYMBOL_UK = "^FTSE"
+REGIME_PROVIDER_UK = "yahoo_finance"
+REGIME_EXCHANGE_UK = YAHOO_VENUE_LABEL  # "YAHOO_US"
+
 REGIME_VARIANTS: frozenset[str] = frozenset(
     {"ema50", "ema9_20", "momentum5d", "ema50_rsi"},
 )
@@ -192,7 +200,7 @@ class RegimeFilter:
             return None
         ts = timestamp if timestamp.tzinfo else timestamp.replace(tzinfo=timezone.utc)
         d: date = ts.date()
-        for days_back in range(1, 8):
+        for days_back in range(1, 15):
             check = (d - timedelta(days=days_back)).isoformat()
             if check in self._by_date:
                 return self._by_date[check]
@@ -223,6 +231,14 @@ async def load_regime_filter(
             CandleIndicator.timeframe == REGIME_TIMEFRAME_DAILY,
             CandleIndicator.provider == DEFAULT_PROVIDER_BINANCE,
             CandleIndicator.exchange == DEFAULT_VENUE_BINANCE,
+        ]
+    elif p == "ibkr":
+        # Regime anchor UK: ^FTSE 1d via Yahoo Finance — analogo a SPY per USA.
+        conditions = [
+            CandleIndicator.symbol == REGIME_SYMBOL_UK,
+            CandleIndicator.timeframe == REGIME_TIMEFRAME_DAILY,
+            CandleIndicator.provider == REGIME_PROVIDER_UK,
+            CandleIndicator.exchange == REGIME_EXCHANGE_UK,
         ]
     else:
         conditions = [

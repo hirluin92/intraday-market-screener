@@ -33,13 +33,6 @@ from app.services.trade_plan_backtest import (
 
 logger = logging.getLogger(__name__)
 
-# Fonte unica di verità: importata da trade_plan_variant_constants (stessa lista usata
-# dal validator e dallo screener). Precedentemente hardcodata qui con solo 2 pattern,
-# causando mancato invio di alert per double_bottom/top, divergenze MACD/RSI, ecc.
-VALID_PATTERNS_1H = VALIDATED_PATTERNS_1H
-VALID_PATTERNS_5M = VALIDATED_PATTERNS_5M
-
-
 def _f_dec(x: Decimal | None) -> float | None:
     if x is None:
         return None
@@ -65,7 +58,7 @@ async def maybe_send_pattern_alerts_after_pipeline(
     if body.timeframe not in ("1h", "5m"):
         return
 
-    valid_patterns = VALID_PATTERNS_1H if body.timeframe == "1h" else VALID_PATTERNS_5M
+    valid_patterns = VALIDATED_PATTERNS_1H if body.timeframe == "1h" else VALIDATED_PATTERNS_5M
 
     try:
         ts_stmt = (

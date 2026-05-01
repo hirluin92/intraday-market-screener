@@ -64,7 +64,7 @@ class OpportunityQueryParams:
         description=(
             "Override soglia confluenza: numero minimo di pattern validati distinti "
             "nella stessa barra per promuovere il segnale a 'execute'. "
-            "Default: valore globale SIGNAL_MIN_CONFLUENCE (attualmente 2). "
+            "Default: valore globale SIGNAL_MIN_CONFLUENCE (attualmente 1). "
             "Usa 1 per disabilitare il filtro."
         ),
     )
@@ -193,12 +193,24 @@ class ExecutedSignalRow(BaseModel):
     take_profit_1: Optional[float]
     take_profit_2: Optional[float]
     quantity_tp1: Optional[float]
+    quantity_tp2: Optional[float]
     entry_order_id: Optional[int]
     tp_order_id: Optional[int]
+    tp2_order_id: Optional[int]
     sl_order_id: Optional[int]
     tws_status: str
     error: Optional[str]
     executed_at: datetime
+    # Campi di chiusura (popolati da poll_and_record_stop/tp_fills)
+    closed_at: Optional[datetime]
+    close_fill_price: Optional[float]
+    realized_r: Optional[float]
+    close_outcome: Optional[str]   # stop | tp1 | tp2 | timeout
+    close_cause: Optional[str]     # normal | overnight_gap
+    # Fill tracking
+    partial_fill: Optional[bool]
+    filled_qty: Optional[float]
+    ordered_qty: Optional[float]
 
     class Config:
         from_attributes = True

@@ -10,13 +10,14 @@ On-demand pattern backtest: forward returns vs stored candles (MVP, no persisten
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.timeframes import ALLOWED_TIMEFRAMES
 from app.models.candle import Candle
 from app.models.candle_feature import CandleFeature
 from app.models.candle_pattern import CandlePattern
@@ -32,8 +33,17 @@ from app.services.pattern_quality import (
 
 HORIZONS = (1, 3, 5, 10)
 
-# Same cap as GET /backtest/patterns — enough rows to build (pattern_name, timeframe) aggregates.
+# Per-timeframe cap per run_pattern_backtest. Con 5000 righe per timeframe si ottengono
+# aggregati affidabili su tutti i timeframe senza che 5m inonde il budget condiviso.
+# Problema precedente: limit=5000 senza filtro TF → 5m occupa ~88% del campione recente
+# (arriva 12× più velocemente di 1h e 78× di 1d) → 1h e 1d non raggiungevano n>=30.
 PATTERN_QUALITY_AGGREGATE_LIMIT = 5000
+
+# Finestra temporale per la ricerca dei pattern nel backtest.
+# 6 mesi offre campione statistico adeguato per tutti i timeframe (inclusi 1d e 1h)
+# mantenendo i benefici del chunk pruning di TimescaleDB sull'hypertable CandlePattern.
+# Usato solo quando dt_from non è esplicitamente impostato (evita conflitti con backtest OOS).
+_BACKTEST_WINDOW_DAYS = 180
 
 
 async def pattern_quality_lookup_by_name_tf(
@@ -48,25 +58,55 @@ async def pattern_quality_lookup_by_name_tf(
     dt_to: datetime | None = None,
 ) -> dict[tuple[str, str], PatternBacktestAggregateRow]:
     """
-    Reuses ``run_pattern_backtest`` aggregates keyed by (pattern_name, timeframe).
-    Filters align with screener list filters so quality matches the evaluated universe.
+    Aggregati (pattern_name, timeframe) keyed per lo scoring delle opportunità.
+
+    Quando ``timeframe`` è specificato: singola query ottimizzata per quel TF.
+
+    Quando ``timeframe`` è None: esegue una query per ciascun TF in ALLOWED_TIMEFRAMES e
+    unisce i risultati. Questo è necessario per evitare che i pattern 5m — più frequenti
+    di 12-78× rispetto a 1h/1d — saturino il limit e impediscano la costruzione degli
+    aggregati per i timeframe a minore frequenza.
 
     ``dt_from`` / ``dt_to``: se impostati, solo righe ``CandlePattern`` con timestamp in
     quell'intervallo (utile per OOS: lookup solo su train pre-cutoff).
     """
-    resp = await run_pattern_backtest(
-        session,
-        symbol=symbol,
-        exchange=exchange,
-        provider=provider,
-        asset_type=asset_type,
-        timeframe=timeframe,
-        pattern_name=None,
-        limit=PATTERN_QUALITY_AGGREGATE_LIMIT,
-        dt_from=dt_from,
-        dt_to=dt_to,
-    )
-    return {(a.pattern_name, a.timeframe): a for a in resp.aggregates}
+    if timeframe is not None:
+        resp = await run_pattern_backtest(
+            session,
+            symbol=symbol,
+            exchange=exchange,
+            provider=provider,
+            asset_type=asset_type,
+            timeframe=timeframe,
+            pattern_name=None,
+            limit=PATTERN_QUALITY_AGGREGATE_LIMIT,
+            dt_from=dt_from,
+            dt_to=dt_to,
+        )
+        return {(a.pattern_name, a.timeframe): a for a in resp.aggregates}
+
+    # timeframe=None → query sequenziale per TF con la sessione passata.
+    # Con il chunk pruning TimescaleDB (timestamp filter), ogni query impiega ~0.04s:
+    # 5 TF × 0.04s = 0.2s totale — la parallelizzazione non è più necessaria e
+    # creerebbe sessioni extra che esauriscono il connection pool durante i picchi
+    # (pipeline parallelismo=12 + prewarm + cache recompute = >45 sessioni simultanee).
+    merged: dict[tuple[str, str], PatternBacktestAggregateRow] = {}
+    for tf in ALLOWED_TIMEFRAMES:
+        resp = await run_pattern_backtest(
+            session,
+            symbol=symbol,
+            exchange=exchange,
+            provider=provider,
+            asset_type=asset_type,
+            timeframe=tf,
+            pattern_name=None,
+            limit=PATTERN_QUALITY_AGGREGATE_LIMIT,
+            dt_from=dt_from,
+            dt_to=dt_to,
+        )
+        for a in resp.aggregates:
+            merged[(a.pattern_name, a.timeframe)] = a
+    return merged
 
 
 def _f(x: Any) -> float:
@@ -89,6 +129,49 @@ def _signed_return_pct(
 
 def _is_win(signed_return: float) -> bool:
     return signed_return > 0
+
+
+def _compute_atr14(candles: list[Candle], idx: int) -> float | None:
+    """Simple 14-period ATR at bar idx. None se meno di 2 barre disponibili."""
+    start = max(0, idx - 14)
+    trs: list[float] = []
+    for i in range(start + 1, idx + 1):
+        hi = _f(candles[i].high)
+        lo = _f(candles[i].low)
+        pc = _f(candles[i - 1].close)
+        trs.append(max(hi - lo, abs(hi - pc), abs(lo - pc)))
+    return (sum(trs) / len(trs)) if trs else None
+
+
+def _stop_hit_path(
+    candles: list[Candle],
+    idx: int,
+    h: int,
+    entry: float,
+    direction: str,
+    atr: float | None,
+) -> bool:
+    """
+    True se lo stop tipico (entry ± 1.5×ATR, fallback 1.5%) viene toccato
+    da qualsiasi barra tra idx+1 e idx+h incluso.
+    Long: colpito se low <= stop_level. Short: colpito se high >= stop_level.
+    """
+    stop_dist = (1.5 * atr) if (atr is not None and atr > 0) else (entry * 0.015)
+    if direction == "bearish":
+        stop_level = entry + stop_dist
+    else:
+        stop_level = entry - stop_dist
+    end = min(idx + h + 1, len(candles))
+    for k in range(idx + 1, end):
+        lo = _f(candles[k].low)
+        hi = _f(candles[k].high)
+        if direction == "bearish":
+            if hi >= stop_level:
+                return True
+        else:
+            if lo <= stop_level:
+                return True
+    return False
 
 
 def _mean(xs: list[float]) -> float | None:
@@ -116,6 +199,13 @@ async def run_pattern_backtest(
     dt_from: datetime | None = None,
     dt_to: datetime | None = None,
 ) -> PatternBacktestResponse:
+    # Finestra temporale: abilita chunk pruning su TUTTI gli hypertable nella JOIN.
+    # Candle è l'ipertabella più grande (7M+ righe): senza filtro timestamp, il planner
+    # esegue un full scan di tutti i chunk (Parallel Seq Scan su ~50 chunk = bottleneck).
+    # _ts_cutoff è SEMPRE impostato: a dt_from (se OOS) oppure al default _BACKTEST_WINDOW_DAYS.
+    # Nota: dt_to non disabilita il cutoff inferiore — è solo un limite superiore.
+    _ts_cutoff: datetime = dt_from if dt_from is not None else datetime.now(UTC) - timedelta(days=_BACKTEST_WINDOW_DAYS)
+
     stmt = (
         select(CandlePattern, Candle.close, CandleFeature.candle_id)
         .join(CandleFeature, CandlePattern.candle_feature_id == CandleFeature.id)
@@ -134,8 +224,12 @@ async def run_pattern_backtest(
         conds.append(CandlePattern.timeframe == timeframe)
     if pattern_name is not None:
         conds.append(CandlePattern.pattern_name == pattern_name)
-    if dt_from is not None:
-        conds.append(CandlePattern.timestamp >= dt_from)
+    if _ts_cutoff is not None:
+        conds.append(CandlePattern.timestamp >= _ts_cutoff)
+        # Pruning anche sugli altri hypertable nella JOIN: il planner altrimenti scansiona
+        # tutti i loro chunk indipendentemente dal filtro su CandlePattern.
+        conds.append(CandleFeature.timestamp >= _ts_cutoff)
+        conds.append(Candle.timestamp >= _ts_cutoff)
     if dt_to is not None:
         conds.append(CandlePattern.timestamp <= dt_to)
     if conds:
@@ -148,10 +242,12 @@ async def run_pattern_backtest(
     if not rows:
         return PatternBacktestResponse(aggregates=[], patterns_evaluated=0)
 
-    series_keys: set[tuple[str, str, str]] = set()
+    # Raccoglie serie come (provider, exchange, symbol, timeframe) per filtrare anche
+    # per provider nella candle forward query → usa ix_candles_provider_exchange_symbol_tf_ts.
+    series_keys: set[tuple[str, str, str, str]] = set()
     oldest_ts: datetime | None = None
     for p, _, _ in rows:
-        series_keys.add((p.exchange, p.symbol, p.timeframe))
+        series_keys.add((p.provider, p.exchange, p.symbol, p.timeframe))
         if oldest_ts is None or p.timestamp < oldest_ts:
             oldest_ts = p.timestamp
 
@@ -163,13 +259,14 @@ async def run_pattern_backtest(
         candle_since = oldest_ts - timedelta(days=2)
 
     or_parts = [
-        and_(Candle.exchange == ex, Candle.symbol == sym, Candle.timeframe == tf)
-        for ex, sym, tf in series_keys
+        and_(Candle.provider == prov, Candle.exchange == ex, Candle.symbol == sym, Candle.timeframe == tf)
+        for prov, ex, sym, tf in series_keys
     ]
     c_stmt = select(Candle).where(or_(*or_parts))
     if candle_since is not None:
         c_stmt = c_stmt.where(Candle.timestamp >= candle_since)
     c_stmt = c_stmt.order_by(
+        Candle.provider,
         Candle.exchange,
         Candle.symbol,
         Candle.timeframe,
@@ -178,21 +275,24 @@ async def run_pattern_backtest(
     c_result = await session.execute(c_stmt)
     all_candles = list(c_result.scalars().all())
 
-    by_series: dict[tuple[str, str, str], list[Candle]] = defaultdict(list)
+    # Chiave serie include provider (per evitare confusione tra provider diversi con
+    # stesso symbol/exchange/timeframe) ma id_to_index usa la chiave senza provider
+    # perché il pattern.candle_id punta al candle specifico già del provider corretto.
+    by_series: dict[tuple[str, str, str, str], list[Candle]] = defaultdict(list)
     for c in all_candles:
-        by_series[(c.exchange, c.symbol, c.timeframe)].append(c)
+        by_series[(c.provider, c.exchange, c.symbol, c.timeframe)].append(c)
 
-    id_to_index: dict[tuple[str, str, str], dict[int, int]] = {}
+    id_to_index: dict[tuple[str, str, str, str], dict[int, int]] = {}
     for key, clist in by_series.items():
         id_to_index[key] = {c.id: i for i, c in enumerate(clist)}
 
-    # (pattern_name, timeframe) -> horizon -> rets / wins
+    # (pattern_name, timeframe) -> horizon -> rets / wins / wins_stop_aware
     acc: dict[tuple[str, str], dict[int, dict[str, list]]] = defaultdict(
-        lambda: {h: {"rets": [], "wins": []} for h in HORIZONS},
+        lambda: {h: {"rets": [], "wins": [], "wins_stop_aware": []} for h in HORIZONS},
     )
 
     for pat, entry_close, candle_id in rows:
-        key_s = (pat.exchange, pat.symbol, pat.timeframe)
+        key_s = (pat.provider, pat.exchange, pat.symbol, pat.timeframe)
         clist = by_series.get(key_s)
         idx_map = id_to_index.get(key_s)
         if not clist or not idx_map:
@@ -201,6 +301,7 @@ async def run_pattern_backtest(
         if idx is None:
             continue
         ec = _f(entry_close)
+        atr = _compute_atr14(clist, idx)
 
         for h in HORIZONS:
             j = idx + h
@@ -208,9 +309,12 @@ async def run_pattern_backtest(
                 continue
             fut_close = _f(clist[j].close)
             ret = _signed_return_pct(ec, fut_close, pat.direction)
+            is_win = _is_win(ret)
+            stop_hit = _stop_hit_path(clist, idx, h, ec, pat.direction, atr)
             gk = (pat.pattern_name, pat.timeframe)
             acc[gk][h]["rets"].append(ret)
-            acc[gk][h]["wins"].append(_is_win(ret))
+            acc[gk][h]["wins"].append(is_win)
+            acc[gk][h]["wins_stop_aware"].append(is_win and not stop_hit)
 
     aggregates: list[PatternBacktestAggregateRow] = []
     for (pn, tf) in sorted(acc.keys()):
@@ -223,6 +327,8 @@ async def run_pattern_backtest(
         avg5 = _mean(hdata[5]["rets"])
         wr3 = _win_rate(hdata[3]["wins"])
         wr5 = _win_rate(hdata[5]["wins"])
+        wr3_sa = _win_rate(hdata[3]["wins_stop_aware"])
+        wr5_sa = _win_rate(hdata[5]["wins_stop_aware"])
         pq = compute_pattern_quality_score(
             sample_size_3=n3,
             sample_size_5=n5,
@@ -264,6 +370,8 @@ async def run_pattern_backtest(
                 win_rate_3=wr3,
                 win_rate_5=wr5,
                 win_rate_10=_win_rate(hdata[10]["wins"]),
+                win_rate_stop_aware_3=wr3_sa,
+                win_rate_stop_aware_5=wr5_sa,
                 pattern_quality_score=pq,
                 win_rate_ci_lower=ci_lo,
                 win_rate_ci_upper=ci_hi,

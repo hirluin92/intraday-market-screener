@@ -136,6 +136,9 @@ MARKET_UNIVERSE_REGISTRY: tuple[MarketUniverseEntry, ...] = (
         priority=25,
         tags=frozenset({"crypto", "binance", "alt"}),
     ),
+    # SPY: abilitato per ingestion dati (regime filter EMA50). NON eseguibile:
+    # - PRIIP/KID bloccato per retail EU
+    # - già in SYMBOLS_BLOCKED_YAHOO_1H → il validator restituisce "discard"
     MarketUniverseEntry(
         symbol="SPY",
         provider=YAHOO_FINANCE_PROVIDER_ID,
@@ -143,25 +146,38 @@ MARKET_UNIVERSE_REGISTRY: tuple[MarketUniverseEntry, ...] = (
         enabled=True,
         supported_timeframes=("5m", "15m", "1h", "1d"),
         priority=20,
-        tags=frozenset({"yahoo", "etf", "us", "yahoo_etf"}),
+        tags=frozenset({"yahoo", "etf", "us", "yahoo_etf", "priip_blocked"}),
     ),
+    # Regime anchor UK: FTSE 100 index (solo 1d — solo per regime filter, NON per trading).
+    # Analogo a SPY per USA. ISF/ISF.GB via IBKR non risolve come contratto Stock.
+    MarketUniverseEntry(
+        symbol="^FTSE",
+        provider=YAHOO_FINANCE_PROVIDER_ID,
+        asset_type="index",
+        enabled=True,
+        supported_timeframes=("1d",),
+        priority=5,
+        tags=frozenset({"yahoo", "index", "uk", "uk_regime_anchor"}),
+    ),
+    # QQQ/IWM: bloccati PRIIP/KID per retail EU. Non in SCHEDULER_SYMBOLS_YAHOO_1H
+    # (explicit mode) → non schedulati, ma presenti nel registry per future reference.
     MarketUniverseEntry(
         symbol="QQQ",
         provider=YAHOO_FINANCE_PROVIDER_ID,
         asset_type="etf",
-        enabled=True,
+        enabled=False,  # PRIIP/KID: ETF US non distribuibile a retail EU
         supported_timeframes=("5m", "15m", "1h", "1d"),
         priority=20,
-        tags=frozenset({"yahoo", "etf", "us", "yahoo_etf"}),
+        tags=frozenset({"yahoo", "etf", "us", "yahoo_etf", "priip_blocked"}),
     ),
     MarketUniverseEntry(
         symbol="IWM",
         provider=YAHOO_FINANCE_PROVIDER_ID,
         asset_type="etf",
-        enabled=True,
+        enabled=False,  # PRIIP/KID: ETF US non distribuibile a retail EU
         supported_timeframes=("5m", "15m", "1h", "1d"),
         priority=20,
-        tags=frozenset({"yahoo", "etf", "us", "yahoo_etf"}),
+        tags=frozenset({"yahoo", "etf", "us", "yahoo_etf", "priip_blocked"}),
     ),
     MarketUniverseEntry(
         symbol="AAPL",
@@ -811,41 +827,44 @@ MARKET_UNIVERSE_REGISTRY: tuple[MarketUniverseEntry, ...] = (
         priority=30,
         tags=frozenset({"yahoo", "stock", "us", "yahoo_stock"}),
     ),
+    # ETF US bloccati PRIIP/KID per investitori retail EU (regolamento UE 1286/2014).
+    # Non schedulate in explicit mode (PIPELINE_SCHEDULER_SOURCE=explicit) ma disabilitate
+    # esplicitamente per evitare confusione se la modalità viene cambiata.
     MarketUniverseEntry(
         symbol="TQQQ",
         provider=YAHOO_FINANCE_PROVIDER_ID,
         asset_type="etf",
-        enabled=True,
+        enabled=False,  # PRIIP/KID: ETF US non distribuibile a retail EU
         supported_timeframes=("5m", "15m", "1h", "1d"),
         priority=20,
-        tags=frozenset({"yahoo", "etf", "us", "yahoo_etf"}),
+        tags=frozenset({"yahoo", "etf", "us", "yahoo_etf", "priip_blocked"}),
     ),
     MarketUniverseEntry(
         symbol="SQQQ",
         provider=YAHOO_FINANCE_PROVIDER_ID,
         asset_type="etf",
-        enabled=True,
+        enabled=False,  # PRIIP/KID: ETF US non distribuibile a retail EU
         supported_timeframes=("5m", "15m", "1h", "1d"),
         priority=20,
-        tags=frozenset({"yahoo", "etf", "us", "yahoo_etf"}),
+        tags=frozenset({"yahoo", "etf", "us", "yahoo_etf", "priip_blocked"}),
     ),
     MarketUniverseEntry(
         symbol="ARKK",
         provider=YAHOO_FINANCE_PROVIDER_ID,
         asset_type="etf",
-        enabled=True,
+        enabled=False,  # PRIIP/KID: ETF US non distribuibile a retail EU
         supported_timeframes=("5m", "15m", "1h", "1d"),
         priority=20,
-        tags=frozenset({"yahoo", "etf", "us", "yahoo_etf"}),
+        tags=frozenset({"yahoo", "etf", "us", "yahoo_etf", "priip_blocked"}),
     ),
     MarketUniverseEntry(
         symbol="ARKG",
         provider=YAHOO_FINANCE_PROVIDER_ID,
         asset_type="etf",
-        enabled=True,
+        enabled=False,  # PRIIP/KID: ETF US non distribuibile a retail EU
         supported_timeframes=("5m", "15m", "1h", "1d"),
         priority=20,
-        tags=frozenset({"yahoo", "etf", "us", "yahoo_etf"}),
+        tags=frozenset({"yahoo", "etf", "us", "yahoo_etf", "priip_blocked"}),
     ),
 )
 

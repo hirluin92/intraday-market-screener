@@ -105,7 +105,7 @@ def _parse_ohlcv_row(
     )
 
 
-_UPSERT_CHUNK_SIZE = 500
+_UPSERT_CHUNK_SIZE = 2_000
 
 
 async def _chunked_upsert_candles(

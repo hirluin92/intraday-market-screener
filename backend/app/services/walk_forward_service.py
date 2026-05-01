@@ -14,7 +14,7 @@ from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.candle_pattern import CandlePattern
-from app.services.backtest_simulation import run_backtest_simulation
+from app.services.simulation_service import run_backtest_simulation
 from app.services.pattern_backtest import pattern_quality_lookup_by_name_tf
 
 FoldVerdict = Literal["robusto", "degradazione_moderata", "possibile_overfitting"]

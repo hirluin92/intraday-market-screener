@@ -10,10 +10,15 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Optional
 
-from sqlalchemy import DateTime, Float, Index, Integer, Numeric, String, text
+from sqlalchemy import Boolean, DateTime, Float, Index, Integer, Numeric, String, Text, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
+
+
+# Valori ammessi per close_outcome e close_cause
+_CLOSE_OUTCOME_VALUES = ("stop", "tp1", "tp2", "timeout")
+_CLOSE_CAUSE_VALUES = ("normal", "overnight_gap")
 
 
 class ExecutedSignal(Base):
@@ -65,3 +70,34 @@ class ExecutedSignal(Base):
         server_default=text("now()"),
         nullable=False,
     )
+
+    # ── Chiusura del trade (popolata da poll_and_record_stop_fills) ────────
+    # Valori close_outcome: "stop" | "tp1" | "tp2" | "timeout"
+    # Valori close_cause:   "normal" | "overnight_gap"
+    closed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    close_fill_price: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(24, 8), nullable=True
+    )
+    realized_r: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    close_outcome: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    close_cause: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+
+    # ── Fill tracking (popolate da _handle_partial_fill_after_bracket) ────
+    partial_fill: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False, server_default="false"
+    )
+    filled_qty: Mapped[Optional[Decimal]] = mapped_column(Numeric(24, 8), nullable=True)
+    ordered_qty: Mapped[Optional[Decimal]] = mapped_column(Numeric(24, 8), nullable=True)
+
+    # ── Snapshot contesto all'entrata (autopsia post-trade) ───────────────
+    # JSON serializzato al momento dell'esecuzione per consentire analisi
+    # retrospettiva: perché il trade ha preso lo SL invece del TP?
+
+    # Contesto operativo: regime, score, confluence, ML, rationale, SPY, spread
+    entry_context_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # Indicatori tecnici alla barra di entrata: RSI, EMA, ATR, volume, VWAP,
+    # swing levels, FVG, Order Block, CVD, funding rate, RS vs SPY
+    entry_indicators_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)

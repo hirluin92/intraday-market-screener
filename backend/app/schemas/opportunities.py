@@ -201,7 +201,20 @@ class OpportunityRow(BaseModel):
     )
     current_price: float | None = Field(
         default=None,
-        description="Ultimo close candela nel DB per la serie (stesso refresh dello scheduler).",
+        description=(
+            "Prezzo di riferimento usato per il calcolo di price_stale. "
+            "Fonte preferita: prezzo live TWS (last trade o mid bid/ask, cache 30s). "
+            "Fallback: close dell'ultima candela nel DB. Vedere price_source."
+        ),
+    )
+    price_source: Literal["live_tws", "candle_close", "unavailable"] = Field(
+        default="unavailable",
+        description=(
+            "Indica la fonte di current_price: "
+            "'live_tws' = prezzo live da TWS (latenza < 30s); "
+            "'candle_close' = close dell'ultima candela completata (fino a 1h di latenza su 1h TF); "
+            "'unavailable' = nessun dato di prezzo disponibile."
+        ),
     )
     price_distance_pct: float | None = Field(
         default=None,
@@ -232,7 +245,7 @@ class OpportunityRow(BaseModel):
         default=1,
         description=(
             "Numero di pattern VALIDATI distinti attivi nella stessa barra 1h per questo simbolo. "
-            "confluence_count >= SIGNAL_MIN_CONFLUENCE (default=2) è richiesto per 'execute'. "
+            "confluence_count >= SIGNAL_MIN_CONFLUENCE (default=1) è richiesto per 'execute'. "
             "Valore 1 = singolo segnale (può restare 'monitor' per il filtro confluenza)."
         ),
     )

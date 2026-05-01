@@ -15,7 +15,7 @@ from app.schemas.backtest import (
     OOSTestSetMetrics,
     OOSValidationResponse,
 )
-from app.services.backtest_simulation import run_backtest_simulation
+from app.services.simulation_service import run_backtest_simulation
 from app.services.pattern_backtest import pattern_quality_lookup_by_name_tf
 
 OOSVerdict = Literal["robusto", "degradazione_moderata", "possibile_overfitting"]

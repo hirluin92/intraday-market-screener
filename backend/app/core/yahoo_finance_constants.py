@@ -34,13 +34,15 @@ DEFAULT_YAHOO_SYMBOLS: tuple[str, ...] = (
 )
 # Estensioni on-demand (POST pipeline/refresh con symbol=…): devono essere in YAHOO_SYMBOL_ASSET_TYPE.
 
-YahooAssetKind = Literal["stock", "etf"]
+YahooAssetKind = Literal["stock", "etf", "index"]
 
 # Classificazione strumento per ``asset_type`` su DB (SPY/QQQ/IWM = etf; resto stock).
 YAHOO_SYMBOL_ASSET_TYPE: dict[str, YahooAssetKind] = {
     "SPY": "etf",
     "QQQ": "etf",
     "IWM": "etf",
+    # Regime anchor UK: FTSE 100 index — solo 1d, solo per regime filter, NON per trading
+    "^FTSE": "index",
     "AAPL": "stock",
     "NVDA": "stock",
     "MSFT": "stock",
@@ -62,6 +64,9 @@ YAHOO_SYMBOL_ASSET_TYPE: dict[str, YahooAssetKind] = {
     "UBER": "stock",
     "SNAP": "stock",
     "RIVN": "stock",
+    "NIO": "stock",     # Onboarding apr 2026 (EV)
+    "DKNG": "stock",    # Onboarding apr 2026 (iGaming)
+    "SOUN": "stock",    # Onboarding apr 2026 (AI speech)
     "ARM": "stock",
     "SMCI": "stock",
     "DELL": "stock",

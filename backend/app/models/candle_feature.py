@@ -1,7 +1,7 @@
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Numeric, String, UniqueConstraint, text
+from sqlalchemy import Boolean, DateTime, Index, Numeric, PrimaryKeyConstraint, String, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql import func
@@ -14,15 +14,15 @@ class CandleFeature(Base):
 
     __tablename__ = "candle_features"
     __table_args__ = (
-        UniqueConstraint("candle_id", name="uq_candle_features_candle_id"),
+        PrimaryKeyConstraint("id", "timestamp", name="pk_candle_features"),
+        # FK non dichiarate: TimescaleDB non supporta FK tra hypertables.
+        # L'integrità è garantita dal pipeline applicativo.
+        UniqueConstraint("candle_id", "timestamp", name="uq_candle_features_candle_id_ts"),
         Index("ix_candle_features_exchange_symbol_timeframe_ts", "exchange", "symbol", "timeframe", "timestamp"),
     )
 
-    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    candle_id: Mapped[int] = mapped_column(
-        ForeignKey("candles.id", ondelete="CASCADE"),
-        nullable=False,
-    )
+    id: Mapped[int] = mapped_column(autoincrement=True)
+    candle_id: Mapped[int] = mapped_column(nullable=False)
     asset_type: Mapped[str] = mapped_column(
         String(16),
         nullable=False,

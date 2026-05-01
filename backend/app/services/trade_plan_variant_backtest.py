@@ -9,8 +9,9 @@ Non modifica lo screener live; solo analisi on-demand.
 
 from __future__ import annotations
 
+import asyncio
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from itertools import product
 from typing import cast
@@ -59,6 +60,7 @@ from app.services.trade_plan_engine import (
 
 ENTRY_STRATEGIES: tuple[str, ...] = ("breakout", "retest", "close")
 STOP_PROFILES: tuple[str, ...] = ("tighter", "structural", "wider")
+_BACKTEST_WINDOW_DAYS = 180  # chunk pruning TimescaleDB: stessa finestra degli altri backtest
 TP_PROFILES: dict[str, tuple[Decimal, Decimal]] = {
     label: (Decimal(str(a)), Decimal(str(b))) for label, a, b in TP_PROFILE_CONFIGS
 }
@@ -106,6 +108,8 @@ async def run_trade_plan_variant_backtest(
     variants = iter_execution_variants()
     execution_variant_count = len(variants)
 
+    _ts_cutoff = datetime.now(UTC) - timedelta(days=_BACKTEST_WINDOW_DAYS)
+
     stmt = (
         select(CandlePattern, Candle, CandleContext)
         .join(CandleFeature, CandlePattern.candle_feature_id == CandleFeature.id)
@@ -125,6 +129,12 @@ async def run_trade_plan_variant_backtest(
         conds.append(CandlePattern.timeframe == timeframe)
     if pattern_name is not None:
         conds.append(CandlePattern.pattern_name == pattern_name)
+    # Filtro temporale su tutti gli hypertable nella JOIN: abilita chunk pruning su
+    # CandlePattern, CandleFeature, Candle e CandleContext.
+    conds.append(CandlePattern.timestamp >= _ts_cutoff)
+    conds.append(CandleFeature.timestamp >= _ts_cutoff)
+    conds.append(Candle.timestamp >= _ts_cutoff)
+    conds.append(CandleContext.timestamp >= _ts_cutoff)
     if conds:
         stmt = stmt.where(and_(*conds))
     stmt = stmt.order_by(CandlePattern.timestamp.desc()).limit(limit)
@@ -149,10 +159,10 @@ async def run_trade_plan_variant_backtest(
         timeframe=timeframe,
     )
 
-    series_keys: set[tuple[str, str, str]] = set()
+    series_keys: set[tuple[str, str, str, str]] = set()
     oldest_ts: datetime | None = None
     for p, _, _ in rows:
-        series_keys.add((p.exchange, p.symbol, p.timeframe))
+        series_keys.add((p.provider, p.exchange, p.symbol, p.timeframe))
         if oldest_ts is None or p.timestamp < oldest_ts:
             oldest_ts = p.timestamp
 
@@ -161,13 +171,14 @@ async def run_trade_plan_variant_backtest(
         candle_since = oldest_ts - timedelta(days=2)
 
     or_parts = [
-        and_(Candle.exchange == ex, Candle.symbol == sym, Candle.timeframe == tf)
-        for ex, sym, tf in series_keys
+        and_(Candle.provider == prov, Candle.exchange == ex, Candle.symbol == sym, Candle.timeframe == tf)
+        for prov, ex, sym, tf in series_keys
     ]
     c_stmt = select(Candle).where(or_(*or_parts))
     if candle_since is not None:
         c_stmt = c_stmt.where(Candle.timestamp >= candle_since)
     c_stmt = c_stmt.order_by(
+        Candle.provider,
         Candle.exchange,
         Candle.symbol,
         Candle.timeframe,
@@ -176,11 +187,11 @@ async def run_trade_plan_variant_backtest(
     c_result = await session.execute(c_stmt)
     all_candles = list(c_result.scalars().all())
 
-    by_series: dict[tuple[str, str, str], list[Candle]] = defaultdict(list)
+    by_series: dict[tuple[str, str, str, str], list[Candle]] = defaultdict(list)
     for c in all_candles:
-        by_series[(c.exchange, c.symbol, c.timeframe)].append(c)
+        by_series[(c.provider, c.exchange, c.symbol, c.timeframe)].append(c)
 
-    id_to_index: dict[tuple[str, str, str], dict[int, int]] = {}
+    id_to_index: dict[tuple[str, str, str, str], dict[int, int]] = {}
     for key, clist in by_series.items():
         id_to_index[key] = {c.id: i for i, c in enumerate(clist)}
 
@@ -204,8 +215,13 @@ async def run_trade_plan_variant_backtest(
         },
     )
 
-    for pat, candle, ctx in rows:
-        key_s = (pat.exchange, pat.symbol, pat.timeframe)
+    for _pat_idx, (pat, candle, ctx) in enumerate(rows):
+        # Yield ogni 5 pattern: la simulazione è CPU-heavy (45 varianti × 68 candle
+        # con aritmetica Decimal → ~3.4ms/sim × 45 = 153ms per pattern). Con 5 pattern
+        # tra yield: max ~765ms di blocco, ben sotto il timeout health di 5s.
+        if _pat_idx % 5 == 0:
+            await asyncio.sleep(0)
+        key_s = (pat.provider, pat.exchange, pat.symbol, pat.timeframe)
         clist = by_series.get(key_s)
         idx_map = id_to_index.get(key_s)
         if not clist or not idx_map:

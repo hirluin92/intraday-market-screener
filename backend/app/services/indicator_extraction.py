@@ -32,6 +32,7 @@ from app.services.funding_rate_service import (
     fetch_funding_rates,
     funding_bias_from_rate,
 )
+from app.utils.decimal_helpers import _f
 
 logger = logging.getLogger(__name__)
 
@@ -55,17 +56,11 @@ _OR_BARS_5M = 6  # Opening range = prime 6 barre da 5m = 30 minuti
 _OR_BARS_15M = 2  # Opening range = prime 2 barre da 15m = 30 minuti
 _OR_BARS_1H = 1  # Opening range = prima barra da 1h = prima ora
 
-_UPSERT_CHUNK_SIZE = 300
+# CandleIndicator ha ~63 colonne. asyncpg usa INT16 → limite reale 32767 param.
+# 63 × 520 = 32760 ≈ limite, usare 500 per margine: 63 × 500 = 31500 < 32767.
+_UPSERT_CHUNK_SIZE = 500
 # Barre su ogni lato per swing high/low locale (5 → 5m ~25 min per lato, 1h ~5h per lato).
 _SWING_WINDOW = 5
-
-
-def _f(x: Any) -> float:
-    if x is None:
-        return 0.0
-    if isinstance(x, Decimal):
-        return float(x)
-    return float(x)
 
 
 def _calc_ema(closes: list[float], period: int) -> list[float | None]:
@@ -1019,7 +1014,7 @@ async def _chunked_upsert_indicators(
         stmt = insert(CandleIndicator).values(chunk)
         excluded = stmt.excluded
         stmt = stmt.on_conflict_do_update(
-            constraint="uq_candle_indicators_candle_id",
+            constraint="uq_candle_indicators_candle_id_ts",
             set_={
                 "asset_type": excluded.asset_type,
                 "provider": excluded.provider,

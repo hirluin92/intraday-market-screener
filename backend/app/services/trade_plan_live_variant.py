@@ -125,6 +125,8 @@ def build_live_trade_plan_for_opportunity(
     candle_low: Decimal | None,
     candle_close: Decimal | None,
     best_row: TradePlanVariantBestRow | None,
+    symbol: str = "",
+    exchange: str = "",
 ) -> tuple[
     TradePlanV1,
     str | None,
@@ -154,6 +156,8 @@ def build_live_trade_plan_for_opportunity(
             candle_high=candle_high,
             candle_low=candle_low,
             candle_close=candle_close,
+            symbol=symbol,
+            exchange=exchange,
         )
         reason = compute_trade_plan_fallback_reason(
             has_pattern=has_pattern,
@@ -184,6 +188,8 @@ def build_live_trade_plan_for_opportunity(
             stop_profile=_stop_prof(best_row.stop_profile),
             tp1_r_mult=t1,
             tp2_r_mult=t2,
+            symbol=symbol,
+            exchange=exchange,
         )
         return plan, meta_label, meta_status, meta_n, meta_exp, "variant_backtest", None
 
@@ -200,6 +206,8 @@ def build_live_trade_plan_for_opportunity(
         candle_high=candle_high,
         candle_low=candle_low,
         candle_close=candle_close,
+        symbol=symbol,
+        exchange=exchange,
     )
     reason = compute_trade_plan_fallback_reason(
         has_pattern=has_pattern,

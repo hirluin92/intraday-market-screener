@@ -1,7 +1,7 @@
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import DateTime, Index, Numeric, String, UniqueConstraint, text
+from sqlalchemy import DateTime, Index, Numeric, PrimaryKeyConstraint, String, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql import func
@@ -12,6 +12,8 @@ from app.db.base import Base
 class Candle(Base):
     __tablename__ = "candles"
     __table_args__ = (
+        # PK composite richiesta da TimescaleDB (timestamp = colonna di partizione).
+        PrimaryKeyConstraint("id", "timestamp", name="pk_candles"),
         UniqueConstraint(
             "provider",
             "exchange",
@@ -22,9 +24,10 @@ class Candle(Base):
         ),
         Index("ix_candles_exchange_symbol_timeframe", "exchange", "symbol", "timeframe"),
         Index("ix_candles_timestamp", "timestamp"),
+        Index("ix_candles_provider_exchange_symbol_tf_ts", "provider", "exchange", "symbol", "timeframe", "timestamp", postgresql_ops={"timestamp": "DESC"}),
     )
 
-    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(autoincrement=True)
     asset_type: Mapped[str] = mapped_column(
         String(16),
         nullable=False,

@@ -26,6 +26,18 @@ class PatternBacktestAggregateRow(BaseModel):
     win_rate_3: float | None = None
     win_rate_5: float | None = None
     win_rate_10: float | None = None
+    win_rate_stop_aware_3: float | None = Field(
+        default=None,
+        description=(
+            "Win rate orizzonte 3 con simulazione stop tipico (entry ± 1.5×ATR14, "
+            "fallback 1.5% del prezzo). Conta come loss se low/high delle barre "
+            "intermedie tocca il livello prima del close finale."
+        ),
+    )
+    win_rate_stop_aware_5: float | None = Field(
+        default=None,
+        description="Win rate orizzonte 5 con simulazione stop tipico (stessa logica di _3).",
+    )
     pattern_quality_score: float | None = Field(
         default=None,
         description="Heuristic 0–100 from win rate, avg return, and sample depth (horizon 5→3).",

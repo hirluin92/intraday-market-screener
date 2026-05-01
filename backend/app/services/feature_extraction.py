@@ -19,7 +19,7 @@ def _d(x: Any) -> Decimal:
     return x if isinstance(x, Decimal) else Decimal(str(x))
 
 
-_UPSERT_CHUNK_SIZE = 500
+_UPSERT_CHUNK_SIZE = 2_000
 
 
 async def _chunked_upsert_features(
@@ -35,7 +35,7 @@ async def _chunked_upsert_features(
         stmt_ins = insert(CandleFeature).values(chunk)
         excluded = stmt_ins.excluded
         stmt_ins = stmt_ins.on_conflict_do_update(
-            constraint="uq_candle_features_candle_id",
+            constraint="uq_candle_features_candle_id_ts",
             set_={
                 "asset_type": excluded.asset_type,
                 "provider": excluded.provider,

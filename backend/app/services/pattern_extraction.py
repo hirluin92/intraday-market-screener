@@ -21,6 +21,7 @@ from app.models.candle_feature import CandleFeature
 from app.models.candle_indicator import CandleIndicator
 from app.models.candle_pattern import CandlePattern
 from app.schemas.patterns import PatternExtractRequest, PatternExtractResponse
+from app.utils.decimal_helpers import _f
 
 logger = logging.getLogger(__name__)
 
@@ -179,15 +180,7 @@ _PREV_FEATURES_LOOKBACK = max(
 )
 
 
-def _f(x: Any) -> float:
-    if x is None:
-        return 0.0
-    if isinstance(x, Decimal):
-        return float(x)
-    return float(x)
-
-
-_UPSERT_CHUNK_SIZE = 500
+_UPSERT_CHUNK_SIZE = 2_000
 
 
 async def _chunked_upsert_patterns(
@@ -203,7 +196,7 @@ async def _chunked_upsert_patterns(
         stmt_ins = insert(CandlePattern).values(chunk)
         excluded = stmt_ins.excluded
         stmt_ins = stmt_ins.on_conflict_do_update(
-            constraint="uq_candle_patterns_feature_pattern",
+            constraint="uq_candle_patterns_feature_pattern_ts",
             set_={
                 "candle_context_id": excluded.candle_context_id,
                 "asset_type": excluded.asset_type,

@@ -8,12 +8,11 @@ from __future__ import annotations
 
 from typing import Literal
 
+from app.core.trade_plan_variant_constants import (
+    ALERT_HIGH_FINAL_SCORE,
+    ALERT_MIN_FINAL_SCORE,
+)
 from app.services.opportunity_final_score import compute_signal_alignment
-
-# --- Soglie score finale (stessa scala di final_opportunity_score, vedi opportunity_final_score) ---
-# Bande di riferimento: strong ≥70, moderate ≥45, weak ≥20.
-ALERT_MIN_FINAL_SCORE = 45.0  # minimo per candidato alert (stessa fascia "moderate")
-ALERT_HIGH_FINAL_SCORE = 70.0  # sopra questa soglia → priorità alta
 
 AlertLevel = Literal["alta_priorita", "media_priorita", "nessun_alert"]
 

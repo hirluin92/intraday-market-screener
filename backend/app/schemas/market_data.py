@@ -13,7 +13,7 @@ from app.core.yahoo_finance_constants import YAHOO_ALLOWED_TIMEFRAMES_SET
 class MarketDataIngestRequest(BaseModel):
     """Manual trigger for OHLCV ingestion."""
 
-    provider: Literal["binance", "yahoo_finance", "alpaca"] = Field(
+    provider: Literal["binance", "yahoo_finance", "alpaca", "ibkr"] = Field(
         default="binance",
         description=(
             "binance: ccxt crypto spot (default). "
@@ -39,6 +39,13 @@ class MarketDataIngestRequest(BaseModel):
             "Yahoo Finance 1h: fino a ~3500 barre (period=730d). "
             "Yahoo Finance 5m/15m: fino a ~60d di storico (period); su intraday il tail non taglia come su 1h/1d. "
             "Binance ccxt: max 1000 per chiamata singola senza paginazione. "
+        ),
+    )
+    exchange: str | None = Field(
+        default=None,
+        description=(
+            "Exchange di destinazione (opzionale). Usato da IBKRIngestionService per distinguere "
+            "US (None/'SMART') da UK ('LSE'). Ignorato da Yahoo Finance e Binance."
         ),
     )
 

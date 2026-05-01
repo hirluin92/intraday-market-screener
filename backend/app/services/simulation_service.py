@@ -27,10 +27,13 @@ from sqlalchemy import and_, desc, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.trade_plan_variant_constants import (
+    EQUITY_FLOOR,
     MAX_SIMULTANEOUS_TRADES,
+    PATTERN_ROWS_CAP,
     PATTERNS_BEAR_REGIME_ONLY,
     PATTERNS_BLOCKED,
     PATTERNS_BLOCKED_BY_SCOPE,
+    SIMULATION_PATTERN_HARD_CAP,
 )
 from app.models.candle import Candle
 from app.models.candle_context import CandleContext
@@ -60,12 +63,6 @@ from app.services.trade_plan_backtest import (
 )
 
 logger = logging.getLogger(__name__)
-
-PATTERN_ROWS_CAP = 50_000
-# Con pattern_row_limit<=0 nella simulazione: massimo righe lette (protezione memoria).
-SIMULATION_PATTERN_HARD_CAP = 500_000
-
-EQUITY_FLOOR = 1.0
 
 
 @dataclass

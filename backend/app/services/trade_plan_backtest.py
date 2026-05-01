@@ -16,9 +16,11 @@ MVP: niente persistenza; aggregati on-demand come ``run_pattern_backtest``.
 
 from __future__ import annotations
 
+import asyncio
+
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Literal
 
@@ -27,6 +29,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.trade_plan_variant_constants import (
     BACKTEST_TOTAL_COST_RATE_DEFAULT,
+    MAX_BARS_ENTRY_SCAN_BY_TF,
+    MAX_BARS_HOLDING_BY_TF,
     PATTERN_QUALITY_MIN_SAMPLE,
 )
 from app.models.candle import Candle
@@ -125,15 +129,13 @@ def _find_entry_bar(
     return None
 
 
-def _entry_scan_start_idx(pattern_idx: int, entry_strategy: str) -> int:
+def _entry_scan_start_idx(pattern_idx: int) -> int:
     """
-    v1.1: strategia «close» = ingresso dopo la chiusura del bar segnale → niente fill sullo stesso bar.
-    Breakout/retest: si può toccare il livello già sul bar del pattern.
+    Il pattern è identificabile solo alla chiusura della barra segnale.
+    Il fill inizia sempre dalla barra successiva: elimina il look-ahead bias
+    intra-barra che si verificava per entry_strategy «breakout» e «retest».
     """
-    es = (entry_strategy or "close").lower()
-    if es == "close":
-        return pattern_idx + 1
-    return pattern_idx
+    return pattern_idx + 1
 
 
 def _simulate_long_after_entry(
@@ -248,7 +250,7 @@ def _simulate_one(
     tp1 = _d(plan.take_profit_1)
     tp2 = _d(plan.take_profit_2)
 
-    scan_from = _entry_scan_start_idx(pattern_idx, plan.entry_strategy)
+    scan_from = _entry_scan_start_idx(pattern_idx)
     entry_bar = _find_entry_bar(candles, scan_from, entry_px, MAX_BARS_ENTRY_SCAN)
     if entry_bar is None:
         return False, None, None
@@ -283,9 +285,13 @@ def _simulate_one_with_timing(
     pattern_idx: int,
     plan: TradePlanV1,
     cost_rate: float = 0.0,
+    max_bars_entry_scan: int = MAX_BARS_ENTRY_SCAN,
+    max_bars_after_entry: int = MAX_BARS_AFTER_ENTRY,
 ) -> TradePlanExecutionResult | None:
     """
     Come ``_simulate_one`` ma con timestamp barra ingresso/uscita reali dalla serie candele.
+    ``max_bars_entry_scan``: usa MAX_BARS_ENTRY_SCAN_BY_TF per timeframe-specifici (5m=3, 1h=20).
+    ``max_bars_after_entry``: usa MAX_BARS_HOLDING_BY_TF per timeout per timeframe (5m=12, 1h=48).
     """
     if not _eligible_plan(plan):
         return None
@@ -299,8 +305,8 @@ def _simulate_one_with_timing(
     tp1 = _d(plan.take_profit_1)
     tp2 = _d(plan.take_profit_2)
 
-    scan_from = _entry_scan_start_idx(pattern_idx, plan.entry_strategy)
-    entry_bar = _find_entry_bar(candles, scan_from, entry_px, MAX_BARS_ENTRY_SCAN)
+    scan_from = _entry_scan_start_idx(pattern_idx)
+    entry_bar = _find_entry_bar(candles, scan_from, entry_px, max_bars_entry_scan)
     if entry_bar is None:
         return None
 
@@ -312,7 +318,7 @@ def _simulate_one_with_timing(
             stop=stop,
             tp1=tp1,
             tp2=tp2,
-            max_bars=MAX_BARS_AFTER_ENTRY,
+            max_bars=max_bars_after_entry,
             cost_rate=cost_rate,
         )
     else:
@@ -323,7 +329,7 @@ def _simulate_one_with_timing(
             stop=stop,
             tp1=tp1,
             tp2=tp2,
-            max_bars=MAX_BARS_AFTER_ENTRY,
+            max_bars=max_bars_after_entry,
             cost_rate=cost_rate,
         )
 
@@ -415,15 +421,33 @@ def compute_trade_plan_execution_from_pattern_row(
     idx: int,
     pq_lookup: dict[tuple[str, str], PatternBacktestAggregateRow],
     cost_rate: float,
+    max_bars_entry_scan: int | None = None,
+    max_bars_after_entry: int | None = None,
 ) -> TradePlanExecutionResult | None:
     """
     Simulazione forward con barre ingresso/uscita (stesso motore di ``_simulate_one``).
     ``None`` se piano non idoneo o ingresso non triggerato.
+    Entrambi i parametri si auto-derivano da ``pat.timeframe`` se None:
+      - max_bars_entry_scan: MAX_BARS_ENTRY_SCAN_BY_TF (5m=3, 1h=20)
+      - max_bars_after_entry: MAX_BARS_HOLDING_BY_TF   (5m=12, 1h=48)
+    Passare un valore esplicito solo per override (es. test / analisi one-off).
     """
     plan = build_trade_plan_v1_for_stored_pattern(pat, candle, ctx, pq_lookup)
     if not _eligible_plan(plan):
         return None
-    return _simulate_one_with_timing(clist, idx, plan, cost_rate=cost_rate)
+    _scan = (
+        max_bars_entry_scan
+        if max_bars_entry_scan is not None
+        else MAX_BARS_ENTRY_SCAN_BY_TF.get(pat.timeframe, MAX_BARS_ENTRY_SCAN)
+    )
+    _hold = (
+        max_bars_after_entry
+        if max_bars_after_entry is not None
+        else MAX_BARS_HOLDING_BY_TF.get(pat.timeframe, MAX_BARS_AFTER_ENTRY)
+    )
+    return _simulate_one_with_timing(clist, idx, plan, cost_rate=cost_rate,
+                                     max_bars_entry_scan=_scan,
+                                     max_bars_after_entry=_hold)
 
 
 def compute_trade_plan_pnl_from_pattern_row(
@@ -459,6 +483,8 @@ async def run_trade_plan_backtest(
     limit: int,
     cost_rate: float = BACKTEST_TOTAL_COST_RATE_DEFAULT,
 ) -> TradePlanBacktestResponse:
+    _ts_cutoff = datetime.now(UTC) - timedelta(days=_BACKTEST_WINDOW_DAYS)
+
     stmt = (
         select(CandlePattern, Candle, CandleContext)
         .join(CandleFeature, CandlePattern.candle_feature_id == CandleFeature.id)
@@ -478,6 +504,13 @@ async def run_trade_plan_backtest(
         conds.append(CandlePattern.timeframe == timeframe)
     if pattern_name is not None:
         conds.append(CandlePattern.pattern_name == pattern_name)
+    # Filtro temporale su tutti gli hypertable nella JOIN: abilita chunk pruning su
+    # CandlePattern, CandleFeature, Candle e CandleContext. Senza questi filtri il planner
+    # esegue full scan di tutti i chunk (es. 7M candles → 1.6s solo per il JOIN).
+    conds.append(CandlePattern.timestamp >= _ts_cutoff)
+    conds.append(CandleFeature.timestamp >= _ts_cutoff)
+    conds.append(Candle.timestamp >= _ts_cutoff)
+    conds.append(CandleContext.timestamp >= _ts_cutoff)
     if conds:
         stmt = stmt.where(and_(*conds))
     stmt = stmt.order_by(CandlePattern.timestamp.desc()).limit(limit)
@@ -494,42 +527,34 @@ async def run_trade_plan_backtest(
             backtest_cost_rate_rt=cost_rate,
         )
 
-    # Nota: quality lookup calcolata sull'INTERO storico disponibile (nessun dt_to).
-    # Introduce un look-ahead bias moderato: i pattern di backtest più vecchi ricevono
-    # un pq_score calcolato su campioni successivi a loro stessi. Per un'analisi
-    # rigorosa senza look-ahead usare run_simulation con use_temporal_quality=True.
-    pq_lookup = await pattern_quality_lookup_by_name_tf(
-        session,
-        symbol=symbol,
-        exchange=exchange,
-        provider=provider,
-        asset_type=asset_type,
-        timeframe=timeframe,
-    )
+    # Per-date temporal quality cache: ogni trade viene scorato usando solo dati
+    # di pattern precedenti al suo timestamp → elimina look-ahead bias nel quality score.
+    # Cache per giorno UTC: pattern sullo stesso trading day condividono un'unica query.
+    _pq_date_cache: dict[date, dict[tuple[str, str], PatternBacktestAggregateRow]] = {}
 
-    series_keys: set[tuple[str, str, str]] = set()
+    series_keys: set[tuple[str, str, str, str]] = set()
     oldest_ts: datetime | None = None
     for p, _, _ in rows:
-        series_keys.add((p.exchange, p.symbol, p.timeframe))
+        series_keys.add((p.provider, p.exchange, p.symbol, p.timeframe))
         if oldest_ts is None or p.timestamp < oldest_ts:
             oldest_ts = p.timestamp
 
     # Limite temporale: carichiamo solo candle a partire dal pattern più vecchio
     # meno un buffer conservativo (MAX_BARS_ENTRY_SCAN barre → approssimato a 2 giorni
     # per coprire qualsiasi timeframe), così evitiamo di caricare l'intero storico.
-    from datetime import timedelta
     candle_since: datetime | None = None
     if oldest_ts is not None:
         candle_since = oldest_ts - timedelta(days=2)
 
     or_parts = [
-        and_(Candle.exchange == ex, Candle.symbol == sym, Candle.timeframe == tf)
-        for ex, sym, tf in series_keys
+        and_(Candle.provider == prov, Candle.exchange == ex, Candle.symbol == sym, Candle.timeframe == tf)
+        for prov, ex, sym, tf in series_keys
     ]
     c_stmt = select(Candle).where(or_(*or_parts))
     if candle_since is not None:
         c_stmt = c_stmt.where(Candle.timestamp >= candle_since)
     c_stmt = c_stmt.order_by(
+        Candle.provider,
         Candle.exchange,
         Candle.symbol,
         Candle.timeframe,
@@ -538,11 +563,11 @@ async def run_trade_plan_backtest(
     c_result = await session.execute(c_stmt)
     all_candles = list(c_result.scalars().all())
 
-    by_series: dict[tuple[str, str, str], list[Candle]] = defaultdict(list)
+    by_series: dict[tuple[str, str, str, str], list[Candle]] = defaultdict(list)
     for c in all_candles:
-        by_series[(c.exchange, c.symbol, c.timeframe)].append(c)
+        by_series[(c.provider, c.exchange, c.symbol, c.timeframe)].append(c)
 
-    id_to_index: dict[tuple[str, str, str], dict[int, int]] = {}
+    id_to_index: dict[tuple[str, str, str, str], dict[int, int]] = {}
     for key, clist in by_series.items():
         id_to_index[key] = {c.id: i for i, c in enumerate(clist)}
 
@@ -565,8 +590,12 @@ async def run_trade_plan_backtest(
 
     eligible = 0
 
-    for pat, candle, ctx in rows:
-        key_s = (pat.exchange, pat.symbol, pat.timeframe)
+    for _pat_idx, (pat, candle, ctx) in enumerate(rows):
+        # Yield ogni 50 pattern: simulate_forward + build_plan ≈ 200µs/pattern,
+        # quindi 50 × 200µs = 10ms tra yield → event loop libero per health/requests.
+        if _pat_idx % 50 == 0:
+            await asyncio.sleep(0)
+        key_s = (pat.provider, pat.exchange, pat.symbol, pat.timeframe)
         clist = by_series.get(key_s)
         idx_map = id_to_index.get(key_s)
         if not clist or not idx_map:
@@ -575,6 +604,19 @@ async def run_trade_plan_backtest(
         if idx is None:
             continue
 
+        pat_date = pat.timestamp.date()
+        if pat_date not in _pq_date_cache:
+            dt_cutoff = datetime(pat.timestamp.year, pat.timestamp.month, pat.timestamp.day, tzinfo=UTC)
+            _pq_date_cache[pat_date] = await pattern_quality_lookup_by_name_tf(
+                session,
+                symbol=symbol,
+                exchange=exchange,
+                provider=provider,
+                asset_type=asset_type,
+                timeframe=timeframe,
+                dt_to=dt_cutoff,
+            )
+        pq_lookup = _pq_date_cache[pat_date]
         plan = build_trade_plan_v1_for_stored_pattern(pat, candle, ctx, pq_lookup)
 
         if not _eligible_plan(plan):
@@ -671,6 +713,7 @@ async def run_trade_plan_backtest(
 
 # Stesso limite dell’aggregato pattern quality: universo allineato alle opportunità.
 TRADE_PLAN_BACKTEST_LOOKUP_LIMIT = 5000
+_BACKTEST_WINDOW_DAYS = 180  # chunk pruning TimescaleDB: stessa finestra di pattern_backtest.py
 
 
 async def trade_plan_backtest_lookup_by_bucket(
