@@ -46,3 +46,41 @@ logs/
 
 # Docker
 *.local.yml
+
+# Research artefatti scratch (non in git)
+research/datasets/_tmp_candidates/
+research/datasets/_archive/
+research/datasets/_ppr_cache_5m.parquet
+research/run_output.txt
+research/eda_output_root/
+
+# Backend artefatti scratch
+backend/data/build_v2.log
+backend/data/*.txt
+backend/data/_tmp_*
+backend/eda_output/
+
+# Archive (riferimento storico, escluso da git)
+archive/
+
+# Claude scratch / local settings
+.claude/scheduled_tasks.lock
+.claude/settings.local.json
+**/.claude/scheduled_tasks.lock
+**/.claude/settings.local.json
+**/__pycache__/
+
+# Backend research subdir (large datasets, not in main repo)
+backend/research/datasets/
+backend/research/__pycache__/
+backend/research/step*_*.txt
+backend/research/run_output.txt
+
+# Backup files
+*.bak
+*.orig
+
+# Backend data scratch (output runtime non versionato)
+backend/data/*.csv
+backend/data/__pycache__/
+backend/data/SCORING_BASELINE_*.md

@@ -2,6 +2,8 @@
 
 MVP full-stack application for **intraday market screening**: ingest OHLCV (via ccxt), derive features and context, detect patterns, rank **opportunities**, optional **alert notifications** (Discord/Telegram), and a Next.js dashboard.
 
+> 📐 **Project structure**: see [`STRUCTURE.md`](./STRUCTURE.md) for the directory layout and conventions (organized May 2026).
+
 ## Project overview
 
 | Layer | Role |
