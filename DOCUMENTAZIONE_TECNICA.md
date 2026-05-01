@@ -36,6 +36,20 @@
 27. [Configurazione completa (.env)](#27-configurazione-completa-env)
 28. [Scheduler — comportamento temporale](#28-scheduler--comportamento-temporale)
 
+**Appendici:**
+- [Appendice A — Scoring formula v2 (dettaglio costanti)](#appendice-a--scoring-formula-v2-dettaglio-costanti)
+- [Appendice B — Limitazioni note e decisioni consapevoli](#appendice-b--limitazioni-note-e-decisioni-consapevoli)
+  - B.1 Festività US nel calcolo VWAP
+  - B.2 Correlazione temporale nel campione di backtest
+  - B.3 Sistema di scoring con correlazione invertita *(critico — fix validato non deployato)*
+  - B.4 Quality score non stop-aware
+  - B.5 ML scorer strutturalmente unidirezionale
+  - B.6 Alert di sistema ora differenziati *(parzialmente risolto)*
+  - B.7 Look-ahead bias nel trade plan backtest *(critico — aperto)*
+  - B.8 Formula costi frontend su distanza invece che su nozionale *(aperto)*
+- [Appendice C — Infrastruttura di validazione empirica](#appendice-c--infrastruttura-di-validazione-empirica)
+- [Appendice D — Analisi empirica dello scoring (2026-04-10)](#appendice-d--analisi-empirica-dello-scoring-2026-04-10)
+
 ---
 
 ## 1. Cos'è questa applicazione
@@ -193,7 +207,7 @@ La tabella radice. Ogni riga è una barra OHLCV univoca.
 
 ### Tabella `candle_features`
 
-Una riga per ogni candela. Calcolata da `extract_features`.
+**Una riga per ogni candela _processabile_** — non per ogni candela ingerita. La pipeline carica `limit + 1` candele, ma la prima serve solo come riferimento per il calcolo di `prev_close` e simili: non produce una riga di feature. Il risultato effettivo è `limit` righe di feature per serie `(exchange, symbol, timeframe)`. La cardinalità della tabella è quindi leggermente inferiore al numero totale di candele in `candles`. Calcolata da `extract_features`.
 
 | Campo | Tipo | Significato |
 |-------|------|-------------|
@@ -265,6 +279,8 @@ Deduplica degli alert "legacy" (inviati da `alert_service`).
 Deduplica delle notifiche post-pipeline (inviate da `alert_notifications`).
 
 **Vincolo univoco:** `(exchange, symbol, timeframe, context_timestamp)` — un alert per contesto. Se il contesto non cambia (stesso `context_timestamp`), non viene reinviata la notifica anche se il pipeline rigira.
+
+**Limitazione nota:** se il contesto non cambia (stesso timestamp) ma cambiano pattern, score, direction o entry price, la notifica non viene reinviata. Un segnale che si deteriora o migliora significativamente durante la stessa barra non genera un secondo alert. Fix futuro: includere nella dedup key anche un hash del pattern rilevante o il round del final score, per notificare variazioni significative sullo stesso contesto.
 
 ### Tabella `executed_signals`
 
@@ -502,6 +518,11 @@ RS_rolling = media_mobile(RS_ratio, 5 barre)
 RS_signal  = "outperforming" se RS_rolling > 1 else "underperforming"
 ```
 
+**Limitazione nota — denominatore zero:** se `pct_return_SPY[i] == 0` (giornata flat per SPY), `RS_ratio[i]` esplode numericamente. Barre con SPY piatto (es. apertura, festività, mercato congelato) possono produrre `RS_ratio` nell'ordine di 10^4–10^6. Non è un crash (Python tollera `inf` in float), ma inquina `RS_rolling` e di conseguenza la `pattern_strength`. Fix futuro: sostituire divisione diretta con `RS_ratio = 1.0 + (pct_symbol - pct_spy) / max(abs(pct_spy), 0.0001)` o simile.
+
+```
+```
+
 I dati SPY vengono caricati dalla stessa tabella `candle_features` per lo stesso timeframe.
 
 ### Funding Rate (Binance)
@@ -611,6 +632,8 @@ Il valore è sempre clippato a `min(1.0, ...)`.
 ### Persistenza
 
 I pattern vengono salvati nella tabella `candle_patterns` con `ON CONFLICT DO NOTHING` su `(candle_feature_id, pattern_name)`. Se il pattern per quella candela esiste già, non viene sovrascritto.
+
+**Limitazione nota:** questa scelta è efficiente (evita riscritture inutili), ma è fragile rispetto a bugfix o ricalibrazione dei detector. Se un detector viene corretto (es. la logica di `strength` o `direction` cambia), i record storici con i valori obsoleti restano nel DB e alimentano il quality score e il backtest. Impatto: il quality score storico è potenzialmente inquinato da versioni precedenti dei detector. Fix futuro: aggiungere un `version_id` al detector e fare upsert versionato, oppure prevedere una procedura di ricalcolo selettivo per pattern specifici.
 
 ---
 
@@ -1175,6 +1198,8 @@ Questo modulo prende tutte le informazioni calcolate e produce la **decisione op
    5m: controlla VALIDATED_PATTERNS_5M
    → DISCARD se non presente
 
+   **Nota — 1d non gestito esplicitamente:** il timeframe `1d` non ha una whitelist separata. Il comportamento attuale (verificare dal codice) è probabilmente un fallthrough che non entra in nessun branch, lasciando passare tutti i pattern sul daily senza validazione della lista, oppure li scarta tutti. Limitazione da chiarire nel codice.
+
 7. DIREZIONE NON DEFINITA:
    Se pattern_direction non è "bullish" o "bearish"
    → DISCARD
@@ -1196,6 +1221,8 @@ Questo modulo prende tutte le informazioni calcolate e produce la **decisione op
     - confluenza >= SIGNAL_MIN_CONFLUENCE (2) pattern per quel symbol/TF
     - pattern_strength >= SIGNAL_MIN_STRENGTH (0.70)
     → EXECUTE con rationale completo
+
+    **Nota — confluenza non formalizzata:** il requisito "2 pattern" conta tutti i pattern rilevati sulla stessa `(symbol, timeframe)` alla stessa barra, indipendentemente da direzione, famiglia o coerenza reciproca. Due pattern contraddittori (es. `engulfing_bullish` + `double_top`) soddisfano il requisito di confluenza. Non esiste validazione di coerenza direzionale tra pattern coesistenti. Limitazione nota, non fixata.
 
 11. MONITOR PER REGIME:
     Se pattern ok ma regime non favorevole
@@ -1585,6 +1612,8 @@ L'utente può filtrare per:
 - **Direzione:** Tutti / BULLISH / BEARISH
 
 Questi filtri sono applicati **lato client** sul dataset già caricato (500 righe) — non richiedono una nuova chiamata API.
+
+**Limitazione nota:** se l'API restituisce più di 500 opportunità, il client vede e filtra solo le prime 500 ordinate per score. Opportunità reali al di sotto della soglia del payload non compaiono mai nell'UI, indipendentemente dai filtri applicati. In condizioni normali (mercato con poche decine di segnali execute attivi) questo non è un problema. In condizioni di alta attività (breakout multipli in sessione US) potrebbe nascondere segnali validi.
 
 ### Ordinamento e raggruppamento
 
@@ -1993,13 +2022,24 @@ Questa sezione documenta le limitazioni conosciute del sistema che sono state va
 
 ---
 
-### B.3 Pesi del sistema di scoring non derivati statisticamente
+### B.3 Sistema di scoring con correlazione invertita rispetto all'EV operativo
 
-**Limitazione:** le costanti numeriche che governano il `final_opportunity_score` (quality bonus max, strength bonus, penalità alignment, penalità policy) sono state calibrate qualitativamente, non su un dataset di validazione con esito noto.
+**Stato:** analisi empirica completata (2026-04-10). Il problema è più profondo di quanto descritto nella formulazione originale.
 
-**Effetto pratico:** i pesi riflettono giudizio intuitivo ("il quality score dominava troppo") più che ottimizzazione empirica. Possono essere modificati in sessioni successive senza convergenza verso un ottimo misurabile.
+**Scoperta:** il dataset di validazione (`val_1h_large.csv`, n=2095 su timeframe 1h) ha dimostrato che:
+- `final_opportunity_score` globale AUC = **0.4513** (peggio del caso: il ranker è *invertito*)
+- Selezionando il **top 20% per final_score**, si ottiene avg_r = **+0.618R** — *inferiore* al random (+0.655R)
+- Il **bottom 20%** per final_score produce avg_r = **+1.010R** (il migliore dei sottoinsiemi)
 
-**Fix futuro:** costruire un dataset di 100-300 opportunità storiche con esito verificato (TP raggiunto, SL toccato, limbo) e usarlo come baseline per misurare l'effetto di ogni modifica ai pesi prima di applicarla.
+La causa è un **Simpson's paradox strutturale**: il dataset contiene due famiglie di pattern con relazioni *opposte* rispetto ai predittori:
+- **Pattern contro-trend** (rsi_div, macd_div, double_top, double_bottom): AUC interna screener ~0.44 (invertita), WR media 60-69%
+- **Pattern trend-following** (engulfing_bullish): AUC interna screener 0.614 (positiva), WR 49%
+
+La formula lineare con pesi uniformi mescola segnali opposti, producendo un ranker globalmente peggiore dei singoli componenti. Non è un problema di calibrazione: è un vincolo matematico. Qualunque vettore di pesi uniformi che migliora il ranking within-pattern contro-trend peggiora il ranking cross-pattern, e viceversa. Dimostrato empiricamente con train/test split temporale 70/30 in `scoring_v2.py`.
+
+**Fix validato empiricamente, non ancora implementato nel codice:** "Strada A" — gate binario per i pattern contro-trend, ranker solo per i trend-following. Validata su test set (dati unseen, split temporale 70/30) con avg_r = **+0.922R** (+0.284R vs random), riducendo il numero di segnali eseguiti da 2095 a ~1264. Il fix richiede modifiche a `opportunity_validator.py` — la logica è documentata in Appendice D ma non è ancora nel codice di produzione. Vedi Appendice D per la derivazione completa e Appendice C per gli strumenti di misurazione.
+
+**Fix futuro (Strada B, dopo Strada A in produzione):** LightGBM con `pattern_name` come feature categoriale — l'unica struttura che può imparare le interazioni condizionali senza il vincolo di additività lineare. La metrica di successo è avg_r@top20% > +0.655R sul test out-of-time (non AUC, che è una metrica sub-ottimale su questo dataset).
 
 ---
 
@@ -2023,13 +2063,261 @@ Questa sezione documenta le limitazioni conosciute del sistema che sono state va
 
 ---
 
-### B.6 Notifiche Telegram/Discord non differenziate per canale
+### B.6 Notifiche Telegram/Discord: alert di sistema ora differenziati
 
-**Limitazione:** gli alert di mercato (nuovi segnali) e gli alert operativi (errori TWS, skip auto-execute, degradi di sistema) usano lo stesso canale Telegram/Discord senza distinzione.
+**Stato:** ✅ **Parzialmente risolto** (2026-04-10).
 
-**Effetto pratico:** un errore operativo critico ("TWS non connesso, ordini saltati") appare nella stessa notifica dei segnali di trading normali, con priorità percepita identica.
+**Fix applicato:** aggiunta funzione `send_system_alert()` in `alert_notifications.py`. Quando `auto_execute_service.py` rileva che TWS non restituisce `NetLiquidation` e annulla l'ordine, invia immediatamente un messaggio con prefisso `🚨 SYSTEM:` su tutti i canali configurati. La funzione:
+- Non richiede sessione DB
+- Non è soggetta a `ALERT_NOTIFICATIONS_ENABLED` (i problemi di sistema si notificano sempre)
+- Logga separatamente i fallimenti per canale
 
-**Fix futuro:** aggiungere un prefisso `🚨 SYSTEM:` o un canale separato per gli alert operativi, permettendo di distinguere i "segnali di mercato da valutare" dagli "errori di sistema che richiedono intervento".
+**Ancora aperto:** la logica "notifica marcata come inviata solo se entrambi i canali rispondono OK" resta per gli alert di mercato. Se Discord risponde e Telegram no (o viceversa), la notifica non viene marcata come inviata e al prossimo ciclo viene rinviata — rischio di duplicazione sul canale funzionante. Questo comporta che un canale guasto può causare spam sul canale sano. Fix futuro: marcare come inviata per canale separatamente, non solo se tutti OK.
+
+---
+
+### B.7 Look-ahead bias nel trade plan backtest
+
+**Limitazione:** `trade_plan_backtest.py` simula l'entry a partire dalla barra del pattern stesso per le strategie `breakout` e `retest`. La `entry_price` viene costruita usando `high`, `low`, `close` della barra del pattern — informazioni disponibili solo alla chiusura della barra. Permettere il fill sulla stessa barra significa usare informazione di fine barra per simulare un'esecuzione intra-barra.
+
+**Effetto pratico:** il fill rate e l'expectancy del backtest sono potenzialmente ottimistici per i pattern con entry `breakout`/`retest`. I pattern con entry `close` (che usano la barra successiva) non sono affetti. L'entità del bias dipende da quante opportunità usano strategie breakout/retest e da quanto i prezzi si muovano intra-barra.
+
+**Stato:** noto, non fixato. La regola conservativa "stop vince su TP sulla stessa barra" mitiga parzialmente il problema, ma non risolve l'assunzione di fill intra-barra con informazione di chiusura.
+
+**Fix futuro:** per pattern con segnale sulla barra chiusa, l'entry simulata dovrebbe partire obbligatoriamente dalla barra successiva, oppure il backtest dovrebbe usare dati a granularità inferiore (tick/minuto) per verificare la raggiungibilità del prezzo di entry prima della chiusura.
+
+---
+
+### B.8 Formula costi nel frontend applica il cost_rate alla distanza di prezzo invece che al nozionale
+
+**Limitazione:** il frontend calcola net PnL come:
+```
+loss_at_stop = qty * stop_distance * (1 + cost_rate)
+profit_tp1   = qty * (tp1 - entry) * (1 - cost_rate)
+```
+
+**Problema:** `cost_rate` rappresenta commissioni/slippage come percentuale del *nozionale scambiato* (es. 0.001 = 0.1% del valore), non come percentuale della distanza di prezzo. La formula lo applica alla distanza, il che sistematicamente sottostima il costo reale, specialmente con stop stretti.
+
+**Esempio:** stock a $100, qty=10, stop_distance=$1, cost_rate=0.001.
+- Costo corretto (su nozionale): 10 × $100 × 0.001 = $1.00
+- Costo attuale (su distanza): 10 × $1 × 0.001 = $0.01 (100× inferiore)
+
+**Effetto pratico:** il net R/R mostrato nell'UI è ottimistico, specialmente per stop stretti. L'entità del bias è proporzionale al rapporto `entry_price / stop_distance`.
+
+**Nota:** esiste anche un disallineamento separato tra `cost_rate` frontend (0.001) e backend (0.0015) — questo è un problema distinto e anch'esso aperto.
+
+**Fix futuro:** calcolare i costi come `entry_price × cost_rate × qty` (round-trip su entrata + uscita) e sottrarli/aggiungerli linearmente al PnL lordo.
+
+---
+
+## Appendice C — Infrastruttura di validazione empirica
+
+Costruita durante la sessione di audit 2026-04-09/10. Permette di misurare l'effetto di qualunque modifica allo scoring prima di deployarla.
+
+### C.1 Script principali
+
+**`backend/build_validation_dataset.py`**
+
+Costruisce un CSV di opportunità storiche con esito simulato (TP raggiunto, SL toccato, timeout). Usa `build_trade_plan_v1_for_stored_pattern` e la pipeline di scoring produzione-tested.
+
+```bash
+# Dataset bilanciato cross-TF
+python build_validation_dataset.py --limit 2000
+
+# Dataset specifico per un timeframe con campioni più abbondanti
+python build_validation_dataset.py --timeframe 1h --max-per-bucket 500 --limit 5000
+```
+
+Schema CSV: `opportunity_id, symbol, timeframe, pattern_name, direction, pattern_timestamp, entry_price, stop_price, tp1_price, tp2_price, pattern_strength, pattern_quality_score, screener_score, signal_alignment, final_score, outcome, pnl_r, bars_to_entry, bars_to_exit, entry_filled`
+
+**`backend/analyze_validation_dataset.py`**
+
+Esegue 10 sezioni di analisi sul dataset:
+
+| Sezione | Contenuto |
+|---|---|
+| 1, 1b | Expectancy per TF e per (TF × pattern), con Wilson CI |
+| 2 | AUC pattern_quality_score vs win (Mann-Whitney) |
+| 3 | WR filtrata su simulated_execute |
+| 4, 4b | Correlazione WR(pattern) vs pq(pattern), Spearman stratificato per TF |
+| 5 | AUC di tutti i componenti del final_score |
+| 6 | AUC per pattern_name (inversione uniforme o condizionale?) |
+| 7 | AUC screener_score stratificato per direzione (long vs short) |
+| 8 | Confronto v1 vs v2 con train/test split temporale 70/30 |
+| 9 | Sub-sistema "pattern che funzionano" + avg_r@K + Spearman(score, pnl_r) |
+| 10 | **Validazione Strada A**: gate binario contro-trend + ranker trend-following |
+| Bonus | Distribuzione temporale per trimestre (bias di periodo) |
+
+```bash
+python analyze_validation_dataset.py --dataset data/val_1h_large.csv
+```
+
+**`backend/scoring_v2.py`**
+
+Implementazione di una formula alternativa con pesi per-pattern, derivati empiricamente dalla sezione 6. Usato nella sezione 8 per dimostrare che formule lineari con pesi per-pattern non superano il sistema v1 a causa del Simpson's paradox (vedi Appendice D).
+
+**`backend/data/SCORING_BASELINE_2026-04-10.md`**
+
+Documento immutabile che registra tutti i risultati misurati, le baseline numeriche e le decisioni metodologiche. Da aggiornare ogni volta che si effettua una misurazione significativa, **mai** modificare i dati storici — solo aggiungere nuove sezioni.
+
+### C.2 Dataset disponibili
+
+| File | n | Timeframe | Note |
+|---|---|---|---|
+| `data/validation_baseline_2026-04-10.csv` | 834 | cross-TF (1h+1d+5m) | Prima baseline stabile |
+| `data/val_1h_large.csv` | 2095 | 1h | Dataset principale, campioni abbondanti |
+| `data/val_1d_large.csv` | 881 | 1d | Dataset daily |
+
+### C.3 Metriche di valutazione corrette
+
+**Metrica primaria:** `avg_r@top20%` — avg_r dei trade selezionati dal top 20% dei segnali ordinati per score del modello, calcolato sul test out-of-time.
+
+**Target:** avg_r@top20% > **+0.655R** (random baseline, sistema attuale = +0.618R)
+
+**Ceiling teorico:** avg_r@top20% → +1.010R (= bottom 20% attuale, i segnali migliori scartati dallo scoring corrente)
+
+**Metrica secondaria:** `Spearman(score, pnl_r)` — correlazione monotona tra punteggio assegnato e rendimento reale in R. Sistema attuale = −0.121 (invertito). Target: Spearman > 0.
+
+**Metrica da NON usare come primaria:** AUC globale. Su questo dataset, i pattern con AUC interna più alta (engulfing, trend-following) hanno performance operativa più bassa. Ottimizzare AUC può portare a modelli statisticamente migliori ma operativamente inutili.
+
+---
+
+## Appendice D — Analisi empirica dello scoring (2026-04-10)
+
+### D.1 Contesto
+
+Dopo la costruzione dell'infrastruttura di validazione (Appendice C), il dataset `val_1h_large.csv` (n=2095) è stato analizzato in dettaglio. Questa sezione documenta le scoperte principali, la loro interpretazione, e le decisioni che ne derivano.
+
+### D.2 AUC dei componenti del final_score (sezione 5)
+
+| Componente | AUC (1h, n=2095) | Interpretazione |
+|---|---|---|
+| `pattern_strength` | **0.451** ▼ | Invertito — strength alta = meno probabile vincere |
+| `screener_score` | **0.470** ▼ | Invertito — score alto = meno probabile vincere |
+| `pattern_quality_score` | 0.525 ~ | Debole positivo, l'unico con segno giusto |
+| **final_score (composito)** | **0.451** ▼ | Peggiore del miglior singolo componente |
+
+Con n=2095, CI dell'AUC ≈ ±0.011. I valori 0.451 e 0.470 sono definitivamente sotto 0.50: non è rumore.
+
+La combinazione *distrugge* valore: il final_score composito è peggiore del solo `pq` (0.525).
+
+### D.3 AUC per pattern (sezione 6) — inversione condizionale
+
+L'inversione globale è **condizionale**, non strutturale. La variazione tra pattern è enorme:
+
+| Pattern | AUC(strength) | AUC(screener) | Famiglia |
+|---|---|---|---|
+| rsi_divergence_bull | ▼0.41 | ▼0.44 | contro-trend |
+| rsi_divergence_bear | ▼0.44 | ▼0.44 | contro-trend |
+| macd_divergence_bear | 0.48 | ▼0.43 | contro-trend |
+| macd_divergence_bull | 0.51 | ▼0.40 | contro-trend |
+| double_top | 0.55 | ▼0.45 | contro-trend |
+| double_bottom | ▼0.47 | 0.48 | contro-trend |
+| compression_to_expansion | 0.55 | 0.50 | misto |
+| rsi_momentum_continuation | 0.52 | 0.53 | trend-following |
+| **engulfing_bullish** | **★0.57** | **★0.61** | trend-following |
+
+Il pattern è strutturale: tutti i pattern contro-trend hanno screener AUC < 0.47, il pattern trend-following (engulfing_bullish) ha screener AUC 0.61.
+
+**Perché:** i pattern contro-trend scattano *contro* il trend primario. Screener alto = trend forte = condizione avversa per questi pattern. La correlazione inversa è fisiologica, non un errore.
+
+### D.4 Diagnosi: Simpson's Paradox
+
+La situazione è un caso classico di [Simpson's paradox](https://en.wikipedia.org/wiki/Simpson%27s_paradox):
+- **Dentro ogni pattern contro-trend:** screener alto → win basso (inversione, livello within)
+- **Tra pattern:** pattern contro-trend (screener tipicamente alto nei loro momenti di attivazione) → WR 60-69% (positivo, livello between)
+
+Una formula lineare con pesi fissi deve *scegliere* uno dei due livelli — non può ottimizzarli entrambi. Il sistema v1 ha implicitamente scelto il livello between (preserva il segnale cross-pattern), ma al costo di invertire il segnale within-pattern.
+
+**Dimostrazione empirica con `scoring_v2.py`:**
+
+Il tentativo di usare pesi negativi per screener/strength sui pattern contro-trend ha prodotto (train/test split 70/30):
+- All'interno di ogni pattern: AUC migliora (da 0.44 verso 0.50) ✓
+- Nell'aggregato: AUC peggiora da 0.4793 a 0.4135 sul test set ✗
+
+La somma dei miglioramenti per-pattern è positiva, ma l'AUC aggregata crolla — lo stesso fenomeno Simpson che stavamo cercando di correggere si riproduce nel risultato.
+
+**Conclusione:** formule lineari con pesi per-pattern non possono risolvere questo problema. Il vincolo è matematico, non di calibrazione.
+
+### D.5 Struttura del ranking — curva a U rovesciata
+
+| Selezione | avg_r | vs random |
+|---|---|---|
+| Bottom 20% (i "peggiori" secondo il sistema) | +1.010R | +0.355R |
+| Top 10% (i "migliori") | +0.776R | +0.121R |
+| **ALL — random** | **+0.655R** | — |
+| Top 20% | +0.618R | −0.037R |
+| Top 50% | +0.514R | −0.141R |
+| Top 30% | +0.505R | −0.150R |
+
+Il sistema produce una curva a U rovesciata: i segnali con score estremo (molto alto o molto basso) sono i migliori operativamente; quelli con score mediano sono i peggiori. I valori estremi emergono quando un solo tipo di predittore domina nettamente (puro trend-following o puro contro-trend); i valori mediani emergono quando i predittori si cancellano a vicenda.
+
+`Spearman(final_score, pnl_r) = −0.121` — correlazione monotona invertita, statisticamente significativa (CI ≈ [−0.16, −0.08]).
+
+### D.6 Soluzione: Strada A
+
+**Razionale:** i pattern contro-trend (rsi_div, macd_div, double_top, double_bottom) hanno AUC interna ~0.44 = rumore. Non esiste segnale da estrarre dal ranking interno. Ma la loro WR media è alta (60-69%) su *qualunque* sottoinsieme. Il gate binario (rilevato + passa validator = esegui) è l'approccio ottimale.
+
+Per `engulfing_bullish` il ranker funziona (AUC interna 0.63). Il top 20% del pool di engulfing per final_score ha performance migliore della media.
+
+**Stima sul training set:**
+
+| Variante Strada A | n trade | avg_r | vs random |
+|---|---|---|---|
+| Contro-trend tutti + engulfing top 10% | 1235 | +0.903R | +0.249R |
+| Contro-trend tutti + engulfing top 20% | 1264 | +0.905R | +0.250R |
+| Contro-trend tutti + engulfing top 30% | 1293 | +0.894R | +0.239R |
+
+**Verifica sul TEST SET (dati unseen, ultimi 30%):**
+
+| Variante | n trade | avg_r test | vs random test |
+|---|---|---|---|
+| Engulfing top 10% | 369 | +0.930R | **+0.291R** |
+| Engulfing top 20% | 376 | +0.922R | **+0.284R** |
+| Engulfing top 30% | 383 | +0.900R | **+0.261R** |
+
+L'upgrade è più forte nel test set che nel train: **nessuna evidenza di overfitting**. La validazione è robusta.
+
+**Implementazione target (`opportunity_validator.py`):**
+
+```python
+CONTRO_TREND_PATTERNS = {
+    "rsi_divergence_bull", "rsi_divergence_bear",
+    "macd_divergence_bull", "macd_divergence_bear",
+    "double_top", "double_bottom",
+}
+RANKING_NEEDED_PATTERNS = {"engulfing_bullish"}
+
+# Dopo tutti i gate esistenti del validator:
+if pattern_name in CONTRO_TREND_PATTERNS:
+    # Ranker interno è rumore. WR media alta su qualunque sottoinsieme.
+    decision = "execute"
+elif pattern_name in RANKING_NEEDED_PATTERNS:
+    # Ranker funziona (AUC interna 0.63). Esegui solo top decile/quintile.
+    if final_score >= soglia_percentile_90:
+        decision = "execute"
+    else:
+        decision = "monitor"
+else:
+    # Pattern non ancora classificato empiricamente → comportamento v1
+    ...
+```
+
+### D.7 Cosa viene dopo Strada A (Strada B — LightGBM)
+
+**Quando:** dopo che Strada A è in produzione e ha accumulato dati freschi.
+
+**Perché non prima:** LightGBM non può estrarre ranking da un segnale che non esiste (AUC interna 0.44 dei contro-trend = rumore puro). Anche un modello ottimale replica sostanzialmente Strada A. Il costo di implementazione e gestione (training, versioning, monitoring) supera il valore aggiunto marginale rispetto a Strada A.
+
+**Se e quando:** LightGBM diventa interessante solo se rivela che i pattern contro-trend hanno un segnale latente che la sezione 6 non riesce a vedere (es. interazioni di terzo ordine tra pattern_name, timeframe e regime). Feature importance post-training è la diagnostica da fare subito dopo l'addestramento.
+
+**Feature set per LightGBM:**
+- `pattern_name` e `timeframe` come categoriali (LightGBM nativo — *non* encoding ordinale)
+- `screener_score`, `pattern_strength`, `pattern_quality_score`, `signal_alignment`
+- `market_regime`, `volatility_regime`, `candle_expansion` (come categoriali)
+- Target: win/loss binario (robusto al rumore)
+
+**Metrica di successo:** avg_r@top20% > +0.905R sul test out-of-time (baseline Strada A). Non AUC.
 
 ---
 

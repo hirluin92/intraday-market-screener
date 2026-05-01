@@ -1,13 +1,28 @@
 services:
   postgres:
-    image: postgres:16-alpine
+    image: timescale/timescaledb:latest-pg16
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
-    shm_size: '512mb'
+    shm_size: '2gb'
+    command: >
+      postgres
+      -c shared_preload_libraries=timescaledb
+      -c shared_buffers=512MB
+      -c work_mem=64MB
+      -c effective_cache_size=2GB
+      -c maintenance_work_mem=256MB
+      -c checkpoint_completion_target=0.9
+      -c wal_buffers=16MB
+      -c max_connections=100
+      -c random_page_cost=1.1
+      -c effective_io_concurrency=200
+      -c timescaledb.telemetry_level=off
+      -c max_locks_per_transaction=256
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      - ./docker/init:/docker-entrypoint-initdb.d
     ports:
       - "${POSTGRES_PORT:-5432}:5432"
     healthcheck:
@@ -52,11 +67,11 @@ services:
     environment:
       - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://localhost:8000}
       # Turbopack richiede più memoria su Windows volume mounts
-      - NODE_OPTIONS=--max-old-space-size=4096
+      - NODE_OPTIONS=--max-old-space-size=8192
     deploy:
       resources:
         limits:
-          memory: 4g
+          memory: 8g
 
 volumes:
   postgres_data:
